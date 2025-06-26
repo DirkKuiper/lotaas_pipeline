@@ -41,38 +41,16 @@ SAP_LOG_DIR="logs/${OBSID}_${SAP}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SAP_LOG_DIR"
 echo "Using SAP log directory: $SAP_LOG_DIR"
 
-# Step 2: Download array
-echo "Submitting download array job for $NUM_URLS URLs..."
-DOWNLOAD_ARRAY_JOB_ID=$(sbatch --parsable \
+# Step 2 & 3: Downloading and Downsampling
+DL_DS_JOB_ID=$(sbatch --parsable \
   --array=0-$(($NUM_URLS - 1)) \
-  --output="$SAP_LOG_DIR/download_array/%A_%a.log" \
-  --error="$SAP_LOG_DIR/download_array/%A_%a.log" \
-  bin/submit_downloads.slurm "$CLEANED_INPUT_FILE" "$MACAROON")
-
-if [ -z "$DOWNLOAD_ARRAY_JOB_ID" ]; then
-    echo "Error: Failed to submit download jobs."
-    exit 1
-fi
-
-echo "Download array job ID: $DOWNLOAD_ARRAY_JOB_ID"
-
-# Step 3: Downsampling
-DOWNSAMPLE_JOB_ID=$(sbatch --parsable \
-  --dependency=afterok:$DOWNLOAD_ARRAY_JOB_ID \
-  --output="$SAP_LOG_DIR/downsample/%j.log" \
-  --error="$SAP_LOG_DIR/downsample/%j.log" \
-  bin/downsample_array.slurm "$SAP_DIR")
-
-if [ -z "$DOWNSAMPLE_JOB_ID" ]; then
-    echo "Error: Failed to submit downsampling job."
-    exit 1
-fi
-
-echo "Downsampling submitted with job ID: $DOWNSAMPLE_JOB_ID"
+  --output="$SAP_LOG_DIR/dl_downsample/%A_%a.log" \
+  --error="$SAP_LOG_DIR/dl_downsample/%A_%a.log" \
+  bin/download_and_downsample_array.slurm "$CLEANED_INPUT_FILE" "$MACAROON")
 
 # Step 4: Flatfielding
 FLATFIELD_JOB_ID=$(sbatch --parsable \
-  --dependency=afterok:$DOWNSAMPLE_JOB_ID \
+  --dependency=afterok:$DL_DS_JOB_ID \
   --output="$SAP_LOG_DIR/flatfield/%j.log" \
   --error="$SAP_LOG_DIR/flatfield/%j.log" \
   bin/run_flatfielding.slurm "$SAP_DIR")
