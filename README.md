@@ -1,48 +1,65 @@
 # LOTAAS Reprocessing Pipeline
 
-This repository contains a modular, SLURM-based pipeline for processing LOTAAS beams using Singularity containers. It handles downloading, downsampling, flatfielding, GPU/CPU-based candidate generation, and post-processing.
+This repository contains a modular, SLURM-based pipeline for processing LOTAAS beams using Singularity containers. It handles staging, downloading, downsampling, flatfielding, GPU/CPU-based candidate generation, and post-processing.
 
 ## Directory Overview
 
-lotaas_reprocessing/
+```
+lotaas_pipeline/
 
 ├── bin/                  # SLURM job scripts for each pipeline stage
-
 ├── containers/           # Singularity image and definition
-
 ├── preproc/              # Preprocessing scripts
-
 ├── pipeline/             # Core pipeline stages
-
 ├── postproc/             # Post-detection classification and plotting
-
-├── lotaas_reprocessing/  # Core Python package modules
-
-├── master.sh             # Master orchestration script
-
+├── staging/              # Python staging script + temporary staging files
+├── logs/                 # Master logs for each pipeline run
+├── master_pipeline.slurm # Master orchestration script
 ├── settings.yaml         # Shared config
-
-├── graveyard/            # Old or unused files
-
+└── graveyard/            # Old or unused files
+```
 
 ## Usage
 
 ### 1. Prepare input
 
-After staging beams via the LOFAR LTA StageIt system, download:
-- The WebDAV URL list (e.g., `L1268206.txt`)
-- The associated macaroon file (e.g., `L1268206.macaroon`)
+Create a plain-text list of SRM URLs for the beams you want to process:
 
-Place both in the project root.
+```
+srm_list.txt
+```
 
-### 2. Run the full pipeline
+Each line should be a full SRM URL (e.g., starting with `srm://srm.grid.sara.nl/...`).
 
-Submit the master orchestration script:
+### 2. Submit the full pipeline (automatic staging)
 
-`sbatch master.sh L1268206.txt L1268206.macaroon`
+To run the full pipeline including automatic staging via the LTA API:
+
+```bash
+sbatch master_pipeline.slurm srm_list.txt
+```
 
 This will:
-- Clean the input file
-- Submit the download job array
-- Launch sequential jobs for downsampling, flatfielding, GPU and CPU processing
-- Organize all logs by OBSID and SAP
+
+- Create a dedicated staging directory (with `webdav_links.txt` and `macaroon.txt`)
+- Clean and sort the WebDAV input file
+- Submit job arrays for downloading and downsampling
+- Launch sequential jobs for flatfielding and full GPU+CPU processing
+- Move all logs into a permanent location within the data directory
+- Clean up the temporary staging folder
+
+**For more information on the staging API, see the [`staging/README.md`](staging/README.md).**
+
+### Optional: Skip staging if already complete
+
+If the data is already staged and you have the WebDAV links and macaroon token:
+
+```bash
+sbatch master_pipeline.slurm webdav_links.txt "<macaroon_token>"
+```
+
+Note:
+- `webdav_links.txt` should be the file containing the staged WebDAV download URLs (one per line)
+- The second argument is the macaroon token provided as a raw string (enclosed in quotes)
+
+The pipeline will detect the presence of two arguments and skip the staging step accordingly.

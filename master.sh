@@ -10,28 +10,35 @@
 echo "Starting master pipeline at $(date)"
 mkdir -p logs
 
-SRM_LIST="$1"
-if [ -z "$SRM_LIST" ]; then
-    echo "Usage: sbatch master_pipeline.slurm <srm_list.txt>"
-    exit 1
-fi
+# MODE A: Automatic staging
+if [ "$#" -eq 1 ]; then
+    SRM_LIST="$1"
+    STAGE_DIR="staging/$(basename "$SRM_LIST" .txt)_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$STAGE_DIR"
 
-STAGE_DIR="staging/$(basename "$SRM_LIST" .txt)_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$STAGE_DIR"
+    echo "Running staging step..."
+    python3 staging/stage_and_extract.py "$SRM_LIST" "$STAGE_DIR"
+    if [ $? -ne 0 ]; then
+        echo "Staging failed. Exiting."
+        exit 1
+    fi
 
-echo "Running staging step..."
-python3 staging/stage_and_extract.py "$SRM_LIST" "$STAGE_DIR"
-if [ $? -ne 0 ]; then
-    echo "Staging failed. Exiting."
-    exit 1
-fi
+    INPUT_FILE="$STAGE_DIR/webdav_links.txt"
+    MACAROON_FILE="$STAGE_DIR/macaroon.txt"
+    MACAROON=$(cat "$MACAROON_FILE")
 
-INPUT_FILE="$STAGE_DIR/webdav_links.txt"
-MACAROON_FILE="$STAGE_DIR/macaroon.txt"
-MACAROON=$(cat "$MACAROON_FILE")
+    CLEANUP_STAGE_DIR="$STAGE_DIR"
 
-if [ -z "$INPUT_FILE" ] || [ -z "$MACAROON" ]; then
-    echo "Usage: sbatch master_pipeline.slurm <input_file> <macaroon_token>"
+# MODE B: Manual input of already staged files
+elif [ "$#" -eq 2 ]; then
+    INPUT_FILE="$1"
+    MACAROON="$2"
+    CLEANUP_STAGE_DIR=""  # No staging dir to clean up
+
+else
+    echo "Usage:"
+    echo "  sbatch master_pipeline.slurm <srm_list.txt>"
+    echo "  sbatch master_pipeline.slurm <webdav_links.txt> <macaroon.txt>"
     exit 1
 fi
 
@@ -94,19 +101,18 @@ fi
 
 echo "Unified pipeline submitted with job ID: $FULL_PIPELINE_JOB_ID"
 
-# Step 6: Log-moving job
-echo "Submitting log-moving job after full pipeline completes..."
-MOVE_LOGS_JOB_ID=$(sbatch --parsable \
+# Step 6: Cleanup job
+echo "Submitting cleanup job after full pipeline completes..."
+CLEANUP_JOB_ID=$(sbatch --parsable \
   --dependency=afterok:$FULL_PIPELINE_JOB_ID \
-  --output="$SAP_LOG_DIR/move_logs/%j.log" \
-  --error="$SAP_LOG_DIR/move_logs/%j.log" \
-  bin/move_logs.slurm "$SAP_DIR" "$SAP_LOG_DIR")
+  --output="$SAP_LOG_DIR/cleanup/%j.log" \
+  --error="$SAP_LOG_DIR/cleanup/%j.log" \
+  bin/cleanup.slurm "$SAP_DIR" "$SAP_LOG_DIR" "$CLEANUP_STAGE_DIR")
 
-if [ -z "$MOVE_LOGS_JOB_ID" ]; then
-    echo "Error: Failed to submit log-moving job."
+if [ -z "$CLEANUP_JOB_ID" ]; then
+    echo "Error: Failed to submit cleanup job."
     exit 1
 fi
 
-echo "Log-moving job submitted with job ID: $MOVE_LOGS_JOB_ID"
-
+echo "Cleanup job submitted with job ID: $CLEANUP_JOB_ID"
 echo "Master pipeline script completed."
