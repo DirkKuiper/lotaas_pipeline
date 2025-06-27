@@ -88,74 +88,74 @@ def main():
             fil, block_size, masked_frac, rfi_averaging_factor
         )
 
-        # # Save RFI diagnostic plot
-        # rfi_plot_path = os.path.join(output_dir, f"{base_fname}_rfi_diagnostic_plot.png")
-        # plotting.rfi_diagnostic_plot(
-        #     masked_data, data, mask, t, nu, rfi_averaging_factor,
-        #     filename=fname, save_path=rfi_plot_path, observation_info=observation_info
-        # )
+        # Save RFI diagnostic plot
+        rfi_plot_path = os.path.join(output_dir, f"{base_fname}_rfi_diagnostic_plot.png")
+        plotting.rfi_diagnostic_plot(
+            masked_data, data, mask, t, nu, rfi_averaging_factor,
+            filename=fname, save_path=rfi_plot_path, observation_info=observation_info
+        )
 
-        # # Replace masked values with Gaussian noise
-        # print("Replacing masked data with noise...")
-        # noise = np.random.normal(np.nanmean(masked_data), np.nanstd(masked_data), masked_data.shape)
-        # masked_data[mask] = noise[mask]
+        # Replace masked values with Gaussian noise
+        print("Replacing masked data with noise...")
+        noise = np.random.normal(np.nanmean(masked_data), np.nanstd(masked_data), masked_data.shape)
+        masked_data[mask] = noise[mask]
 
-        # # Detrend each channel with 2nd degree polynomial
-        # print("Detrending...")
-        # detrended_data = np.zeros_like(masked_data)
-        # time_axis = np.arange(masked_data.shape[1])
-        # for i in range(masked_data.shape[0]):
-        #     p = Polynomial.fit(time_axis, masked_data[i, :], deg=2)
-        #     detrended_data[i, :] = masked_data[i, :] - p(time_axis)
-        # masked_data = detrended_data
+        # Detrend each channel with 2nd degree polynomial
+        print("Detrending...")
+        detrended_data = np.zeros_like(masked_data)
+        time_axis = np.arange(masked_data.shape[1])
+        for i in range(masked_data.shape[0]):
+            p = Polynomial.fit(time_axis, masked_data[i, :], deg=2)
+            detrended_data[i, :] = masked_data[i, :] - p(time_axis)
+        masked_data = detrended_data
 
-        # # Generate minimal FITS-like header for metadata
-        # hdr = fits.Header()
-        # hdr["MJD-OBS"] = fil.header["tstart"]
-        # hdr["CRPIX1"] = 0
-        # hdr["CRVAL1"] = 0
-        # hdr["CDELT1"] = tsamp
-        # hdr["CRPIX2"] = 0
-        # hdr["CRVAL2"] = fil.header["foff"] * fil.header["nchans"] + fil.header["fch1"]
-        # hdr["CDELT2"] = np.abs(fil.header["foff"])
+        # Generate minimal FITS-like header for metadata
+        hdr = fits.Header()
+        hdr["MJD-OBS"] = fil.header["tstart"]
+        hdr["CRPIX1"] = 0
+        hdr["CRVAL1"] = 0
+        hdr["CDELT1"] = tsamp
+        hdr["CRPIX2"] = 0
+        hdr["CRVAL2"] = fil.header["foff"] * fil.header["nchans"] + fil.header["fch1"]
+        hdr["CDELT2"] = np.abs(fil.header["foff"])
 
-        # # Loop over dedispersion plan
-        # dedispersion_plan = settings["dedispersion_plan"]
-        # dm_trials_dir = os.path.join(output_dir, "DM_trials")
-        # os.makedirs(dm_trials_dir, exist_ok=True)
+        # Loop over dedispersion plan
+        dedispersion_plan = settings["dedispersion_plan"]
+        dm_trials_dir = os.path.join(output_dir, "DM_trials")
+        os.makedirs(dm_trials_dir, exist_ok=True)
 
-        # for entry in dedispersion_plan:
-        #     dms = np.arange(entry["low_dm"], entry["high_dm"], entry["ddm"])
-        #     print(f"Dedispersing DMs {entry['low_dm']} to {entry['high_dm']} (step {entry['ddm']})")
+        for entry in dedispersion_plan:
+            dms = np.arange(entry["low_dm"], entry["high_dm"], entry["ddm"])
+            print(f"Dedispersing DMs {entry['low_dm']} to {entry['high_dm']} (step {entry['ddm']})")
 
-        #     I_f_dm = fourier_domain_dedispersion(
-        #         masked_data, hdr["CDELT1"] * entry["downsample"], nu, dms
-        #     )
-        #     I_f_dm = I_f_dm[:, ::entry["downsample"]]
-        #     I_t_dm = np.real(np.fft.irfft(I_f_dm, axis=1)).astype("float32")
+            I_f_dm = fourier_domain_dedispersion(
+                masked_data, hdr["CDELT1"] * entry["downsample"], nu, dms
+            )
+            I_f_dm = I_f_dm[:, ::entry["downsample"]]
+            I_t_dm = np.real(np.fft.irfft(I_f_dm, axis=1)).astype("float32")
 
-        #     for i, dm in enumerate(dms):
-        #         dm_filename = os.path.join(dm_trials_dir, f"{base_fname}_DM{dm:.1f}")
-        #         I_t_dm[i].tofile(f"{dm_filename}.dat")
-        #         with open(f"{dm_filename}.inf", "w") as inf:
-        #             inf.write(f" Data file name without suffix          =  {os.path.basename(dm_filename)}\n")
-        #             inf.write(f" Telescope used                         =  {fil.header.get('telescope', 'LOFAR')}\n")
-        #             inf.write(f" Instrument used                        =  {fil.header.get('instrument', 'Unknown')}\n")
-        #             inf.write(f" Object being observed                  =  {fil.header.get('source_name', 'Unknown')}\n")
-        #             inf.write(f" J2000 Right Ascension (hh:mm:ss.ssss)  =  {fil.header.get('src_raj', '00:00:00.0000')}\n")
-        #             inf.write(f" J2000 Declination     (dd:mm:ss.ssss)  =  {fil.header.get('src_dej', '+00:00:00.0000')}\n")
-        #             inf.write(f" Epoch of observation (MJD)             =  {fil.header.get('tstart', 0.0)}\n")
-        #             inf.write(f" Dispersion measure (cm-3 pc)           =  {dm:.2f}\n")
-        #             inf.write(f" Number of bins in the time series      =  {I_t_dm.shape[1]}\n")
-        #             inf.write(f" Width of each time series bin (sec)    =  {hdr['CDELT1'] * entry['downsample']:.6f}\n")
-        #             inf.write(f" Total bandwidth (MHz)                  =  {np.abs(fil.header['foff']) * fil.header['nchans']:.6f}\n")
-        #             inf.write(f" Number of channels                     =  {fil.header['nchans']}\n")
-        #             inf.write(f" Channel bandwidth (MHz)                =  {np.abs(fil.header['foff']):.6f}\n")
+            for i, dm in enumerate(dms):
+                dm_filename = os.path.join(dm_trials_dir, f"{base_fname}_DM{dm:.1f}")
+                I_t_dm[i].tofile(f"{dm_filename}.dat")
+                with open(f"{dm_filename}.inf", "w") as inf:
+                    inf.write(f" Data file name without suffix          =  {os.path.basename(dm_filename)}\n")
+                    inf.write(f" Telescope used                         =  {fil.header.get('telescope', 'LOFAR')}\n")
+                    inf.write(f" Instrument used                        =  {fil.header.get('instrument', 'Unknown')}\n")
+                    inf.write(f" Object being observed                  =  {fil.header.get('source_name', 'Unknown')}\n")
+                    inf.write(f" J2000 Right Ascension (hh:mm:ss.ssss)  =  {fil.header.get('src_raj', '00:00:00.0000')}\n")
+                    inf.write(f" J2000 Declination     (dd:mm:ss.ssss)  =  {fil.header.get('src_dej', '+00:00:00.0000')}\n")
+                    inf.write(f" Epoch of observation (MJD)             =  {fil.header.get('tstart', 0.0)}\n")
+                    inf.write(f" Dispersion measure (cm-3 pc)           =  {dm:.2f}\n")
+                    inf.write(f" Number of bins in the time series      =  {I_t_dm.shape[1]}\n")
+                    inf.write(f" Width of each time series bin (sec)    =  {hdr['CDELT1'] * entry['downsample']:.6f}\n")
+                    inf.write(f" Total bandwidth (MHz)                  =  {np.abs(fil.header['foff']) * fil.header['nchans']:.6f}\n")
+                    inf.write(f" Number of channels                     =  {fil.header['nchans']}\n")
+                    inf.write(f" Channel bandwidth (MHz)                =  {np.abs(fil.header['foff']):.6f}\n")
 
-        # # Run matched filtering
-        # matched_filter.run_all_matched_filtering(
-        #     dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan
-        # )
+        # Run matched filtering
+        matched_filter.run_all_matched_filtering(
+            dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan
+        )
 
         # Cluster and classify detected candidates
         all_candidates = os.path.join(output_dir, "all_detected_candidates.cands")
@@ -170,7 +170,7 @@ def main():
 
         # Clean up temporary DM trial files
         print("Cleaning up temporary files...")
-        # shutil.rmtree(dm_trials_dir, ignore_errors=True)
+        shutil.rmtree(dm_trials_dir, ignore_errors=True)
         print("Pipeline completed successfully.")
 
     except Exception as e:
