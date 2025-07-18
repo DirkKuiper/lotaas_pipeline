@@ -149,7 +149,6 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
             cand.dedispersed = normalise(cand.dedispersed)
 
-            # **Restore Proper `dmt` Handling**
             # Reshape DM-Time array
             time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
             cand.decimate(key="dmt", axis=1, pad=True, decimate_factor=time_decimate_factor, mode="median")
@@ -202,6 +201,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             dm_time_axis = np.arange(cand.dmt.shape[1]) * cand.tsamp + tcand
             dm_values = np.linspace(dm - 5, dm + 5, dm_size)
             time_series = np.sum(cand.dedispersed, axis=1)
+            time_series = time_series * (snr / np.max(time_series))
             time_axis = np.arange(len(time_series)) * cand.tsamp + tcand
 
             # Figure
@@ -258,6 +258,25 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             out_path = os.path.join(output_dir,f"DM{dm}_Width{width}_SNR{snr}.png")
             plt.savefig(out_path,dpi=300)
             plt.close()
+
+            # Send Slack message for new real candidate
+            try:
+                response = client.files_upload_v2(
+                    channels=CHANNEL_ID,
+                    initial_comment=(
+                        f"*New candidate detected!*\n"
+                        f"{beam_id}\n"
+                        f"DM = {dm:.2f} pc/cm³\n"
+                        f"S/N = {snr:.2f}\n"
+                        f"Width = {width} samples\n"
+                        f"FETCH max probability = {highest_prob:.2f}"
+                    ),
+                    file=out_path,
+                    title=os.path.basename(out_path)
+                )
+                print(f"Slack image sent for candidate DM={dm:.2f}, SNR={snr:.2f}")
+            except SlackApiError as e:
+                print(f"Slack error when sending candidate image: {e}")
 
         # Insert and announce only the best redetections per pulsar
         for psr_name, info in redetections_best.items():
