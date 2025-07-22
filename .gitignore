@@ -168,3 +168,4 @@ logs/
 *.sif
 *.txt
 *.txt_cleaned
+*.db
