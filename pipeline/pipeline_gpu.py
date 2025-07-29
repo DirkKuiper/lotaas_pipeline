@@ -154,19 +154,6 @@ if __name__ == "__main__":
     hdr["CRVAL2"] = fil.header["foff"] * fil.header["nchans"] + fil.header["fch1"]
     hdr["CDELT2"] = np.abs(fil.header["foff"])
 
-    # # Write out masked file
-    # print("Writing out masked filterbank as FITS")
-    # outfname = f"{prefix}_masked.fits"
-    # fits.PrimaryHDU(data=masked_data, header=hdr).writeto(outfname, overwrite=True)
-
-    # # **Write out masked filterbank file**  
-    # masked_fil_fname = os.path.join(f"{base_fname}_masked.fil")
-    # print(f"Writing masked filterbank to {masked_fil_fname}")
-
-    # **Create a new filterbank file with the same header**  
-    # header = fil.header
-    # filterbank.create_filterbank_file(masked_fil_fname, header, spectra=masked_data.T, mode="write", nbits=32)
-
     # Extract the dedispersion plan from settings
     dedispersion_plan = settings["dedispersion_plan"]
 
