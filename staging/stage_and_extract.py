@@ -31,7 +31,7 @@ print(f"Stage ID: {stageid}")
 # Poll for staging completion
 tries = 0
 max_tries = 1440 # Maximum wait one day for data to be staged
-final_states = {"success", "failed", "aborted"}
+final_states = {"success", "failed", "aborted", "partial success"}
 
 while True:
     status = get_status(stageid)
