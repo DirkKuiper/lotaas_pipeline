@@ -115,11 +115,13 @@ fi
 
 # Step 6: Cleanup job
 echo "Submitting cleanup job after full pipeline completes..."
+MASTER_LOG_PATH="logs/master_pipeline_${SLURM_JOB_ID}.log"
+
 CLEANUP_JOB_ID=$(sbatch --parsable \
   --dependency=afterok:$CPU_JOB_ID \
   --output="$SAP_LOG_DIR/cleanup/%j.log" \
   --error="$SAP_LOG_DIR/cleanup/%j.log" \
-  bin/cleanup.slurm "$SAP_DIR" "$SAP_LOG_DIR" "$CLEANUP_STAGE_DIR")
+  bin/cleanup.slurm "$SAP_DIR" "$SAP_LOG_DIR" "$CLEANUP_STAGE_DIR" "$MASTER_LOG_PATH")
 
 if [ -z "$CLEANUP_JOB_ID" ]; then
     echo "Error: Failed to submit cleanup job."
