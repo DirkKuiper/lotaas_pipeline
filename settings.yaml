@@ -1,0 +1,35 @@
+rfi_block_size: 1000
+rfi_averaging_factor: 128
+dedispersion_plan:
+  - low_dm: 0.000
+    high_dm: 150.600
+    ddm: 0.10
+    downsample: 1
+  - low_dm: 150.600
+    high_dm: 289.800
+    ddm: 0.30
+    downsample: 2
+  - low_dm: 289.800
+    high_dm: 511.800
+    ddm: 0.50
+    downsample: 4
+  - low_dm: 511.800
+    high_dm: 1010.800
+    ddm: 1.00
+    downsample: 8
+  - low_dm: 1010.800
+    high_dm: 2014.800
+    ddm: 2.00
+    downsample: 16
+  - low_dm: 2014.800
+    high_dm: 4469.800
+    ddm: 5.00
+    downsample: 32
+  - low_dm: 4469.800
+    high_dm: 8939.800
+    ddm: 10.00
+    downsample: 64
+  - low_dm: 8939.800
+    high_dm: 10019.800
+    ddm: 20.00
+    downsample: 128
