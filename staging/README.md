@@ -39,7 +39,7 @@ This will:
 
 ## Required: Authentication File
 
-Make sure to create a `.stagingrc` file in the `staging/` directory with the following format:
+Make sure to create a `.stagingrc` file in the `staging/` directory with your personal token.
 
 
 
