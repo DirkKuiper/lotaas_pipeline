@@ -1,0 +1,66 @@
+Bootstrap: docker
+From: nvidia/cuda:12.6.0-devel-ubuntu20.04
+
+%labels
+    Author Dirk: d.kuiper@uva.nl
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    export TMPDIR=/var/tmp  # Avoids the /tmp permission issue in Singularity
+
+    mkdir -p /var/tmp  # Just in case
+
+    # Install Python and build tools
+    apt-get update && apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-setuptools \
+        python3-dev \
+        build-essential \
+        gfortran \
+        libgfortran5 \
+        f2c \
+        pkg-config \
+        git \
+        wget \
+        vim \
+        unzip
+
+    # Upgrade pip
+    python3 -m pip install --upgrade pip
+
+    # Install essential Python libraries
+    pip3 install \
+        numpy \
+        cupy-cuda12x \
+        matplotlib \
+        scipy \
+        tqdm \
+        astropy \
+        PyYAML \
+        iqrm \
+        pandas \
+        riptide-ffa \
+        schema
+
+    # Clone and install fetch
+    git clone https://github.com/devanshkv/fetch.git /opt/fetch
+    cd /opt/fetch
+    pip3 install -r requirements.txt
+    python3 setup.py install
+
+    # Install pygedm from GitHub
+    pip3 install git+https://github.com/telegraphic/pygedm.git
+
+%runscript
+    # Run a sample Python script to verify CuPy and fetch installation
+    echo "Running Python with CuPy and fetch support"
+    python3 -c "import cupy; print('CuPy version:', cupy.__version__)"
+    python3 -c "import fetch; print('fetch installed and ready to use')"
+    python3 -c "import pygedm; print('✅ pygedm installed')"
+
+%help
+    This container provides a Python environment with the following:
+    - GPU-accelerated libraries like CuPy for matched filtering.
+    - Support for RFI mitigation and dynamic spectrum analysis using IQRM and other tools.
+    - `fetch` installed for pulsar and transient data analysis.
