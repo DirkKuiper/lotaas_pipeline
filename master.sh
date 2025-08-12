@@ -37,8 +37,8 @@ elif [ "$#" -eq 2 ]; then
 
 else
     echo "Usage:"
-    echo "  sbatch master_pipeline.slurm <srm_list.txt>"
-    echo "  sbatch master_pipeline.slurm <webdav_links.txt> <macaroon.txt>"
+    echo "  sbatch master.sh <srm_list.txt>"
+    echo "  sbatch master.sh <webdav_links.txt> <macaroon.txt>"
     exit 1
 fi
 
@@ -86,25 +86,37 @@ fi
 
 echo "Flatfielding submitted with job ID: $FLATFIELD_JOB_ID"
 
-# Step 5: Unified GPU+CPU pipeline
-echo "Submitting unified full pipeline after flatfielding completes..."
-FULL_PIPELINE_JOB_ID=$(sbatch --parsable \
+# Step 5a: GPU pipeline
+echo "Submitting GPU pipeline after flatfielding completes..."
+GPU_JOB_ID=$(sbatch --parsable \
   --dependency=afterok:$FLATFIELD_JOB_ID \
-  --output="$SAP_LOG_DIR/full_pipeline/%j.log" \
-  --error="$SAP_LOG_DIR/full_pipeline/%j.log" \
-  bin/run_full_pipeline.slurm "$SAP_DIR")
+  --output="$SAP_LOG_DIR/gpu_pipeline/%j.log" \
+  --error="$SAP_LOG_DIR/gpu_pipeline/%j.log" \
+  bin/run_gpu_pipeline.slurm "$SAP_DIR")
 
-if [ -z "$FULL_PIPELINE_JOB_ID" ]; then
-    echo "Error: Failed to submit full pipeline job."
+if [ -z "$GPU_JOB_ID" ]; then
+    echo "Error: Failed to submit GPU pipeline job."
     exit 1
 fi
 
-echo "Unified pipeline submitted with job ID: $FULL_PIPELINE_JOB_ID"
+# Step 5b: CPU pipeline (array job, e.g. 0-72 for 73 beams)
+echo "Submitting CPU pipeline array job after GPU pipeline completes..."
+CPU_JOB_ID=$(sbatch --parsable \
+  --dependency=afterok:$GPU_JOB_ID \
+  --array=0-72 \
+  --output="$SAP_LOG_DIR/cpu_pipeline/%A_%a.log" \
+  --error="$SAP_LOG_DIR/cpu_pipeline/%A_%a.log" \
+  bin/run_cpu_pipeline.slurm "$SAP_DIR")
+
+if [ -z "$CPU_JOB_ID" ]; then
+    echo "Error: Failed to submit CPU pipeline job."
+    exit 1
+fi
 
 # Step 6: Cleanup job
 echo "Submitting cleanup job after full pipeline completes..."
 CLEANUP_JOB_ID=$(sbatch --parsable \
-  --dependency=afterok:$FULL_PIPELINE_JOB_ID \
+  --dependency=afterok:$CPU_JOB_ID \
   --output="$SAP_LOG_DIR/cleanup/%j.log" \
   --error="$SAP_LOG_DIR/cleanup/%j.log" \
   bin/cleanup.slurm "$SAP_DIR" "$SAP_LOG_DIR" "$CLEANUP_STAGE_DIR")

@@ -15,17 +15,36 @@ if [ -z "$SAP_DIR" ] || [ -z "$SAP_LOG_DIR" ]; then
     exit 1
 fi
 
-echo "Moving logs from $SAP_LOG_DIR to $SAP_DIR/logs/"
+echo "Starting cleanup for SAP directory: $SAP_DIR"
+echo "--------------------------------------------"
 
+# === Clean beam directories (keep only 'output/')
+for BEAM_DIR in "$SAP_DIR"/B???; do
+    if [ -d "$BEAM_DIR" ]; then
+        echo "Cleaning beam directory: $BEAM_DIR"
+        for ITEM in "$BEAM_DIR"/*; do
+            if [[ "$ITEM" == "$BEAM_DIR/output" ]]; then
+                continue
+            fi
+            echo "Removing: $ITEM"
+            rm -rf "$ITEM"
+        done
+    fi
+done
+
+# === Move logs to inside SAP_DIR
+echo "Moving logs from $SAP_LOG_DIR to $SAP_DIR/logs/"
 mkdir -p "$SAP_DIR/logs"
 rsync -a "$SAP_LOG_DIR/" "$SAP_DIR/logs/"
 
-echo "Removing intermediate log directory $SAP_LOG_DIR"
+# === Remove intermediate log directory
+echo "Removing intermediate log directory: $SAP_LOG_DIR"
 rm -rf "$SAP_LOG_DIR"
 
+# === Optional: Remove staging directory
 if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
-    echo "Removing staging directory $STAGE_DIR"
+    echo "Removing staging directory: $STAGE_DIR"
     rm -rf "$STAGE_DIR"
 fi
 
-echo "Cleanup job completed."
+echo "Cleanup job completed at $(date)"
