@@ -142,21 +142,35 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             f_start, delta_f, nchan = fil.fch1, fil.foff, fil.nchans
             frequency_axis = np.flip(f_start + np.arange(nchan) * delta_f)
 
-            cand.decimate("ft", 0, True, max(1, width//2), "median")
-            cand.dedispersed = crop(cand.dedispersed, cand.dedispersed.shape[0]//2 - time_size//2, time_size, 0)
-            cand.decimate("ft", 1, True, cand.dedispersed.shape[1]//freq_size, "median")
-            cand.resize("ft", freq_size, 1, True, "constant")
+            # Decimate, crop, and normalize FT
+            cand.decimate(key="ft", axis=0, pad=True, decimate_factor=max(1, width // 2), mode="median")
+            cand.dedispersed = crop(cand.dedispersed, cand.dedispersed.shape[0] // 2 - time_size // 2, time_size, 0)
+            cand.decimate(key="ft", axis=1, pad=True, decimate_factor=cand.dedispersed.shape[1] // freq_size, mode="median")
+            cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
             cand.dedispersed = normalise(cand.dedispersed)
 
-            time_decimate_factor = max(1, width//2)
-            cand.decimate("dmt", 1, True, time_decimate_factor, "median")
-            cand.dmt = crop(cand.dmt, cand.dmt.shape[1]//2 - time_size//2, time_size, 1)
-            cand.dmt = crop(cand.dmt, cand.dmt.shape[0]//2 - dm_size//2, dm_size, 0)
-            cand.resize("dmt", dm_size, 1, True, "constant")
+            # **Restore Proper `dmt` Handling**
+            # Reshape DM-Time array
+            time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
+            cand.decimate(key="dmt", axis=1, pad=True, decimate_factor=time_decimate_factor, mode="median")
+
+            # Crop along the time axis
+            crop_start_sample_dmt = cand.dmt.shape[1] // 2 - time_size // 2
+            cand.dmt = crop(cand.dmt, crop_start_sample_dmt, time_size, axis=1)
+
+            # Crop along the DM axis
+            crop_start_dm = cand.dmt.shape[0] // 2 - dm_size // 2
+            cand.dmt = crop(cand.dmt, crop_start_dm, dm_size, axis=0)
+
+            # Resize
+            cand.resize(key="dmt", size=dm_size, axis=1, anti_aliasing=True, mode="constant")
+
+            # Normalize `dmt`
             cand.dmt = normalise(cand.dmt)
 
-            X = np.reshape(cand.dedispersed, (1,256,256,1))
-            Y = np.reshape(cand.dmt, (1,256,256,1))
+            # Prepare data for FETCH classification
+            X = np.reshape(cand.dedispersed, (1, 256, 256, 1))
+            Y = np.reshape(cand.dmt, (1, 256, 256, 1))  # Ensure `dmt` is included
 
             fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
                            for name, model in fetch_models.items()}
