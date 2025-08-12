@@ -5,13 +5,30 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 
 echo "Starting master pipeline at $(date)"
 mkdir -p logs
 
-INPUT_FILE="$1"
-MACAROON="$2"
+SRM_LIST="$1"
+if [ -z "$SRM_LIST" ]; then
+    echo "Usage: sbatch master_pipeline.slurm <srm_list.txt>"
+    exit 1
+fi
+
+STAGE_DIR="staging/$(basename "$SRM_LIST" .txt)_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$STAGE_DIR"
+
+echo "Running staging step..."
+python3 staging/stage_and_extract.py "$SRM_LIST" "$STAGE_DIR"
+if [ $? -ne 0 ]; then
+    echo "Staging failed. Exiting."
+    exit 1
+fi
+
+INPUT_FILE="$STAGE_DIR/webdav_links.txt"
+MACAROON_FILE="$STAGE_DIR/macaroon.txt"
+MACAROON=$(cat "$MACAROON_FILE")
 
 if [ -z "$INPUT_FILE" ] || [ -z "$MACAROON" ]; then
     echo "Usage: sbatch master_pipeline.slurm <input_file> <macaroon_token>"
