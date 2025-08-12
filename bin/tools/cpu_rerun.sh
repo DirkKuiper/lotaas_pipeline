@@ -101,6 +101,17 @@ jid_cpu=$(sbatch --parsable \
   bin/run_cpu_pipeline.slurm "$SAP_DIR")
 echo "CPU rerun array job: $jid_cpu"
 
+# Figure out the original master log for this SAP (so cleanup can move it)
+SAP_TAG=$(basename "$SAP_LOG_DIR")   # e.g. L1285512_SAP002_20250811_001637
+
+# Find the newest master log that mentions this SAP_TAG
+MASTER_LOG_PATH=$(ls -t logs/master_pipeline_*.log 2>/dev/null \
+  | xargs -r grep -l -m1 "$SAP_TAG" || true)
+
+if [[ -z "${MASTER_LOG_PATH:-}" ]]; then
+  echo "Warning: could not find original master log mentioning $SAP_TAG; cleanup will run without moving it."
+fi
+
 # Chain cleanup after CPU success
 echo "Submitting cleanup afterok:$jid_cpu ..."
 jid_clean=$(sbatch --parsable \
@@ -108,7 +119,7 @@ jid_clean=$(sbatch --parsable \
   --output="$CLEAN_LOG_DIR/%j.log" \
   --error="$CLEAN_LOG_DIR/%j.log" \
   --dependency=afterok:$jid_cpu \
-  bin/cleanup.slurm "$SAP_DIR" "$SAP_LOG_DIR" "" "manual_rerun_${jid_cpu}.log")
+  bin/cleanup.slurm "$SAP_DIR" "$SAP_LOG_DIR" "" "${MASTER_LOG_PATH:-}")
 echo "Cleanup job: $jid_clean"
 divider
 
