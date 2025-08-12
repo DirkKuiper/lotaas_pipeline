@@ -9,6 +9,7 @@ lotaas_pipeline/
 
 ├── bin/                  # SLURM job scripts for each pipeline stage
 ├── containers/           # Singularity image and definition
+├── lotaas_reprocessing/  # Core modules
 ├── preproc/              # Preprocessing scripts
 ├── pipeline/             # Core pipeline stages
 ├── postproc/             # Post-detection classification and plotting
