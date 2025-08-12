@@ -37,7 +37,7 @@ Each line should be a full SRM URL (e.g., starting with `srm://srm.grid.sara.nl/
 To run the full pipeline including automatic staging via the LTA API:
 
 ```bash
-sbatch master_pipeline.slurm srm_list.txt
+sbatch master.sh srm_list.txt
 ```
 
 This will:
@@ -56,7 +56,7 @@ This will:
 If the data is already staged and you have the WebDAV links and macaroon token:
 
 ```bash
-sbatch master_pipeline.slurm webdav_links.txt "<macaroon_token>"
+sbatch master.sh webdav_links.txt "<macaroon_token>"
 ```
 
 Note:
