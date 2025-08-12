@@ -15,7 +15,7 @@ lotaas_pipeline/
 ├── postproc/             # Post-detection classification and plotting
 ├── staging/              # Python staging script + temporary staging files
 ├── logs/                 # Master logs for each pipeline run
-├── master_pipeline.slurm # Master orchestration script
+├── master.sh             # Master orchestration script
 ├── settings.yaml         # Shared config
 └── graveyard/            # Old or unused files
 ```
