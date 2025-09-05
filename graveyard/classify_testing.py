@@ -19,8 +19,8 @@ from astropy import units as u
 # Import DB utils
 from db.db_utils import insert_beam_run, update_beam_run, insert_detection
 
-# Import our LOTAAS matcher helpers
-from lotaas_matcher import load_reference, lotaas_within, match_redetection
+# Import LOTAAS matching
+from lotaas_reprocessing.lotaas_matcher import load_reference, lotaas_within, match_redetection
 
 SLACK_BOT_TOKEN = "xoxb-513966140291-8603128801253-OIZMLciSFmNefi4An84YDNKE"
 CHANNEL_ID = "C08HHTN8CTG"
@@ -28,6 +28,10 @@ CHANNEL_ID = "C08HHTN8CTG"
 client = WebClient(token=SLACK_BOT_TOKEN, ssl=ssl._create_unverified_context())
 logger = logging.getLogger(__name__)
 
+# --- test mode toggles (env) ---
+TEST_FORCE_PLOTS = True
+TEST_FORCE_SLACK = False
+print(f"[DEBUG] TEST_FORCE_PLOTS={TEST_FORCE_PLOTS}, TEST_FORCE_SLACK={TEST_FORCE_SLACK}")
 def send_slack_message(text):
     try:
         client.chat_postMessage(channel=CHANNEL_ID, text=text)
@@ -102,7 +106,12 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             # Check redetection against LOTAAS reference
             m = match_redetection(dm_cand=dm, local_ref=local_lotaas,
-                                  dm_abs_tol=5.0, dm_rel_tol=0.10)
+                      dm_abs_tol=5.0, dm_rel_tol=0.10)
+
+            # test-mode flag for downstream plotting/labels
+            is_redetection_test = False
+            redetect_meta = None
+
             if m["is_match"]:
                 psr_name = m["psr"]
                 if psr_name not in redetections_best or snr > redetections_best[psr_name]["snr"]:
@@ -113,9 +122,19 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                         "sep_arcsec": m.get("sep_arcsec"),
                         "dm_ref": m.get("dm_ref"),
                     }
-                continue  # Skip further processing for redetections
+                if not TEST_FORCE_PLOTS:
+                    # normal behavior: skip redetections
+                    continue
+                else:
+                    # test mode: continue through to plotting branch, annotate as redetection
+                    is_redetection_test = True
+                    redetect_meta = {
+                        "psr": psr_name,
+                        "dm_ref": m.get("dm_ref"),
+                        "sep_arcsec": m.get("sep_arcsec"),
+                    }
 
-            # --- Classify non-redetections with FETCH ---
+            # Classify non-redetections with FETCH
             time_size, freq_size, dm_size = 256, 256, 256
 
             cand = Candidate(
@@ -171,14 +190,26 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             if highest_prob <= 0.5:
                 continue
 
-            insert_detection(
-                beam_id=beam_id,
-                candidate_dm=dm,
-                snr=snr,
-                width_samples=width,
-                detection_type="candidate",
-                classification_probability=highest_prob
-            )
+            if not is_redetection_test:
+                insert_detection(
+                    beam_id=beam_id,
+                    candidate_dm=dm,
+                    snr=snr,
+                    width_samples=width,
+                    detection_type="candidate",
+                    classification_probability=highest_prob
+                )
+            else:
+                # optional: record as a test redetection preview
+                insert_detection(
+                    beam_id=beam_id,
+                    candidate_dm=dm,
+                    snr=snr,
+                    width_samples=width,
+                    detection_type="known_pulsar_test",
+                    pulsar_name=redetect_meta["psr"] if redetect_meta else None,
+                    classification_probability=highest_prob
+                )
 
             # Galactic context
             l = skycoord.galactic.l.deg
@@ -208,6 +239,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             ax_obs.text(0.5, 0.5,
                         f"{beam_id} DM={dm:.2f} Width={width} S/N={snr:.2f}",
                         ha="center", va="center", fontsize=10, family="monospace")
+            if is_redetection_test and redetect_meta:
+                ax_obs.text(0.5, 0.15,
+                    f"[TEST MODE] Redetection of {redetect_meta['psr']}  "
+                    + (f"ref DM={redetect_meta['dm_ref']:.2f}  " if redetect_meta.get("dm_ref") is not None else "")
+                    + (f"sep={redetect_meta['sep_arcsec']:.0f}\"" if redetect_meta.get("sep_arcsec") is not None else ""),
+                    ha="center", va="center", fontsize=9, family="monospace", color="crimson"
+                )
 
             ax_fetch = fig.add_subplot(gs[1, 0:5]); ax_fetch.axis("off")
             ax_fetch.text(0.5, 0.5,
@@ -253,22 +291,25 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             # Slack notify for new candidate
             try:
-                client.files_upload_v2(
-                    channels=CHANNEL_ID,
-                    initial_comment=(
-                        f"*New candidate detected!*\n"
-                        f"{beam_id}\n"
-                        f"DM = {dm:.2f} pc/cm³\n"
-                        f"S/N = {snr:.2f}\n"
-                        f"Width = {width} samples\n"
-                        f"FETCH max probability = {highest_prob:.2f}"
-                    ),
-                    file=out_path,
-                    title=os.path.basename(out_path)
-                )
-                print(f"Slack image sent for candidate DM={dm:.2f}, SNR={snr:.2f}")
+                if (not is_redetection_test) or (is_redetection_test and TEST_FORCE_SLACK):
+                    client.files_upload_v2(
+                        channels=CHANNEL_ID,
+                        initial_comment=(
+                            ("*New candidate detected!*\n" if not is_redetection_test else "*[TEST] Redetection preview*\n")
+                            + f"{beam_id}\n"
+                            + f"DM = {dm:.2f} pc/cm³\n"
+                            + f"S/N = {snr:.2f}\n"
+                            + f"Width = {width} samples\n"
+                            + f"FETCH max probability = {highest_prob:.2f}"
+                            + (f"\nMatched {redetect_meta['psr']} (ref {redetect_meta['dm_ref']:.2f}, "
+                            f"sep {redetect_meta['sep_arcsec']:.0f}\")" if is_redetection_test and redetect_meta else "")
+                        ),
+                        file=out_path,
+                        title=os.path.basename(out_path)
+                    )
+                    print(f"Slack image sent for {'candidate' if not is_redetection_test else 'TEST redetection'} DM={dm:.2f}, SNR={snr:.2f}")
             except SlackApiError as e:
-                print(f"Slack error when sending candidate image: {e}")
+                print(f"Slack error when sending image: {e}")
 
         # Insert and announce best redetections per pulsar
         for psr_name, info in redetections_best.items():

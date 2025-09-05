@@ -23,9 +23,9 @@ from astropy.io import fits
 from numpy.polynomial import Polynomial
 
 from lotaas_reprocessing import (
-    filterbank, plotting, cluster,
-    classify
+    filterbank, plotting, cluster
 )
+from graveyard import classify_testing as classify
 
 # Attempt to import GPU-accelerated modules
 use_gpu = False
@@ -122,46 +122,46 @@ def main():
         # Loop over dedispersion plan
         dedispersion_plan = settings["dedispersion_plan"]
         dm_trials_dir = os.path.join(output_dir, "DM_trials")
-        os.makedirs(dm_trials_dir, exist_ok=True)
+        # os.makedirs(dm_trials_dir, exist_ok=True)
 
-        for entry in dedispersion_plan:
-            dms = np.arange(entry["low_dm"], entry["high_dm"], entry["ddm"])
-            print(f"Dedispersing DMs {entry['low_dm']} to {entry['high_dm']} (step {entry['ddm']})")
+        # for entry in dedispersion_plan:
+        #     dms = np.arange(entry["low_dm"], entry["high_dm"], entry["ddm"])
+        #     print(f"Dedispersing DMs {entry['low_dm']} to {entry['high_dm']} (step {entry['ddm']})")
 
-            I_f_dm = fourier_domain_dedispersion(
-                masked_data, hdr["CDELT1"] * entry["downsample"], nu, dms
-            )
-            I_f_dm = I_f_dm[:, ::entry["downsample"]]
-            I_t_dm = np.real(np.fft.irfft(I_f_dm, axis=1)).astype("float32")
+        #     I_f_dm = fourier_domain_dedispersion(
+        #         masked_data, hdr["CDELT1"] * entry["downsample"], nu, dms
+        #     )
+        #     I_f_dm = I_f_dm[:, ::entry["downsample"]]
+        #     I_t_dm = np.real(np.fft.irfft(I_f_dm, axis=1)).astype("float32")
 
-            for i, dm in enumerate(dms):
-                dm_filename = os.path.join(dm_trials_dir, f"{base_fname}_DM{dm:.1f}")
-                I_t_dm[i].tofile(f"{dm_filename}.dat")
-                with open(f"{dm_filename}.inf", "w") as inf:
-                    inf.write(f" Data file name without suffix          =  {os.path.basename(dm_filename)}\n")
-                    inf.write(f" Telescope used                         =  {fil.header.get('telescope', 'LOFAR')}\n")
-                    inf.write(f" Instrument used                        =  {fil.header.get('instrument', 'Unknown')}\n")
-                    inf.write(f" Object being observed                  =  {fil.header.get('source_name', 'Unknown')}\n")
-                    inf.write(f" J2000 Right Ascension (hh:mm:ss.ssss)  =  {fil.header.get('src_raj', '00:00:00.0000')}\n")
-                    inf.write(f" J2000 Declination     (dd:mm:ss.ssss)  =  {fil.header.get('src_dej', '+00:00:00.0000')}\n")
-                    inf.write(f" Epoch of observation (MJD)             =  {fil.header.get('tstart', 0.0)}\n")
-                    inf.write(f" Dispersion measure (cm-3 pc)           =  {dm:.2f}\n")
-                    inf.write(f" Number of bins in the time series      =  {I_t_dm.shape[1]}\n")
-                    inf.write(f" Width of each time series bin (sec)    =  {hdr['CDELT1'] * entry['downsample']:.6f}\n")
-                    inf.write(f" Total bandwidth (MHz)                  =  {np.abs(fil.header['foff']) * fil.header['nchans']:.6f}\n")
-                    inf.write(f" Number of channels                     =  {fil.header['nchans']}\n")
-                    inf.write(f" Channel bandwidth (MHz)                =  {np.abs(fil.header['foff']):.6f}\n")
+        #     for i, dm in enumerate(dms):
+        #         dm_filename = os.path.join(dm_trials_dir, f"{base_fname}_DM{dm:.1f}")
+        #         I_t_dm[i].tofile(f"{dm_filename}.dat")
+        #         with open(f"{dm_filename}.inf", "w") as inf:
+        #             inf.write(f" Data file name without suffix          =  {os.path.basename(dm_filename)}\n")
+        #             inf.write(f" Telescope used                         =  {fil.header.get('telescope', 'LOFAR')}\n")
+        #             inf.write(f" Instrument used                        =  {fil.header.get('instrument', 'Unknown')}\n")
+        #             inf.write(f" Object being observed                  =  {fil.header.get('source_name', 'Unknown')}\n")
+        #             inf.write(f" J2000 Right Ascension (hh:mm:ss.ssss)  =  {fil.header.get('src_raj', '00:00:00.0000')}\n")
+        #             inf.write(f" J2000 Declination     (dd:mm:ss.ssss)  =  {fil.header.get('src_dej', '+00:00:00.0000')}\n")
+        #             inf.write(f" Epoch of observation (MJD)             =  {fil.header.get('tstart', 0.0)}\n")
+        #             inf.write(f" Dispersion measure (cm-3 pc)           =  {dm:.2f}\n")
+        #             inf.write(f" Number of bins in the time series      =  {I_t_dm.shape[1]}\n")
+        #             inf.write(f" Width of each time series bin (sec)    =  {hdr['CDELT1'] * entry['downsample']:.6f}\n")
+        #             inf.write(f" Total bandwidth (MHz)                  =  {np.abs(fil.header['foff']) * fil.header['nchans']:.6f}\n")
+        #             inf.write(f" Number of channels                     =  {fil.header['nchans']}\n")
+        #             inf.write(f" Channel bandwidth (MHz)                =  {np.abs(fil.header['foff']):.6f}\n")
 
         # Run matched filtering
-        matched_filter.run_all_matched_filtering(
-            dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan
-        )
+        # matched_filter.run_all_matched_filtering(
+        #     dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan
+        # )
 
         # Cluster and classify detected candidates
-        all_candidates = os.path.join(output_dir, "all_detected_candidates.cands")
+        # all_candidates = os.path.join(output_dir, "all_detected_candidates.cands")
         clustered_output = os.path.join(output_dir, "clustered_candidates.txt")
-        print("Clustering candidates...")
-        cluster.cluster_candidates(all_candidates, clustered_output)
+        # print("Clustering candidates...")
+        # cluster.cluster_candidates(all_candidates, clustered_output)
 
         print("Classifying candidates...")
         plot_dir = os.path.join(output_dir, "candidate_plots")
