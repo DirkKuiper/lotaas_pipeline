@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=02:30:00
+#SBATCH --time=12:00:00
 #SBATCH --mem=12G
 #SBATCH --array=0-73  # Adjust dynamically at submission
 
