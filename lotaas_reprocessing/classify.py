@@ -20,7 +20,7 @@ from astropy import units as u
 from db.db_utils import insert_beam_run, update_beam_run, insert_detection
 
 # Import our LOTAAS matcher helpers
-from lotaas_matcher import load_reference, lotaas_within, match_redetection
+from lotaas_reprocessing.lotaas_matcher import load_reference, lotaas_within, match_redetection
 
 SLACK_BOT_TOKEN = "xoxb-513966140291-8603128801253-OIZMLciSFmNefi4An84YDNKE"
 CHANNEL_ID = "C08HHTN8CTG"
