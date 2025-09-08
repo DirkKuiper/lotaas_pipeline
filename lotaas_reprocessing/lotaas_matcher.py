@@ -68,7 +68,7 @@ def _coords_from_df(df: pd.DataFrame) -> SkyCoord:
     return SkyCoord(df["ra_deg"].values * u.deg, df["dec_deg"].values * u.deg)
 
 def lotaas_within(pointing_coord: SkyCoord,
-                  radius_arcmin: float = 3.0,
+                  radius_arcmin: float = 300.0,
                   ref: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     Return LOTAAS rows within radius (arcmin) of a pointing coordinate, sorted by separation.
@@ -91,8 +91,8 @@ def lotaas_within(pointing_coord: SkyCoord,
 
 def match_redetection(dm_cand: float,
                       local_ref: pd.DataFrame,
-                      dm_abs_tol: float = 5.0,
-                      dm_rel_tol: float = 0.10) -> dict:
+                      dm_abs_tol: float = 1,
+                      dm_rel_tol: float = 0.05) -> dict:
     """
     Given a candidate DM and a local, position-filtered slice of the LOTAAS ref,
     decide whether this is a redetection.

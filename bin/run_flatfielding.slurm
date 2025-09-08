@@ -5,7 +5,7 @@
 #SBATCH --nodes=1                       # Run on a single node
 #SBATCH --ntasks=1                      # One task
 #SBATCH --cpus-per-task=8               # Number of CPU cores to use
-#SBATCH --time=02:00:00                 # Adjust max runtime as needed
+#SBATCH --time=12:00:00                 # Adjust max runtime as needed
 #SBATCH --mem=12G                       # Memory allocation per task
 
 # Print job details
