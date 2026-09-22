@@ -7,8 +7,35 @@ import shutil
 import tarfile
 import time
 from urllib.parse import urlsplit
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-from staging.client import token_for_url
+from staging.client import tokens_for_url
+
+
+def open_with_any(url, tokens, headers):
+    """Open the URL, trying each macaroon until one is accepted.
+
+    A request spanning several observations carries a macaroon per path, and
+    dCache answers 403 'Permission denied for GET on path ...' when the one
+    presented is scoped to a different directory. Caveats are ranked before
+    this point, but that parse is a best effort, so an authorisation failure
+    falls through to the remaining tokens rather than ending the download.
+    """
+    if isinstance(tokens, str):
+        tokens = [tokens]
+    if not tokens:
+        raise ValueError('No macaroon available for ' + url)
+    refusals = []
+    for token in tokens:
+        try:
+            return urlopen(Request(url, headers=dict(headers, Authorization='Bearer ' + token)),
+                           timeout=120)
+        except HTTPError as error:
+            if error.code not in (401, 403):
+                raise
+            refusals.append(f'{error.code} {error.reason}')
+    raise PermissionError(
+        f'All {len(tokens)} macaroons were refused for {url}: ' + '; '.join(refusals))
 
 
 def download(url, token, target, max_bytes):
@@ -20,11 +47,11 @@ def download(url, token, target, max_bytes):
             return old
     part = Path(str(target) + '.partial')
     offset = part.stat().st_size if part.exists() else 0
-    headers = {'Authorization': 'Bearer ' + token}
+    headers = {}
     if offset:
         headers['Range'] = f'bytes={offset}-'
     started = time.monotonic()
-    with urlopen(Request(url, headers=headers), timeout=120) as response:
+    with open_with_any(url, token, headers) as response:
         if offset and response.status != 206:
             offset = 0  # Server declined range; restart instead of appending duplicate bytes.
         if response.status == 206 and not response.headers.get('Content-Range', '').startswith(f'bytes {offset}-'):
@@ -78,7 +105,7 @@ def main():
     a.directory.mkdir(parents=True, exist_ok=True)
     for url in manifest['urls']:
         target = a.directory / Path(urlsplit(url).path).name
-        result = download(url, token_for_url(manifest, url), target, int(a.max_gib_per_file * 2**30))
+        result = download(url, tokens_for_url(manifest, url), target, int(a.max_gib_per_file * 2**30))
         print(json.dumps(result), flush=True)
         print('Extracted:', [str(x) for x in extract(target, a.directory / target.stem)], flush=True)
 

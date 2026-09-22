@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
-from staging.client import StageIT, private_json, token_for_url
+from staging.client import StageIT, private_json, tokens_for_url
 from euroflash.download import download, extract
 from euroflash.ledger import Ledger
 
@@ -30,7 +30,7 @@ def main():
             return
         attempt=ledger.start(item,'retrieve','http-tar-v1',target.with_suffix('.receipt.json'),['StageIT',str(state['request_id']),url])
         try:
-            receipt=download(url,token_for_url(manifest,url),target,64*2**30)
+            receipt=download(url,tokens_for_url(manifest,url),target,64*2**30)
             fits=extract(target,a.destination/target.stem)
             marker.write_text(json.dumps({'request_id':state['request_id'],'archive':receipt,'fits':[str(p) for p in fits]},indent=2))
             matching=[u for u in state['surls'] if Path(urlsplit(u).path).name==target.name]

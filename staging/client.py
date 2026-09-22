@@ -1,8 +1,11 @@
 """StageIT client usable on the host without third-party Python packages."""
+import base64
+import binascii
 import configparser
 import json
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -56,15 +59,75 @@ class StageIT:
         return {"request_id": request_id, "urls": urls, "macaroons": tokens}
 
 
-def token_for_url(manifest, url):
-    host = urlsplit(url).hostname or ""
-    sites = {"SURF": ("grid.sara.nl", "grid.surfsara.nl", "surf.nl"), "JUELICH": ("fz-juelich.de",),
-             "PSNC": ("man.poznan.pl", "psnc.pl"), "POZNAN": ("man.poznan.pl", "psnc.pl")}
-    matches = []
-    for entry in manifest["macaroons"]:
-        site = entry["ltaSite"]["name"].upper()
-        if any(host == suffix or host.endswith("." + suffix) for suffix in sites.get(site, ())):
-            matches.append(entry)
+SITES = {"SURF": ("grid.sara.nl", "grid.surfsara.nl", "surf.nl"), "JUELICH": ("fz-juelich.de",),
+         "PSNC": ("man.poznan.pl", "psnc.pl"), "POZNAN": ("man.poznan.pl", "psnc.pl")}
+
+
+def macaroon_paths(token):
+    """Path prefixes a macaroon is restricted to, or none if it is unscoped.
+
+    Macaroon caveats are cleartext: only the signature needs the issuing key.
+    dCache encodes them in the libmacaroons binary format, base64url and
+    often unpadded, so the identifiers can be read here without adding a
+    macaroon library to the runtime image.
+    """
+    padded = token + "=" * (-len(token) % 4)
+    raw = None
+    for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+        try:
+            raw = decoder(padded)
+            break
+        except (binascii.Error, ValueError):
+            continue
+    if raw is None:
+        return []
+    text = raw.decode("latin-1")
+    root = ""
+    for match in re.finditer(r"root:([^\x00-\x1f,;]*)", text):
+        root = match.group(1).strip().rstrip("/")
+    paths = [m.group(1).strip() for m in re.finditer(r"path:([^\x00-\x1f,;]*)", text)]
+    if not paths:
+        return [root] if root else []
+    return [("/" + root.strip("/") + "/" + p.strip("/")).replace("//", "/").rstrip("/") or "/"
+            if root else "/" + p.strip("/") for p in paths]
+
+
+def tokens_for_url(manifest, url):
+    """Every macaroon that could authorise this URL, most likely first.
+
+    Selecting only on the latest expiry was wrong for a request spanning
+    several observations: StageIT issues a macaroon per path, so the one
+    expiring last is scoped to whichever directory it happens to cover and
+    dCache answers 403 'Permission denied for GET on path ...' for the rest.
+    Scoped macaroons whose path contains the URL are preferred, longest
+    prefix first; unscoped ones follow; ones scoped elsewhere come last but
+    are still offered, since caveat parsing is a best effort.
+    """
+    split = urlsplit(url)
+    host, path = split.hostname or "", split.path
+    matches = [entry for entry in manifest["macaroons"]
+               if any(host == suffix or host.endswith("." + suffix)
+                      for suffix in SITES.get(entry["ltaSite"]["name"].upper(), ()))]
     if not matches:
         raise ValueError(f"No site-specific macaroon for {host}")
-    return max(matches, key=lambda x: x["validUntil"])["content"]
+
+    def rank(entry):
+        prefixes = macaroon_paths(entry["content"])
+        covering = [p for p in prefixes if p == "/" or path == p or path.startswith(p + "/")]
+        if covering:
+            return (0, -max(len(p) for p in covering), entry["validUntil"])
+        if not prefixes:
+            return (1, 0, entry["validUntil"])
+        return (2, 0, entry["validUntil"])
+
+    return [entry["content"] for entry in
+            sorted(matches, key=lambda e: (rank(e)[0], rank(e)[1], _descending(rank(e)[2])))]
+
+
+def _descending(value):
+    # validUntil sorts as a string; invert it so later expiry ranks first.
+    return tuple(-ord(character) for character in str(value))
+
+
+def token_for_url(manifest, url):
+    return tokens_for_url(manifest, url)[0]

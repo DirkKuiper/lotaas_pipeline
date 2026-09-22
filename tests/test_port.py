@@ -229,6 +229,77 @@ def test_site_specific_tokens():
         token_for_url(manifest, 'https://unrelated.example/data')
 
 
+def _scoped_macaroon(path, valid_until):
+    """A macaroon-shaped blob carrying a readable dCache path caveat."""
+    import base64
+    body = b'\x02\x01lofar\x00\x02\x01path:' + path.encode() + b'\x00\x06signature'
+    return dict(ltaSite={'name': 'SURF'}, validUntil=valid_until,
+                content=base64.urlsafe_b64encode(body).decode().rstrip('='))
+
+
+def test_a_macaroon_is_chosen_by_path_not_by_expiry():
+    """A request spanning several observations carries a macaroon per path.
+    Choosing the one expiring last gave dCache a token scoped to a different
+    directory, which answers 403 'Permission denied for GET on path ...'."""
+    from staging.client import tokens_for_url, macaroon_paths
+    manifest = {'macaroons': [_scoped_macaroon('/lt5_004/1163405', '2027-12-31'),
+                              _scoped_macaroon('/lt5_004/1261459', '2027-01-01')]}
+    assert macaroon_paths(manifest['macaroons'][0]['content']) == ['/lt5_004/1163405']
+
+    # The right macaroon wins even though the other one lives longer.
+    ordered = tokens_for_url(
+        manifest, 'https://webdav.grid.surfsara.nl:2882/lt5_004/1261459/L1261459_B000.tar')
+    assert ordered[0] == manifest['macaroons'][1]['content']
+    assert len(ordered) == 2  # The other is still offered as a fallback.
+
+    ordered = tokens_for_url(
+        manifest, 'https://webdav.grid.surfsara.nl:2882/lt5_004/1163405/L1163405_B013.tar')
+    assert ordered[0] == manifest['macaroons'][0]['content']
+
+
+def test_an_unscoped_macaroon_still_sorts_before_one_scoped_elsewhere():
+    from staging.client import tokens_for_url
+    unscoped = dict(ltaSite={'name': 'SURF'}, content='plain-token', validUntil='2020')
+    manifest = {'macaroons': [_scoped_macaroon('/lt5_004/9999999', '2030'), unscoped]}
+    ordered = tokens_for_url(manifest, 'https://webdav.grid.surfsara.nl:2882/lt5_004/1261459/x.tar')
+    assert ordered[0] == 'plain-token'
+
+
+def test_a_refused_macaroon_falls_through_to_the_next(monkeypatch):
+    from urllib.error import HTTPError
+    from euroflash import download as module
+    tried = []
+
+    def fake_urlopen(request, timeout=None):
+        token = request.get_header('Authorization')
+        tried.append(token)
+        if token != 'Bearer good':
+            raise HTTPError(request.full_url, 403, 'Permission denied for GET on path', {}, None)
+        return 'response'
+
+    monkeypatch.setattr(module, 'urlopen', fake_urlopen)
+    assert module.open_with_any('https://host/x', ['bad', 'good'], {}) == 'response'
+    assert tried == ['Bearer bad', 'Bearer good']
+
+    with pytest.raises(PermissionError, match='All 2 macaroons were refused'):
+        module.open_with_any('https://host/x', ['bad', 'worse'], {})
+
+
+def test_a_non_authorisation_error_is_not_retried(monkeypatch):
+    from urllib.error import HTTPError
+    from euroflash import download as module
+    calls = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(1)
+        raise HTTPError(request.full_url, 500, 'Server error', {}, None)
+
+    monkeypatch.setattr(module, 'urlopen', fake_urlopen)
+    with pytest.raises(HTTPError):
+        module.open_with_any('https://host/x', ['a', 'b'], {})
+    assert len(calls) == 1
+
+
 def test_tar_traversal_rejected(tmp_path):
     import io, tarfile
     p = tmp_path/'bad.tar'
