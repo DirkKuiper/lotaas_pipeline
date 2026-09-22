@@ -50,7 +50,8 @@ if __name__ == "__main__":
         validate_trials(metadata, dm_trials_dir)
         # Run matched filtering
         matched_filter.run_all_matched_filtering(
-            dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan
+            dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan,
+            nu_min=metadata.get("nu_min"), nu_max=metadata.get("nu_max")
         )
 
         # Define file paths

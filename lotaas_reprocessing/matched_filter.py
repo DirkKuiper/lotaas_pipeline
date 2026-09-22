@@ -19,6 +19,11 @@ implementation this replaces (measured in review/2026-09-22/diagnostics.json):
   * Rolling sums do not wrap. Circular convolution reported an event in the
     last ten samples of a series as 81 detections in the first 0.1 seconds.
 
+Dedispersion upstream is still circular, which is a separate wrap and is
+handled separately: whatever occupied the first samples of the low-frequency
+channels reappears at the end of each trial, so that tail is excluded from
+the search. See wrap_contaminated_samples.
+
 Rolling sums are also roughly an order of magnitude cheaper than one inverse
 FFT per width per DM trial, which was the pipeline's throughput bottleneck.
 """
@@ -133,9 +138,37 @@ def filter_widths_for(nsamp, tsamp, downsample):
                                  max_duration=min(600, nsamp * tsamp * downsample / 2))
 
 
+DISPERSION_CONSTANT = 2.41e-4
+
+
+def wrap_contaminated_samples(dm, nu_min, nu_max, tsamp, downsample=1):
+    """Trailing samples of a trial that circular dedispersion has polluted.
+
+    Dedispersion advances each channel by its own delay with a circular
+    shift, so whatever occupied the first delay samples of the low-frequency
+    channels reappears at the end of the series. Broadband interference in
+    the first three samples of a beam produces a response of 56 sigma in the
+    last 1089 samples at DM 100, against 13 in the uncontaminated middle.
+    Real pulses are unaffected: they are recovered at the right time, only
+    with less bandwidth as the sweep runs past the end of the observation.
+    """
+    if not (nu_min and nu_max) or nu_min <= 0 or nu_max <= 0:
+        return 0
+    delay = abs(dm) * (min(nu_min, nu_max) ** -2 - max(nu_min, nu_max) ** -2) / DISPERSION_CONSTANT
+    return int(np.ceil(delay / (tsamp * downsample)))
+
+
 def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5,
-                          seed=0):
+                          seed=0, valid_samples=None):
     signal_data = np.fromfile(data_file, dtype="float32")
+    if valid_samples is not None:
+        # Drop the polluted tail before anything else, so it cannot raise a
+        # detection nor inflate the noise scale the rest is measured against.
+        if valid_samples < 2:
+            raise ValueError(
+                f"Circular dedispersion pollutes the whole trial at DM {dm}: the "
+                f"sweep is longer than the observation. Shorten the DM plan.")
+        signal_data = signal_data[:valid_samples]
     nsamp = signal_data.size
     if nsamp < 2 or not np.isfinite(signal_data).all():
         raise ValueError(f"Invalid DM trial: {data_file}")
@@ -171,8 +204,17 @@ def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshol
             np.concatenate(detected_widths))
 
 
-def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan, detection_threshold=5):
-    """Runs CPU-based matched filtering across all DM trials."""
+def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info,
+                              dedispersion_plan, detection_threshold=5,
+                              nu_min=None, nu_max=None, trim_wrap=True):
+    """Runs CPU-based matched filtering across all DM trials.
+
+    With the band limits available, the tail that circular dedispersion has
+    polluted is excluded from each trial. That costs real sensitivity at the
+    end of an observation, growing with DM: 0.4% of a one-hour beam at DM
+    150, 3% at DM 1000, 30% at DM 10000. Set trim_wrap False to search the
+    whole series and accept the wrapped interference instead.
+    """
     
     all_candidates = []
     candidate_count = 0
@@ -196,8 +238,18 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
                 if plan["low_dm"] <= dm < plan["high_dm"]:
                     downsample = plan["downsample"]
                     break
+            valid = None
+            if trim_wrap and nu_min and nu_max:
+                polluted = wrap_contaminated_samples(dm, nu_min, nu_max, tsamp, downsample)
+                total = os.path.getsize(dm_filepath) // 4
+                valid = total - polluted
+                if valid < 2:
+                    raise ValueError(
+                        f"The dispersion sweep at DM {dm} exceeds the observation; "
+                        f"{polluted} of {total} samples would be discarded. "
+                        f"Shorten the DM plan for this observation length.")
             detection_times, detection_dms, detection_strengths, detection_widths_samples = run_matched_filtering(
-            dm_filepath, tsamp, dm, downsample, detection_threshold
+            dm_filepath, tsamp, dm, downsample, detection_threshold, valid_samples=valid
             )
 
             # Calculate sample indices

@@ -74,11 +74,48 @@ def test_short_noise_observation_does_not_generate_constant_window_detections(tm
 def test_candidate_limit_precedes_large_plot(tmp_path,monkeypatch):
     from lotaas_reprocessing import matched_filter,cluster
     monkeypatch.setattr(cluster,'MAX_CANDIDATES',2)
-    monkeypatch.setattr(matched_filter,'run_matched_filtering',lambda *args:tuple(np.ones(3) for _ in range(4)))
+    monkeypatch.setattr(matched_filter,'run_matched_filtering',lambda *args,**kwargs:tuple(np.ones(3) for _ in range(4)))
     (tmp_path/'beam_DM10.0.dat').write_bytes(b'test')
     with pytest.raises(RuntimeError,match='Too many candidates'):
         matched_filter.run_all_matched_filtering(tmp_path,.1,tmp_path,{},[])
     assert not (tmp_path/'all_matched_filter_overview.png').exists()
+
+
+def test_the_dedispersion_wrap_tail_is_excluded_from_the_search(tmp_path):
+    """Dedispersion advances each channel circularly, so what occupied the
+    first samples of the low-frequency channels reappears at the end."""
+    from lotaas_reprocessing.matched_filter import (
+        run_all_matched_filtering, wrap_contaminated_samples)
+    tsamp, n, dm = .01, 4096, 100.
+    nu = np.linspace(119.45, 151.04, 64)
+    polluted = wrap_contaminated_samples(dm, nu.min(), nu.max(), tsamp)
+    assert 0 < polluted < n
+
+    data = np.zeros((len(nu), n), dtype='float32')
+    data[:, 0:3] = 50.                       # broadband interference at the start
+    _, trial = next(iter_dedispersed(data, tsamp, nu, [dm]))
+    trials = tmp_path/'DM_trials'
+    trials.mkdir()
+    np.asarray(trial).astype('float32').tofile(trials/'beam_DM100.0.dat')
+    plan = [{'low_dm': 0., 'high_dm': 200., 'ddm': .1, 'downsample': 1}]
+    info = {'Object': 'x', 'Telescope': 'x', 'Instrument': 'x',
+            'Observation Date': 'x', 'Frequency Range (MHz)': 'x'}
+
+    def search(**kwargs):
+        out = tmp_path/('out' + str(len(list(tmp_path.glob('out*')))))
+        out.mkdir()
+        run_all_matched_filtering(trials, tsamp, str(out), info, plan, **kwargs)
+        rows = [line.split() for line in
+                (out/'all_detected_candidates.cands').read_text().splitlines()
+                if not line.startswith('#')]
+        return np.array([[float(r[2]), float(r[1])] for r in rows]) if rows else np.empty((0, 2))
+
+    untrimmed = search(trim_wrap=False)
+    trimmed = search(nu_min=float(nu.min()), nu_max=float(nu.max()))
+
+    tail_start = (n - polluted) * tsamp
+    assert np.any(untrimmed[:, 0] >= tail_start), 'expected the wrap artefact to be found'
+    assert not np.any(trimmed[:, 0] >= tail_start), 'wrap artefact still reported'
 
 
 def _cluster(tmp_path, rows, name):

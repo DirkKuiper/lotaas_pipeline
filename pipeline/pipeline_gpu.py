@@ -217,7 +217,11 @@ if __name__ == "__main__":
     # Save metadata to a YAML file
     metadata_file = os.path.join(output_dir, "metadata.yaml")
     with open(metadata_file, "w") as fp:
-        yaml.dump({"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed, "elapsed_seconds": time.monotonic() - started}, fp)
+        yaml.dump({"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
+                   # Band limits, so the search can size the tail that circular
+                   # dedispersion pollutes at each DM.
+                   "nu_min": float(np.min(nu)), "nu_max": float(np.max(nu)),
+                   "elapsed_seconds": time.monotonic() - started}, fp)
 
     print(f"Saved metadata to {metadata_file}")
     
