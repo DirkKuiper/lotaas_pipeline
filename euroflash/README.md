@@ -48,7 +48,9 @@ Private keys and StageIT credentials are never copied into the compute image or
 source archive. A private StageIT config is at `~/.config/lotaas/stagingrc`, or
 set `LOTAAS_STAGING_CONFIG`. Its contents are `api_token = ...`; use mode 0600.
 Credentials embedded in the original public checkout were removed from the
-working files, but remain in upstream Git history and should be rotated.
+working files and the path is now ignored, but the token remains in the
+history of three pushed branches and **is live until rotated at the LTA**.
+See [SECURITY.md](../SECURITY.md).
 
 ## LTA staging and inventory
 
@@ -134,6 +136,14 @@ first full-SAP dispatch to fail; the September 22 retry uses a 24-hour master.
 
 ## Tracking and validation
 
+Reclaim DM trials stranded by failed beams; about 3.6 GB each, and the CPU
+stage only removes them on success:
+
+```bash
+python3 -m euroflash.reclaim --work COLLECTED_OR_NODE_WORK \
+  --ledger /shared/results/dkuiper/lotaas/campaign.sqlite     # --apply to delete
+```
+
 ```bash
 python3 -m euroflash.status /shared/results/dkuiper/lotaas/campaign.sqlite
 apptainer exec --cleanenv --env PYTHONPATH="$PWD" containers/euroflash-runtime.sif \
@@ -158,6 +168,19 @@ processing choices. SQLite writes remain local to each node; a backup snapshot
 is merged on the head. Do not run one SQLite writer database over unverified
 cross-node filesystem locking.
 
+The search uses rectangular rolling sums against a median-absolute-deviation
+noise scale. Dividing each response by its own standard deviation let a pulse
+inflate the denominator measuring it, so a 100-sigma pulse of 300 s scored
+4.09 against a threshold of 5 and the long half of the width ladder was
+computed but undetectable; the tanh-smoothed kernel returned 0.707 of the
+ideal statistic at width one, where most single pulses are found; and the
+circular convolution reported an event in the last ten samples as 81
+detections in the first 0.1 seconds. Recovery is now 1.000 at every width
+tested, none of those 81 remain, the statistic is still calibrated to unit
+variance on Gaussian noise so the thresholds of 5 and 7 keep their meaning,
+and a full-length trial searches 3.7x faster. **The CPU-stage timings below
+predate this change and need re-measuring.**
+
 Validated corrections include 2-bit values decoded as 0–3 (the old unpacking
 left-shifted them), frequency headers derived from DAT_FREQ, time-domain
 averaging before high-DM dedispersion, odd-length inverse FFTs, CPU failure exit
@@ -168,6 +191,15 @@ DM values are generated with decimal arithmetic so adjacent plan ranges cannot
 overwrite a boundary trial through floating-point rounding. Short pilot filter
 windows are bounded by the observation duration. Constant signals yield no events.
 
+Candidates are clustered on their position in the concatenated trial grid
+rather than on DM/ddm, which was not monotonic across plan boundaries: DM 50.2
+and DM 150.6 both mapped to 502, while adjacent trials DM 150.5 and DM 150.6
+mapped to 1505 and 502. The DM and time axes each carry their own tolerance,
+five trials and half a second, instead of sharing one epsilon of five that
+merged a source repeating every four seconds into a single candidate. Points
+with no neighbour are their own events; treating the DBSCAN noise label as a
+cluster had reduced every isolated detection in a beam to one reported row.
+
 The clustering implementation uses exact epsilon-connected components, which
 are equivalent to the original DBSCAN with `min_samples=2`. It groups points in
 small cells and tests neighboring cells with nearest-neighbor queries instead of
@@ -176,10 +208,18 @@ DBSCAN, including duplicate and boundary points. The candidate ceiling is 25
 million per beam and is checked before plotting; compact numeric arrays replace
 Python tuples to control memory usage. Every candidate remains in the
 science table, while diagnostic scatter plots display at most 100,000 points.
-The original DM scaling and handling of the DBSCAN noise label are retained.
-The original circular Fourier dedispersion and clustering/classification policy
-still require scientific review before final survey candidate claims, especially
-observation edges. A partial flatfield benchmark cannot establish survey sensitivity.
+
+Dedispersion is still circular Fourier dedispersion. A pulse in the last
+samples of a beam is still recovered at the right time, with less bandwidth
+as its sweep runs past the end, but whatever occupied the first samples of
+the low-frequency channels reappears at the end of each trial: broadband
+interference in the first three samples gives 56 sigma in the last 1089
+samples at DM 100, against 13 in the uncontaminated middle. The search now
+drops that tail, which costs about 0.4% of a one-hour beam at DM 150, 3% at
+DM 1000 and 30% at DM 10000; pass `trim_wrap=False` to search the whole
+series instead. The clustering and classification policy still requires
+scientific review before final survey candidate claims. A partial flatfield
+benchmark cannot establish survey sensitivity.
 
 ### User-supplied recovery target
 
@@ -250,8 +290,11 @@ empty it into the channel at once. A Slack outage is logged and retried, and
 never fails a search: the pipeline does not depend on notification succeeding.
 
 **A Slack post is an alert, not a validated detection.** The candidate rules are
-unchanged from the classifier (DM >= 10, S/N > 7, no ATNF match within 0.5
-pc/cm3, FETCH probability > 0.5), and the clustering and classification policy
+unchanged from the classifier except for the redetection veto (DM >= 10,
+S/N > 7, no ATNF pulsar within both 0.5 pc/cm3 and
+`LOTAAS_ATNF_VETO_RADIUS_DEG`, one degree by default, FETCH probability
+> 0.5). The veto previously matched on DM alone across the whole 5-degree
+query cone, recording genuinely new sources as redetections, and the clustering and classification policy
 still require the scientific review noted above.
 
 ## One-year capacity
@@ -312,12 +355,24 @@ kept outside the campaign database. The recovery report is
 root. This is a functional check, not a complete sensitivity study.
 
 Request `991619` is a bounded throughput test of 666 files from three complete
-observations (about 3.25 TB). StageIT reports them online, but SURF returns HTTP
-403 on GET with the issued, unexpired download macaroon. A byte-range GET for
-the first request still succeeds (206), distinguishing this from a general
-network or account failure. Downloads stopped with errors recorded; see
-`benchmarks/download-access-check.json` for a token-free reproduction. This must
-be resolved before the larger tape/download throughput test can be completed.
+observations (about 3.25 TB). StageIT reported them online while SURF returned HTTP
+403 "Permission denied for GET on path /lt5_004/1261459/...", though a
+byte-range GET on an earlier request still succeeded (206). That is what a
+path-scoped macaroon does when presented for a directory it does not cover:
+this request spans three observations, so StageIT issues one macaroon per
+path, and the downloader chose whichever expired last. Tokens are now ordered
+by whether their path caveat covers the URL, and a 401 or 403 falls through
+to the remaining tokens. Confirm against the live service before rerunning
+the throughput test:
+
+```bash
+python3 -m euroflash.access_check 991619 --output access-check.json
+```
+
+It probes one URL per directory and reports the chosen macaroon's path
+caveats and the HTTP status, printing no token. The diagnosis rests on the
+recorded evidence in `benchmarks/download-access-check.json` and has not yet
+been confirmed against SURF.
 
 For live coverage while a node job is running:
 
