@@ -188,3 +188,6 @@ stagingrc
 *.macaroon
 macaroon.txt
 webdav_links.txt*
+
+# Cached image content hashes, derived from the .sif beside them.
+*.sif.sha256

@@ -16,18 +16,63 @@ from euroflash.ledger import Ledger
 REPO = Path(__file__).resolve().parents[1]
 
 
-def fingerprint(settings, image, inputs, options, code_files=None):
+# Every package whose source can change what a search produces. Searched
+# recursively: a non-recursive glob left subpackages, and postproc entirely,
+# outside the identity of a run.
+CODE_FOLDERS = ['pipeline', 'preproc', 'lotaas_reprocessing', 'db', 'euroflash', 'postproc']
+
+
+def image_digest(image):
+    """Content hash of the runtime image, cached beside it.
+
+    The image used to be identified by its path, size and modification time.
+    Copying it to a compute node changes all three, so the same image gave
+    one identity on the head and another on the node, and no beam could be
+    recognised as already searched anywhere but where it ran.
+    """
+    stat = image.stat()
+    marker = f'{stat.st_size}-{stat.st_mtime_ns}'
+    cache = image.with_name(image.name + '.sha256')
+    try:
+        recorded, value = cache.read_text().split()
+        if recorded == marker:
+            return value
+    except (OSError, ValueError):
+        pass
+    digest = hashlib.sha256()
+    with image.open('rb') as stream:
+        for block in iter(lambda: stream.read(1 << 22), b''):
+            digest.update(block)
+    value = digest.hexdigest()
+    try:
+        cache.write_text(f'{marker} {value}\n')
+    except OSError:
+        pass  # A read-only image directory only costs the next run a rehash.
+    return value
+
+
+def fingerprint(settings, image, options, code_files=None):
+    """Identity of a search method: the code, settings, image and options.
+
+    Only content and stable names enter this digest. Absolute paths and
+    modification times are deliberately excluded, because they made identical
+    work on the head and on a compute node carry different identities.
+
+    The batch is excluded too. A stage is keyed on (item, stage, fingerprint)
+    and the item already names the beam, so hashing every input in the run
+    only meant that adding one beam to a batch invalidated the finished work
+    of every other beam in it. Which bytes a beam name stood for is attested
+    separately, by the SHA256 archive receipts in the ledger.
+    """
     digest = hashlib.sha256()
     if code_files is None:
-        code_files = [p for folder in ['pipeline', 'preproc', 'lotaas_reprocessing', 'db', 'euroflash']
-                      for p in sorted((REPO/folder).glob('*.py'))]
-    for path in code_files:
+        code_files = [p for folder in CODE_FOLDERS
+                      for p in (REPO/folder).rglob('*.py')
+                      if '__pycache__' not in p.parts]
+    for path in sorted(code_files):
         digest.update(str(path.relative_to(REPO)).encode()); digest.update(path.read_bytes())
     digest.update(settings.read_bytes())
-    # The build lock and SIF metadata identify the immutable runtime image.
-    digest.update(str((str(image), image.stat().st_size, image.stat().st_mtime_ns)).encode())
-    for path in sorted(inputs):
-        digest.update(str((str(path), path.stat().st_size, path.stat().st_mtime_ns)).encode())
+    digest.update(image_digest(image).encode())
     digest.update(json.dumps(options, sort_keys=True).encode())
     return digest.hexdigest()
 
@@ -98,7 +143,11 @@ class Runner:
             directory.mkdir(parents=True, exist_ok=True)
             output = directory/f'downsampled_{obs}_SAP{sap:03d}_BEAM{beam:03d}_32bit.fil'
             command = self.command('preproc/downsample_psrfits2fil_32bit.py', ['-o', output, raw])
-            conversion_fp = fingerprint(self.settings, self.image, [raw], {'stage': 'downsample', 'fscrunch': 4, 'tscrunch': 16},
+            # Conversion is keyed on the one file it reads, by name and size,
+            # so a re-extracted or truncated archive member is converted again.
+            conversion_fp = fingerprint(self.settings, self.image,
+                {'stage': 'downsample', 'fscrunch': 4, 'tscrunch': 16,
+                 'source': raw.name, 'source_bytes': raw.stat().st_size},
                 [REPO/'preproc/downsample_psrfits2fil_32bit.py', REPO/'lotaas_reprocessing/filterbank.py', REPO/'lotaas_reprocessing/sigproc.py'])
             jobs.append((item, 'downsample', command, [output], None, conversion_fp))
             grouped.setdefault(directory.parent, []).append(output)
@@ -173,7 +222,7 @@ class Runner:
                 raise ValueError('No matching inputs found')
             if not (self.args.prepare_only or self.args.convert_only) and self.args.backend == 'gpu':
                 subprocess.run(self.command('euroflash/preflight.py', [], self.args.gpus), check=True, cwd=REPO)
-            self.fp = fingerprint(self.settings, self.image, inputs,
+            self.fp = fingerprint(self.settings, self.image,
                                   {'pilot': self.args.pilot, 'max_samples': self.args.max_samples,
                                    'backend': self.args.backend, 'prepared': self.args.prepared})
             run_metadata = {'fingerprint': self.fp, 'settings': str(self.settings),

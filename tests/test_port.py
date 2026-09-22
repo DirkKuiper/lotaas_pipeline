@@ -1,4 +1,5 @@
 import json
+import os
 import numpy as np
 import pytest
 from pathlib import Path
@@ -135,6 +136,47 @@ def test_cell_clustering_matches_dbscan_including_duplicates_and_boundaries():
             expected=DBSCAN(eps=eps,min_samples=2).fit_predict(points)
             actual=cluster_labels(points,eps)
             np.testing.assert_array_equal(actual,expected)
+
+
+def test_fingerprint_survives_copying_the_image_and_growing_the_batch(tmp_path):
+    """The fingerprint hashed absolute paths, modification times and every
+    input in the run, so the head and a node disagreed about identical work
+    and adding one beam invalidated the rest of the batch."""
+    import shutil
+    from euroflash.run import fingerprint
+    settings = tmp_path/'settings.yaml'
+    settings.write_text('rfi_block_size: 1000\n')
+    image = tmp_path/'runtime.sif'
+    image.write_bytes(b'image-contents')
+    options = {'backend': 'gpu', 'pilot': False}
+    baseline = fingerprint(settings, image, options)
+
+    # Same image, copied to another path on another machine's layout.
+    elsewhere = tmp_path/'node'/'source'/'containers'/'runtime.sif'
+    elsewhere.parent.mkdir(parents=True)
+    shutil.copy2(image, elsewhere)
+    os.utime(elsewhere, (1, 1))
+    assert fingerprint(settings, elsewhere, options) == baseline
+
+    # Different image contents must still be a different search.
+    other = tmp_path/'other.sif'
+    other.write_bytes(b'image-contents-rebuilt')
+    assert fingerprint(settings, other, options) != baseline
+
+    # Settings and options remain part of the identity.
+    settings.write_text('rfi_block_size: 2000\n')
+    assert fingerprint(settings, image, options) != baseline
+
+
+def test_image_digest_is_cached_and_rehashes_when_the_image_changes(tmp_path):
+    from euroflash.run import image_digest
+    image = tmp_path/'runtime.sif'
+    image.write_bytes(b'first')
+    first = image_digest(image)
+    assert (tmp_path/'runtime.sif.sha256').is_file()
+    assert image_digest(image) == first
+    image.write_bytes(b'second')
+    assert image_digest(image) != first
 
 
 def test_resume_rechecks_output_and_records_errors(tmp_path):
