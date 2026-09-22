@@ -300,6 +300,43 @@ def test_a_non_authorisation_error_is_not_retried(monkeypatch):
     assert len(calls) == 1
 
 
+def test_node_health_refuses_a_host_without_uvm(monkeypatch):
+    """Beams were split across the named nodes whether or not they could run.
+    efc-gpu-00 has the UVM module blocked, so cuInit returns 999 and its whole
+    share of the batch failed after the transfer."""
+    import subprocess
+    from euroflash import cluster
+
+    replies = {
+        'healthy': (0, 'GPU 0: RTX PRO 6000\nGPU 1: RTX PRO 6000\nUVM_PRESENT\n', ''),
+        'no-uvm': (1, 'GPU 0: RTX PRO 6000\n', ''),
+        'unreachable': (255, '', 'Permission denied (publickey).'),
+        'no-gpus': (0, 'UVM_PRESENT\n', ''),
+    }
+
+    def fake_run(args, **kwargs):
+        node = args[-2]
+        code, out, err = replies[node]
+        return subprocess.CompletedProcess(args, code, out, err)
+
+    monkeypatch.setattr(cluster.subprocess, 'run', fake_run)
+    assert cluster.node_health('healthy')[0] is True
+    assert cluster.node_health('no-uvm') == (False, 'no /dev/nvidia-uvm; CUDA cannot initialise on this host')
+    assert cluster.node_health('unreachable')[0] is False
+    assert cluster.node_health('no-gpus') == (False, 'nvidia-smi listed no GPUs')
+
+
+def test_node_health_treats_a_hanging_probe_as_unusable(monkeypatch):
+    import subprocess
+    from euroflash import cluster
+
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, 120)
+
+    monkeypatch.setattr(cluster.subprocess, 'run', fake_run)
+    assert cluster.node_health('slow') == (False, 'health probe timed out')
+
+
 def test_tar_traversal_rejected(tmp_path):
     import io, tarfile
     p = tmp_path/'bad.tar'

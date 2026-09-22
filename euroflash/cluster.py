@@ -45,6 +45,34 @@ def remote(node,args,control_dir=None):
     return subprocess.run(ssh_args(node,control_dir)+[shlex.join([str(x) for x in args])],check=True)
 
 
+def node_health(node,control_dir=None):
+    """Whether a node can actually run CUDA, before any beam is assigned.
+
+    Beams were split across the nodes named on the command line whether or
+    not they could run. On efc-gpu-00 the UVM module is blocked, so cuInit
+    returns 999 and its whole share of the batch fails after the transfer.
+    The device node is the cheapest reliable symptom and needs no image.
+    """
+    probe='nvidia-smi -L && test -e /dev/nvidia-uvm && echo UVM_PRESENT'
+    try:
+        result=subprocess.run(ssh_args(node,control_dir)+[probe],
+                              capture_output=True,text=True,timeout=120)
+    except subprocess.TimeoutExpired:
+        return False,'health probe timed out'
+    output=(result.stdout or '')+(result.stderr or '')
+    gpus=[line for line in (result.stdout or '').splitlines() if line.startswith('GPU ')]
+    if 'UVM_PRESENT' in output:
+        if not gpus:
+            return False,'nvidia-smi listed no GPUs'
+        return True,f'{len(gpus)} GPUs, UVM present'
+    if gpus:
+        # The probe exits non-zero when the device node is absent, so this
+        # case is checked before the return code: nvidia-smi answered, which
+        # means the host is up and has a driver, and only UVM is missing.
+        return False,'no /dev/nvidia-uvm; CUDA cannot initialise on this host'
+    return False,'health probe failed: '+' '.join(output.split())[:200]
+
+
 def upload(node,files,destination,control_dir=None):
     remote(node,['mkdir','-p',destination],control_dir)
     command=ssh_args(node,control_dir)+[shlex.join(['tar','xf','-','-C',destination])]
@@ -74,6 +102,8 @@ def main():
     p.add_argument('--cpu-workers',type=int,default=24)
     p.add_argument('--pilot',action='store_true')
     p.add_argument('--run-name',required=True)
+    p.add_argument('--skip-health-check',action='store_true',
+                   help='Dispatch without probing CUDA on each node first')
     a=p.parse_args()
     permitted=allowed_nodes()
     if not set(a.nodes)<=permitted or len(set(a.nodes))!=len(a.nodes):
@@ -91,9 +121,30 @@ def main():
     source += [(a.image.resolve(),'containers/runtime.sif'),(a.settings.resolve(),'campaign-settings.yaml')]
     a.work.mkdir(parents=True,exist_ok=True)
     ledger=Ledger(a.ledger)
+
+    # Probe before splitting the batch, so a node that cannot run CUDA does
+    # not silently take its share of the beams and fail them all.
+    nodes=list(a.nodes)
+    if not a.skip_health_check:
+        with futures.ThreadPoolExecutor(max_workers=len(nodes)) as pool:
+            health=dict(zip(nodes,pool.map(lambda n:node_health(n,a.control_dir),nodes)))
+        for node,(ok,detail) in health.items():
+            print(('healthy  ' if ok else 'UNUSABLE ')+node+': '+detail,flush=True)
+        for node,(ok,detail) in health.items():
+            if not ok:
+                attempt=ledger.start(a.run_name+'@'+node,'dispatch',a.run_name,
+                                     a.work/(node+'.log'),['euroflash.cluster',node,'health'])
+                ledger.finish(attempt,error='Node unusable before dispatch: '+detail)
+        nodes=[n for n in nodes if health[n][0]]
+        if not nodes:
+            raise RuntimeError('No usable node among '+', '.join(a.nodes)
+                               +'; see the health lines above')
+        if len(nodes)!=len(a.nodes):
+            print(f'Dispatching to {len(nodes)} of {len(a.nodes)} nodes',flush=True)
+
     def worker_body(pair):
         index,node=pair
-        assigned=beams[index::len(a.nodes)]
+        assigned=beams[index::len(nodes)]
         if not assigned:return None
         root=a.remote_root.rstrip('/')+'/'+a.run_name
         repo=root+'/source';inputs=root+'/input';work=root+'/work'
@@ -123,7 +174,7 @@ def main():
         return node,destination,True
     def worker(pair):
         index,node=pair
-        if not beams[index::len(a.nodes)]:return None
+        if not beams[index::len(nodes)]:return None
         log=a.work/(node+'.log')
         attempt=ledger.start(a.run_name+'@'+node,'dispatch',a.run_name,log,
                              ['euroflash.cluster',node,a.run_name])
@@ -137,8 +188,8 @@ def main():
             with log.open('a') as stream:traceback.print_exc(file=stream)
             ledger.finish(attempt,error=str(error))
             return node
-    with futures.ThreadPoolExecutor(max_workers=len(a.nodes)) as pool:
-        failed=[node for node in pool.map(worker,enumerate(a.nodes)) if node]
+    with futures.ThreadPoolExecutor(max_workers=len(nodes)) as pool:
+        failed=[node for node in pool.map(worker,enumerate(nodes)) if node]
     if failed:raise RuntimeError('Pipeline failed on '+','.join(failed)+'; collected logs and errors are available')
 
 
