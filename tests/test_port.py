@@ -341,6 +341,65 @@ def test_legacy_numpy_probability_becomes_sql_real(tmp_path):
         assert value==pytest.approx(.91)
 
 
+def test_a_pulsar_degrees_away_no_longer_vetoes_a_candidate(tmp_path, monkeypatch):
+    """The veto matched on DM alone across the whole 5-degree query cone, so a
+    new source sharing a DM with any pulsar in the field was recorded as a
+    redetection of it."""
+    import sqlite3
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+    monkeypatch.setenv('LOTAAS_DB_PATH', str(tmp_path/'veto.sqlite'))
+    from lotaas_reprocessing import classify
+    from db import db_utils
+    from db.initialize_db import initialize_database
+    monkeypatch.setattr(db_utils, 'DB_PATH', str(tmp_path/'veto.sqlite'))
+    initialize_database(db_utils.DB_PATH)
+
+    beam = SkyCoord('12:00:00', '+45:00:00', unit=(u.hourangle, u.deg))
+    # One pulsar sharing the candidate DM, four degrees off the beam.
+    far = beam.directional_offset_by(0*u.deg, 4*u.deg)
+
+    class FakeTable:
+        def to_pandas(self):
+            import pandas as pd
+            return pd.DataFrame({
+                'PSRJ': ['J1200+4900'],
+                'RAJ': [far.ra.to_string(unit=u.hour, sep=':', pad=True, precision=2)],
+                'DECJ': [far.dec.to_string(unit=u.deg, sep=':', alwayssign=True,
+                                           pad=True, precision=2)],
+                'DM': [42.0]})
+
+    class FakeQuery:
+        def __init__(self, **kwargs):
+            self.table = FakeTable()
+
+    monkeypatch.setattr(classify, 'QueryATNF', FakeQuery)
+    # Stop after the veto decision: reaching FETCH means the veto did not fire.
+    monkeypatch.setattr(classify, 'get_model',
+                        lambda name: (_ for _ in ()).throw(RuntimeError('reached FETCH')))
+
+    candidates = tmp_path/'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n42.0\t12.0\t100.0\t12716\t1\n')
+    info = {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'}
+
+    with pytest.raises(RuntimeError, match='reached FETCH'):
+        classify.classify_candidates('beam.fil', candidates, str(tmp_path/'plots'), info)
+
+    # Inside the veto radius the same pulsar does account for the detection.
+    near = beam.directional_offset_by(0*u.deg, 0.2*u.deg)
+    FakeTable.to_pandas = lambda self: __import__('pandas').DataFrame({
+        'PSRJ': ['J1200+4900'],
+        'RAJ': [near.ra.to_string(unit=u.hour, sep=':', pad=True, precision=2)],
+        'DECJ': [near.dec.to_string(unit=u.deg, sep=':', alwayssign=True,
+                                    pad=True, precision=2)],
+        'DM': [42.0]})
+    classify.classify_candidates('beam.fil', candidates, str(tmp_path/'plots'), info)
+    with sqlite3.connect(db_utils.DB_PATH) as db:
+        assert db.execute(
+            "SELECT detection_type,pulsar_name FROM detections").fetchall() == [
+            ('known_pulsar', 'J1200+4900')]
+
+
 def test_classifier_records_empty_beams_and_missing_input(tmp_path, monkeypatch):
     import sqlite3
     monkeypatch.setenv('LOTAAS_DB_PATH', str(tmp_path/'classifier.sqlite'))

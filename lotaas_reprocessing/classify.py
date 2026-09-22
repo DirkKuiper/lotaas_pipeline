@@ -19,6 +19,16 @@ from db.db_utils import insert_beam_run, update_beam_run, insert_detection
 
 logger = logging.getLogger(__name__)
 
+# Cone fetched from the ATNF catalogue. Generous: the query is cheap and a
+# complete local catalogue costs nothing to filter.
+CATALOGUE_RADIUS_DEG = 5.0
+# Separation within which a known pulsar can plausibly account for a detection
+# in this beam. The veto used the full 5-degree query cone and matched on DM
+# alone, so a new source sharing a DM with any pulsar in a 78 square-degree
+# field was recorded as a redetection of it. Override with
+# LOTAAS_ATNF_VETO_RADIUS_DEG once the tied-array beam response is measured.
+VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
+
 
 def send_slack_message(text):
     # Notifications are deliberately local; cluster runs never send messages.
@@ -61,9 +71,21 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             params=['PSRJ', 'RAJ', 'DECJ', 'DM'],
             coord1=ra_str,
             coord2=dec_str,
-            radius=5.0
+            radius=CATALOGUE_RADIUS_DEG
         )
         known_psrs_df = query.table.to_pandas()
+        if not known_psrs_df.empty:
+            catalogue = SkyCoord(known_psrs_df["RAJ"].values, known_psrs_df["DECJ"].values,
+                                 unit=(u.hourangle, u.deg))
+            known_psrs_df = known_psrs_df.assign(
+                separation_deg=skycoord.separation(catalogue).deg)
+            # Vetoing on DM alone across the whole query cone labelled genuinely
+            # new sources as redetections: a pulsar degrees away cannot produce
+            # a detection in a tied-array beam, and at DM < 150 the grid is
+            # dense enough that some catalogue entry usually falls within the
+            # DM tolerance.
+            known_psrs_df = known_psrs_df[
+                known_psrs_df["separation_deg"] <= VETO_RADIUS_DEG].reset_index(drop=True)
         dm_tolerance = 0.5
         highest_snr = 0
 
@@ -98,10 +120,11 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             matched_psr = None
             if not known_psrs_df.empty:
-                for _, psr_row in known_psrs_df.iterrows():
-                    if abs(dm - psr_row["DM"]) <= dm_tolerance:
-                        matched_psr = psr_row
-                        break
+                # Nearest matching pulsar, not whichever the catalogue listed
+                # first, so the attribution names the plausible source.
+                close = known_psrs_df[(known_psrs_df["DM"] - dm).abs() <= dm_tolerance]
+                if not close.empty:
+                    matched_psr = close.loc[close["separation_deg"].idxmin()]
 
             if matched_psr is not None:
                 psr_name = matched_psr["PSRJ"]
@@ -112,6 +135,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                         "width": width,
                         "time": tcand,
                         "sample": sample_number,
+                        "separation_deg": float(matched_psr["separation_deg"]),
                     }
                 continue  # Skip further processing for redetections
 
@@ -282,7 +306,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 pulsar_name=psr_name
             )
             slack_messages.append(
-                f"*Redetected:* {psr_name}  DM={info['dm']:.2f}  highest S/N={info['snr']:.2f}  Width={info['width']}"
+                f"*Redetected:* {psr_name}  DM={info['dm']:.2f}  highest S/N={info['snr']:.2f}"
+                f"  Width={info['width']}  separation={info['separation_deg']:.3f} deg"
             )
             num_redetections += 1
 
