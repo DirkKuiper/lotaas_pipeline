@@ -179,6 +179,33 @@ def test_image_digest_is_cached_and_rehashes_when_the_image_changes(tmp_path):
     assert image_digest(image) != first
 
 
+def test_reclaim_removes_only_trials_that_cannot_be_retried(tmp_path):
+    """Trials are kept when the CPU stage fails, so it can be retried without
+    redoing dedispersion. Unbounded, a burst of failures fills a node disk."""
+    import sqlite3, time
+    from euroflash.reclaim import survey
+    ledger = tmp_path/'ledger.sqlite'
+    now = time.time()
+    with sqlite3.connect(ledger) as db:
+        db.execute('CREATE TABLE attempts(id INTEGER PRIMARY KEY, item TEXT, stage TEXT,'
+                   ' fingerprint TEXT, status TEXT, finished REAL)')
+        rows = [('done', 'success', now - 10),          # classified: trials are dead
+                ('stale', 'failed', now - 30*86400),    # long past retry
+                ('recent', 'failed', now - 3600),       # still worth retrying
+                ('running', 'running', None)]           # CPU stage in flight
+        for index, (item, status, finished) in enumerate(rows):
+            db.execute('INSERT INTO attempts VALUES (?,?,?,?,?,?)',
+                       (index, item, 'classify', 'f'*64, status, finished))
+    for item, _, _ in [(r[0], 0, 0) for r in rows]:
+        trials = tmp_path/'work'/'processed'/item/('f'*16)/'DM_trials'
+        trials.mkdir(parents=True)
+        (trials/'trial.dat').write_bytes(b'x'*1024)
+
+    found = survey(tmp_path/'work', ledger, retention_seconds=7*86400, now=now)
+    assert {path.parent.parent.name for path, _, _ in found} == {'done', 'stale'}
+    assert all(size == 1024 for _, size, _ in found)
+
+
 def test_resume_rechecks_output_and_records_errors(tmp_path):
     ledger = Ledger(tmp_path/'runs.sqlite')
     output = tmp_path/'result'

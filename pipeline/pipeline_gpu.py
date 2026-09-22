@@ -161,6 +161,20 @@ if __name__ == "__main__":
     # Extract the dedispersion plan from settings
     dedispersion_plan = settings["dedispersion_plan"]
 
+    # Refuse a beam that cannot fit rather than filling the disk part way
+    # through. Trials are only removed when the CPU stage succeeds, so failed
+    # beams accumulate about 3.6 GB each, and a disk filled mid-write fails
+    # every beam running beside this one with a truncated trial.
+    planned_bytes = 4 * sum(len(dm_values(entry)) * (nsamp // entry["downsample"])
+                            for entry in dedispersion_plan)
+    free_bytes = shutil.disk_usage(output_dir).free
+    if free_bytes < planned_bytes * 1.1:
+        raise RuntimeError(
+            f"DM trials for this beam need {planned_bytes/1e9:.1f} GB but only "
+            f"{free_bytes/1e9:.1f} GB is free in {output_dir}. Reclaim trials from "
+            f"failed beams with python3 -m euroflash.reclaim before retrying.")
+    print(f"DM trials will occupy {planned_bytes/1e9:.1f} GB; {free_bytes/1e9:.1f} GB free")
+
     # Loop over the dedispersion plan
     for entry in dedispersion_plan:
         low_dm = entry["low_dm"]
