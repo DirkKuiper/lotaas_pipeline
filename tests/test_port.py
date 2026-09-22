@@ -167,24 +167,72 @@ def test_import_updates_attempt_instead_of_duplicating(tmp_path):
     assert rows[0]['error']=='observed failure'
 
 
-def test_cached_filter_matches_original_statistic(tmp_path):
-    from lotaas_reprocessing.matched_filter import compute_filter_widths,generate_boxcar_kernel
-    rng=np.random.default_rng(18)
-    signal=rng.normal(size=16385).astype('float32');signal[4050:4080]+=15
-    p=tmp_path/'pulse.dat';signal.tofile(p)
-    tsamp=.02;downsample=4;dm=350.
-    t=np.arange(len(signal))*tsamp*downsample
-    widths=compute_filter_widths(tsamp,downsample)
-    responses=[]
-    for width in widths:
-        kernel=generate_boxcar_kernel(t,width*tsamp*downsample,1000)
-        response=np.fft.irfft(np.fft.rfft(signal)*np.conj(np.fft.rfft(kernel)),n=len(signal))
-        responses.append(response/np.std(response))
-    responses=np.array(responses);w,i=np.where(responses>=5)
-    actual=run_matched_filtering(p,tsamp,dm,downsample)
-    np.testing.assert_allclose(actual[0],t[i])
-    np.testing.assert_allclose(actual[2],responses[w,i])
-    np.testing.assert_array_equal(actual[3],widths[w])
+DT = .007864319719374176
+
+
+def test_boxcar_recovers_the_full_root_w_gain():
+    """The superseded tanh-smoothed kernel returned 0.707 of the ideal
+    statistic at width one, where most single pulses are found."""
+    from lotaas_reprocessing.matched_filter import boxcar_statistic
+    n = 8192
+    for width in [1, 2, 3, 4, 9, 20]:
+        pulse = np.zeros(n)
+        pulse[1000:1000 + width] = 1.
+        cumulative = np.empty(n + 1)
+        cumulative[0] = 0
+        np.cumsum(pulse, out=cumulative[1:])
+        total = cumulative[width:] - cumulative[:-width]
+        assert abs(total.max() / width - 1.) < 1e-9
+
+
+def test_statistic_is_calibrated_so_a_threshold_keeps_its_meaning():
+    from lotaas_reprocessing.matched_filter import boxcar_statistic
+    x = np.random.default_rng(7).normal(size=457728)
+    cumulative = np.empty(x.size + 1)
+    cumulative[0] = 0
+    np.cumsum(x, out=cumulative[1:])
+    for width in [1, 4, 32, 1024]:
+        statistic = boxcar_statistic(cumulative, width, np.random.default_rng(0))
+        assert abs(statistic.std() - 1.) < .05
+        assert abs(statistic.mean()) < .05
+
+
+@pytest.mark.parametrize('seconds,amplitude', [(30, 100), (120, 100), (300, 100), (600, 100)])
+def test_a_bright_long_pulse_does_not_suppress_itself(tmp_path, seconds, amplitude):
+    """Normalising by the standard deviation of a response containing the
+    signal put a 100-sigma pulse of 300 s at 4.09, below the threshold of 5."""
+    nsamp = 457728
+    t = np.arange(nsamp) * DT
+    x = np.random.default_rng(390).normal(size=nsamp)
+    x[abs(t - 1800) < seconds / 2] += amplitude
+    x = (x - x.mean()).astype('float32')
+    path = tmp_path / 'broad.dat'
+    x.tofile(path)
+    _, _, snr, _ = run_matched_filtering(path, DT, 10)
+    assert snr.size and snr.max() > 7
+
+
+def test_an_event_at_the_end_is_not_reported_at_time_zero(tmp_path):
+    """Circular convolution reported a pulse in the last ten samples as 81
+    detections in the first 0.1 seconds."""
+    x = np.random.default_rng(390).normal(size=8192).astype('float32')
+    x[-10:] += 100
+    x -= x.mean()
+    path = tmp_path / 'edge.dat'
+    x.tofile(path)
+    times, _, strengths, _ = run_matched_filtering(path, DT, 30)
+    assert not np.any(times < .1)
+    assert strengths.size and times[strengths.argmax()] > 8192 * DT * .9
+
+
+def test_searching_one_trial_twice_gives_the_same_candidates(tmp_path):
+    x = np.random.default_rng(11).normal(size=100000).astype('float32')
+    x[50000:50004] += 12
+    path = tmp_path / 'repeat.dat'
+    x.tofile(path)
+    first = run_matched_filtering(path, DT, 10)
+    second = run_matched_filtering(path, DT, 10)
+    assert all(np.array_equal(a, b) for a, b in zip(first, second))
 
 
 def test_mixed_or_truncated_dm_trials_are_rejected(tmp_path):

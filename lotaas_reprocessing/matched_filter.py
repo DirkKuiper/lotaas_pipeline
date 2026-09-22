@@ -1,3 +1,27 @@
+"""Boxcar matched filtering by rolling sums, against a robust noise scale.
+
+The statistic for width w is the sum over the window, centred and divided by
+a median-absolute-deviation estimate of that rolling sum's own scale. Summing
+w independent samples scales the noise by sqrt(w), so the MAD carries the
+sqrt(w) normalisation and the result is directly a signal-to-noise ratio.
+
+Three properties matter here, and none of them held for the circular-FFT
+implementation this replaces (measured in review/2026-09-22/diagnostics.json):
+
+  * A bright pulse no longer suppresses itself. Dividing by the standard
+    deviation of a response that contains the signal put a 100-sigma pulse of
+    300 s at a statistic of 4.09, below the detection threshold of 5. The MAD
+    is unmoved until a pulse fills more than half the observation.
+  * Windows are rectangular, so a pulse matching the window recovers the full
+    sqrt(w) gain. The tanh-smoothed kernel returned 0.707 of the ideal
+    statistic at width one, where most single pulses are found, and was not
+    monotonic in width.
+  * Rolling sums do not wrap. Circular convolution reported an event in the
+    last ten samples of a series as 81 detections in the first 0.1 seconds.
+
+Rolling sums are also roughly an order of magnitude cheaper than one inverse
+FFT per width per DM trial, which was the pipeline's throughput bottleneck.
+"""
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -6,12 +30,62 @@ from tqdm import tqdm
 from matplotlib.gridspec import GridSpec
 from functools import lru_cache
 
+# Scale factor taking a median absolute deviation to a Gaussian sigma.
+MAD_TO_SIGMA = 1.4826
+# Windows drawn to estimate one noise scale. The precision of a scale from n
+# samples goes as 1/sqrt(2n), so 65536 windows fix it to about 0.3%, which
+# moves a threshold of 5 by 0.014. Two medians over every window of every
+# width would otherwise cost more than the rolling sums themselves.
+SCALE_SAMPLE = 65536
+
+
+def _no_detections():
+    empty = np.array([], dtype=float)
+    return empty, empty, empty, np.array([], dtype=int)
+
+
+def robust_scale(values, rng=None):
+    """Centre and noise scale of a series, which its own pulses cannot inflate.
+
+    A median absolute deviation resists contamination up to half the samples.
+    Beyond that no in-band estimate of the noise is meaningful, and such a
+    signal is a bandpass or gain fault rather than an astrophysical pulse.
+
+    Long series are estimated from a random subsample. Random draws are used
+    rather than a stride because a stride can beat against periodic RFI and
+    bias the very quantity being estimated.
+    """
+    if rng is not None and values.size > SCALE_SAMPLE:
+        values = values[rng.integers(0, values.size, SCALE_SAMPLE)]
+    centre = float(np.median(values))
+    scale = float(np.median(np.abs(values - centre))) * MAD_TO_SIGMA
+    if scale > 0:
+        return centre, scale
+    # More than half the windows share one value: constant, or so heavily
+    # quantised that the median deviation vanishes. Fall back to the mean of
+    # the deviations that are non-zero, and report nothing if there are none.
+    deviation = np.abs(values - centre)
+    non_zero = deviation[deviation > 0]
+    if non_zero.size == 0:
+        return centre, 0.0
+    return centre, float(np.mean(non_zero)) * MAD_TO_SIGMA
+
+
+def boxcar_statistic(cumulative, width, rng=None):
+    """Signal-to-noise for every width-w window lying wholly inside the data."""
+    total = cumulative[width:] - cumulative[:-width]
+    centre, scale = robust_scale(total, rng)
+    if scale <= 0:
+        return None
+    return (total - centre) / scale
+
+
 def heaviside_step(t, step_time, slope):
-    """Smoothed Heaviside step function."""
+    """Smoothed Heaviside step function. Retained for regression comparison."""
     return 0.5 + 0.5 * np.tanh(slope * (t - step_time))
 
 def generate_boxcar_kernel(t, width, slope):
-    """Generates a smoothed, zero-mean boxcar kernel over the time array."""
+    """The superseded smoothed boxcar kernel. Retained for regression comparison."""
     tmax = np.max(t)
     kernel = (1 - heaviside_step(t, 0.5 * width, slope) + 
               heaviside_step(t, tmax - 0.5 * width, slope))
@@ -51,34 +125,49 @@ def _kernel_spectra(nsamp, tsamp, downsample):
     return widths, spectra
 
 
-def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5):
+def filter_widths_for(nsamp, tsamp, downsample):
+    """Widths to search, bounded so every window has enough siblings to
+    estimate a noise scale from. Half the series leaves at least nsamp/2
+    windows, which is ample for a median."""
+    return compute_filter_widths(tsamp, downsample,
+                                 max_duration=min(600, nsamp * tsamp * downsample / 2))
+
+
+def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5,
+                          seed=0):
     signal_data = np.fromfile(data_file, dtype="float32")
     nsamp = signal_data.size
     if nsamp < 2 or not np.isfinite(signal_data).all():
         raise ValueError(f"Invalid DM trial: {data_file}")
     if np.ptp(signal_data) == 0:
-        empty = np.array([], dtype=float)
-        return empty, empty, empty, np.array([], dtype=int)
-    widths, kernels = _kernel_spectra(nsamp, tsamp, downsample)
-    signal_fft = np.fft.rfft(signal_data)
-    indices, strengths, detected_widths = [], [], []
-    # Keep one response at a time, retaining the original FFT/kernel statistic.
-    for width, kernel_fft in zip(widths, kernels):
-        response = np.fft.irfft(signal_fft * np.conj(kernel_fft), n=nsamp)
-        std = np.std(response)
-        if std <= 0:
+        return _no_detections()
+    # Seeded per call, so re-searching one trial reproduces its candidates.
+    rng = np.random.default_rng(seed)
+    widths = filter_widths_for(nsamp, tsamp, downsample)
+    # One pass in float64: partial sums of float32 drift over millions of samples.
+    cumulative = np.empty(nsamp + 1, dtype=np.float64)
+    cumulative[0] = 0.0
+    np.cumsum(signal_data, dtype=np.float64, out=cumulative[1:])
+    starts, strengths, detected_widths = [], [], []
+    for width in widths:
+        width = int(width)
+        if width > nsamp:
             continue
-        response /= std
-        selected = np.flatnonzero(response >= detection_threshold)
-        indices.append(selected)
-        strengths.append(response[selected])
-        detected_widths.append(np.full(len(selected), width, dtype=int))
-    if not indices:
-        empty = np.array([], dtype=float)
-        return empty, empty, empty, np.array([], dtype=int)
-    samples = np.concatenate(indices)
+        statistic = boxcar_statistic(cumulative, width, rng)
+        if statistic is None:
+            continue
+        selected = np.flatnonzero(statistic >= detection_threshold)
+        if not selected.size:
+            continue
+        # Report the centre of the window, the arrival time a centred kernel gave.
+        starts.append(selected + (width - 1) / 2.0)
+        strengths.append(statistic[selected])
+        detected_widths.append(np.full(selected.size, width, dtype=int))
+    if not starts:
+        return _no_detections()
+    samples = np.concatenate(starts)
     strengths = np.concatenate(strengths)
-    return (samples * tsamp * downsample, np.full(len(samples), dm), strengths,
+    return (samples * tsamp * downsample, np.full(samples.size, dm), strengths,
             np.concatenate(detected_widths))
 
 
