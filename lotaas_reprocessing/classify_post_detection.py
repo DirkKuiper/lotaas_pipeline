@@ -2,7 +2,6 @@
 import os
 import re
 import logging
-import ssl
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -10,8 +9,6 @@ import yaml
 
 from numpy.polynomial import Polynomial
 from matplotlib.gridspec import GridSpec
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 
 from astropy.coordinates import SkyCoord
 from astropy import units as u
@@ -27,28 +24,34 @@ from lotaas_reprocessing.filterbank import FilterbankFile
 from lotaas_reprocessing.numpy_utils import compute_rfi_mask  # CPU fallback OK
 from lotaas_reprocessing.cupy_utils import fourier_domain_dedispersion  # uses GPU if available
 from lotaas_reprocessing.sap_beam_map import plot_sap_beam_layout, matched_filter_sn_at_idx
+from postproc.slack_client import Slack, SlackError
 
 logger = logging.getLogger(__name__)
 
-# Slack setup
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", os.environ.get("LOTAAS_SLACK_TOKEN", ""))
-CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C08HHTN8CTG")
-_client = WebClient(token=SLACK_BOT_TOKEN, ssl=ssl._create_unverified_context()) if SLACK_BOT_TOKEN else None
+# Notifications go through the standard-library Slack client. slack_sdk is
+# not installed in the runtime image, so this module could not be imported
+# there at all; the old path also disabled TLS verification while sending a
+# bot token, and fell back to a hardcoded channel id. Credentials now come
+# from ~/.config/lotaas/slackrc, as everywhere else.
+_slack = None
+
+
+def _slack_client():
+    global _slack
+    if _slack is None:
+        _slack = Slack()
+    return _slack
 
 
 def _send_slack_notification(image_path, title, text):
-    if not _client:
+    client = _slack_client()
+    if not client.enabled:
         return
     try:
-        _client.files_upload_v2(
-            channels=CHANNEL_ID,
-            file=image_path,
-            title=title,
-            initial_comment=text
-        )
-        print(f"[slack] Sent: {title}")
-    except SlackApiError as e:
-        print(f"[slack] Error: {e}")
+        client.upload(image_path, title=title, comment=text)
+        logger.info("Slack: sent %s", title)
+    except SlackError as error:
+        logger.warning("Slack upload failed: %s", error)
 
 
 def _packed_float_to_sexagesimal_string(val, is_ra=True):

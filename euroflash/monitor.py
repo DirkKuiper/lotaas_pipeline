@@ -6,7 +6,7 @@ import shlex
 import shutil
 import subprocess
 import time
-from euroflash.cluster import ALLOWED, ssh_args
+from euroflash.cluster import allowed_nodes, ssh_args
 from euroflash.collect import collect
 
 SNAPSHOT = '''
@@ -55,7 +55,10 @@ def main():
     p.add_argument('--control-dir',type=Path)
     p.add_argument('--once',action='store_true')
     a=p.parse_args()
-    if not set(a.nodes)<=ALLOWED:p.error('Only non-BFC GPU nodes are allowed')
+    permitted=allowed_nodes()
+    if not set(a.nodes)<=permitted:
+        p.error('Nodes must be among '+', '.join(sorted(permitted))
+                +' (set LOTAAS_ALLOWED_NODES to change)')
     if not a.run_name.replace('-','').replace('_','').isalnum():p.error('Invalid run name')
     while True:
         states={node:snapshot(node,a.run_name,a.work,a.ledger,a.control_dir) for node in a.nodes}
