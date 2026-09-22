@@ -169,3 +169,12 @@ logs/
 *.txt
 *.txt_cleaned
 *.db
+
+# Local credentials and run state
+.stagingrc
+.slackrc
+slackrc
+*.fil
+*.fits
+*.tar
+run-state/
