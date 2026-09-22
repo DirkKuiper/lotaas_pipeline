@@ -1,104 +1,86 @@
 #!/usr/bin/env python3
-import os
-import sys
+"""Flatfield beams with bounded memory and explicit central-beam completeness."""
+import argparse
 import glob
-import numpy as np
+import os
 import re
+import numpy as np
 from lotaas_reprocessing import filterbank
 
+
 def extract_beam_id(filename):
-    """Extract beam number from a filterbank filename."""
-    match = re.search(r"_BEAM(\d{1,3})|_B(\d{1,3})", filename)
-    if match:
-        return int(match.group(1) or match.group(2))
-    else:
-        raise ValueError(f"Could not extract beam number from filename: {filename}")
+    match = re.search(r'_(?:BEAM|B)(\d{1,3})(?:_|\.)', os.path.basename(filename))
+    if not match:
+        raise ValueError(f'Cannot extract beam number: {filename}')
+    return int(match.group(1))
 
-def read_filterbank_data(fil_file):
-    """Read a .fil file and return data and header."""
-    print(f"Reading filterbank: {fil_file}")
-    fb = filterbank.FilterbankFile(fil_file, mode="read")
-    data = np.flipud(fb.get_spectra(0, fb.nspec).T)
-    hdr = fb.header
-    fb.close()
-    return data, hdr
 
-def compute_flatfield(fil_files):
-    """Compute the mean beam from central beams (with padding)."""
-    central_beams = list(range(13, 74))
-    beam_data_list = []
-    nspecs = []
+def read_filterbank_data(filename):
+    fb = filterbank.FilterbankFile(filename)
+    try:
+        return np.flipud(fb.get_spectra(0, fb.nspec).T), fb.header
+    finally:
+        fb.close()
 
-    # First, read all valid central beam data
-    for fil_file in fil_files:
-        beam_id = extract_beam_id(fil_file)
-        if beam_id in central_beams:
-            print(f"Including beam {beam_id} in mean...")
-            data, _ = read_filterbank_data(fil_file)
-            beam_data_list.append(data)
-            nspecs.append(data.shape[1])
 
-    if not beam_data_list:
-        raise ValueError("No central beams found for flatfielding!")
+def compute_flatfield(files):
+    central = [f for f in files if 13 <= extract_beam_id(f) <= 73]
+    if not central:
+        raise ValueError('No central beams found for flatfielding')
+    metadata = []
+    reference = None
+    for path in central:
+        fb = filterbank.FilterbankFile(path)
+        signature = (fb.nchans, fb.tsamp, fb.tstart, fb.fch1, fb.foff)
+        if reference is not None and signature != reference:
+            raise ValueError('Central beam channel/time grids differ')
+        reference = signature
+        metadata.append(fb.nspec)
+        fb.close()
+    mean = np.zeros((reference[0], max(metadata)), dtype=np.float64)
+    # One beam at a time, instead of retaining all 61 full beam arrays.
+    for path in central:
+        data, _ = read_filterbank_data(path)
+        mean[:, :data.shape[1]] += data
+        if data.shape[1] < mean.shape[1]:
+            mean[:, data.shape[1]:] += data.mean(axis=1, keepdims=True)
+    mean /= len(central)
+    if not np.isfinite(mean).all() or np.any(mean == 0):
+        raise ValueError('Flatfield contains zero/nonfinite values')
+    return mean
 
-    # Find the max number of time samples
-    max_nspec = max(nspecs)
-    print(f"Padding all beams to max nspec: {max_nspec}")
 
-    # Pad and sum
-    mean_data = np.zeros((beam_data_list[0].shape[0], max_nspec))
-    for data in beam_data_list:
-        if data.shape[1] < max_nspec:
-            pad_width = max_nspec - data.shape[1]
-            print(f"Padding beam from {data.shape[1]} to {max_nspec}")
-            # Pad using the mean along the time axis
-            pad_value = np.mean(data, axis=1, keepdims=True)
-            padded = np.hstack([data, np.tile(pad_value, (1, pad_width))])
-        else:
-            padded = data
+def apply_flatfield(files, mean):
+    for path in files:
+        data, header = read_filterbank_data(path)
+        # Preserve the observed duration; do not fabricate padded science samples.
+        if data.shape[1] > mean.shape[1]:
+            raise ValueError('Beam extends beyond flatfield time grid')
+        data /= mean[:, :data.shape[1]]
+        output = path[:-4] + '_ff.fil'
+        fb = filterbank.create_filterbank_file(output + '.partial', header, nbits=32)
+        try:
+            fb.append_spectra(np.flipud(data).T)
+        finally:
+            fb.close()
+        os.replace(output + '.partial', output)
+        print('Flatfielded:', output, flush=True)
 
-        mean_data += padded
 
-    return mean_data / len(beam_data_list)
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('sap_directory')
+    p.add_argument('--allow-partial', action='store_true', help='Pilot only: permit fewer than 61 central beams')
+    a = p.parse_args()
+    files = sorted(glob.glob(os.path.join(a.sap_directory, 'B*', '*_32bit.fil')))
+    found = {extract_beam_id(f) for f in files if 13 <= extract_beam_id(f) <= 73}
+    missing = set(range(13, 74)) - found
+    if missing and not a.allow_partial:
+        raise ValueError(f'Missing {len(missing)} central beams. Use --allow-partial only for a pilot.')
+    if missing:
+        print(f'PILOT: flatfield uses only {len(found)} of 61 central beams', flush=True)
+    apply_flatfield(files, compute_flatfield(files))
 
-def apply_flatfield(fil_files, mean_data):
-    """Apply flatfielding and save new `_ff.fil` files."""
-    nchan, target_nspec = mean_data.shape
 
-    for fil_file in fil_files:
-        beam_id = extract_beam_id(fil_file)
-        print(f"Flatfielding beam {beam_id}")
-
-        data, header = read_filterbank_data(fil_file)
-        if data.shape[1] < target_nspec:
-            pad_width = target_nspec - data.shape[1]
-            print(f"Padding beam from {data.shape[1]} to {target_nspec}")
-            pad_value = np.mean(data, axis=1, keepdims=True)
-            data = np.hstack([data, np.tile(pad_value, (1, pad_width))])
-        elif data.shape[1] > target_nspec:
-            print(f"Truncating beam from {data.shape[1]} to {target_nspec}")
-            data = data[:, :target_nspec]
-
-        data /= mean_data  # Apply flatfield
-
-        outfname = fil_file.replace(".fil", "_ff.fil")
-        print(f"Saving flatfielded file to: {outfname}")
-
-        fb_out = filterbank.create_filterbank_file(outfname, header, nbits=32)
-        fb_out.append_spectra(np.flipud(data).T)  # Transpose back for writing
-        fb_out.close()
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python flatfield_fil.py <SAP directory>")
-        sys.exit(1)
-
-    sap_dir = sys.argv[1]
-    fil_files = sorted(glob.glob(os.path.join(sap_dir, "B*", "*_32bit.fil")))
-
-    if not fil_files:
-        print("No .fil files found.")
-        sys.exit(1)
-
-    mean_data = compute_flatfield(fil_files)
-    apply_flatfield(fil_files, mean_data)
+if __name__ == '__main__':
+    main()

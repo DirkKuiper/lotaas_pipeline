@@ -19,31 +19,29 @@ from numpy.polynomial import Polynomial
 from lotaas_reprocessing import filterbank
 from lotaas_reprocessing import plotting
 
-# Try importing GPU utilities; fallback to CPU on failure
-use_gpu = False
-try:
-    from lotaas_reprocessing.cupy_utils import fourier_domain_dedispersion, compute_rfi_mask
-    from lotaas_reprocessing import matched_filter_gpu as matched_filter
-    print("Using CuPy and GPU-accelerated dedispersion.")
-    use_gpu = True
-except (ModuleNotFoundError, ImportError) as e:
-    print(f"GPU acceleration unavailable ({e}). Falling back to CPU.")
-    from lotaas_reprocessing.numpy_utils import fourier_domain_dedispersion, compute_rfi_mask
-    from lotaas_reprocessing import matched_filter  # CPU-based filtering
+from pathlib import Path
+import argparse
+from lotaas_reprocessing.dedispersion import backend, iter_dedispersed
+from lotaas_reprocessing.dm_plan import dm_values, dm_label
 
 if __name__ == "__main__":
-    # Check for input arguments
-    if len(sys.argv) < 2:
-        print("Usage: python3 pipeline.py <input_fil_file> [output_directory]")
-        sys.exit(1)
-
-    # Input file
-    fname = sys.argv[1]
+    parser = argparse.ArgumentParser(description="LOTAAS dedispersion stage")
+    parser.add_argument("input_fil_file")
+    parser.add_argument("output_directory")
+    parser.add_argument("--settings", default=str(Path(__file__).resolve().parents[1] / "settings.yaml"))
+    parser.add_argument("--backend", choices=["cpu", "gpu", "auto"], default="gpu")
+    parser.add_argument("--pilot", action="store_true", help="Mark incomplete-beam validation runs")
+    parser.add_argument("--max-samples", type=int, help="Pilot only: read a prefix of the beam")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    started = time.monotonic()
+    xp = backend(args.backend)
+    use_gpu = xp is not np
+    from lotaas_reprocessing.numpy_utils import compute_rfi_mask
+    fname = args.input_fil_file
     base_fname = os.path.basename(fname).replace(".fil", "")
-
-    # Output directory
-    if len(sys.argv) > 2:
-        output_dir = sys.argv[2]
+    output_dir = args.output_directory
+    print("Dedispersion backend:", "gpu" if use_gpu else "cpu")
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -51,12 +49,12 @@ if __name__ == "__main__":
     print(f"Output directory: {output_dir}")
 
     # Read settings
-    with open("settings.yaml", "r") as fp:
+    with open(args.settings, "r") as fp:
         settings = yaml.load(fp, Loader=yaml.FullLoader)
     
     # Read filterbank
     fil = filterbank.FilterbankFile(fname, "read")
-    data = np.flipud(fil.get_spectra(0, fil.nspec).T)
+    data = np.flipud(fil.get_spectra(0, min(fil.nspec, args.max_samples) if args.max_samples else fil.nspec).T)
     fil.close()
 
     # Axes
@@ -82,14 +80,18 @@ if __name__ == "__main__":
     print(f"Masked data fraction: {masked_frac * 100:.2f} %")
 
     # Normalize and offset to zero
-    data = data / np.median(data) - 1
+    median = np.median(data)
+    if not np.isfinite(median) or median == 0:
+        raise ValueError("Invalid filterbank normalization")
+    data = data / median - 1
 
    
     # Define the bad channel index
     bad_channel = 138
 
     # Add the bad channel to the mask
-    mask[bad_channel, :] = True  # Mask all time samples for channel 138
+    if bad_channel < nchan:
+        mask[bad_channel, :] = True  # Mask all time samples for channel 138
     print(f"Channel {bad_channel} has been added to the mask.")
     
     # # Apply mask
@@ -117,8 +119,10 @@ if __name__ == "__main__":
 
    # Masking and replacing data with random noise
     print("Replacing masked data with random noise...")
-    random_data = np.random.normal(np.nanmean(masked_data), np.nanstd(masked_data), masked_data.shape)
-    masked_data[mask] = random_data[mask]
+    rng = np.random.default_rng(args.seed)
+    if not np.isfinite(masked_data).any():
+        raise ValueError("All data were masked")
+    masked_data[mask] = rng.normal(np.nanmean(masked_data), np.nanstd(masked_data), int(mask.sum()))
 
     print(f"nu shape: {nu.shape}, range: {nu.min()} - {nu.max()}")
 
@@ -165,29 +169,17 @@ if __name__ == "__main__":
         downsample = entry["downsample"]
 
         # Generate the DM values for this range
-        dms = np.arange(low_dm, high_dm, ddm)
+        dms = dm_values(entry)
 
         # Dedisperse for this range
         print(f"Dedispersing DM range {low_dm} to {high_dm} (step {ddm}, downsample {downsample})")
-        I_f_dm = fourier_domain_dedispersion(masked_data, hdr["CDELT1"] * downsample, nu, dms)
-
-        # Apply downsampling
-        I_f_dm = I_f_dm[:, ::downsample]
-
-        # Store downsample factor per DM trial for matched filtering
-        downsampling_map = {dm: downsample for dm in dms}
-
-        # iFFT to time domain
-        I_t_dm = np.real(np.fft.irfft(I_f_dm, axis=1)).astype("float32")
-
-       # Folder to save all DM trials
         dm_trials_dir = os.path.join(output_dir, "DM_trials")
         os.makedirs(dm_trials_dir, exist_ok=True)
-
-        # Save each DM trial
-        for i, dm in enumerate(dms):
-            dm_filename = os.path.join(dm_trials_dir, f"{base_fname}_DM{dm:.1f}")
-            I_t_dm[i].tofile(f"{dm_filename}.dat")
+        for dm, trial in iter_dedispersed(masked_data, tsamp, nu, dms, downsample, xp):
+            dm_filename = os.path.join(dm_trials_dir, f"{base_fname}_DM{dm_label(dm)}")
+            trial_cpu = xp.asnumpy(trial) if use_gpu else trial
+            trial_cpu.tofile(f"{dm_filename}.dat.partial")
+            os.replace(f"{dm_filename}.dat.partial", f"{dm_filename}.dat")
 
             # Write .inf files
             with open(f"{dm_filename}.inf", "w") as inf_file:
@@ -199,7 +191,7 @@ if __name__ == "__main__":
                 inf_file.write(f" J2000 Declination     (dd:mm:ss.ssss)  =  {fil.header.get('src_dej', '+00:00:00.0000')}\n")
                 inf_file.write(f" Epoch of observation (MJD)             =  {fil.header.get('tstart', 0.0)}\n")
                 inf_file.write(f" Dispersion measure (cm-3 pc)           =  {dm:.2f}\n")
-                inf_file.write(f" Number of bins in the time series      =  {I_t_dm.shape[1]}\n")
+                inf_file.write(f" Number of bins in the time series      =  {trial_cpu.size}\n")
                 inf_file.write(f" Width of each time series bin (sec)    =  {hdr['CDELT1'] * downsample:.6f}\n")
                 inf_file.write(f" Total bandwidth (MHz)                  =  {np.abs(fil.header['foff']) * fil.header['nchans']:.6f}\n")
                 inf_file.write(f" Number of channels                     =  {fil.header['nchans']}\n")
@@ -208,8 +200,8 @@ if __name__ == "__main__":
     # Save metadata to a YAML file
     metadata_file = os.path.join(output_dir, "metadata.yaml")
     with open(metadata_file, "w") as fp:
-        yaml.dump({"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "filename": fname}, fp)
+        yaml.dump({"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed, "elapsed_seconds": time.monotonic() - started}, fp)
 
     print(f"Saved metadata to {metadata_file}")
     
-    print("GPU processing complete.")
+    print("Dedispersion complete.")

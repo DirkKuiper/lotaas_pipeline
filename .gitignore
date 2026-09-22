@@ -178,3 +178,13 @@ slackrc
 *.fits
 *.tar
 run-state/
+
+# Credentials — never commit. Use ~/.config/lotaas/{stagingrc,slackrc} at mode 0600,
+# or LOTAAS_STAGING_CONFIG / LOTAAS_SLACK_CONFIG.
+staging/.stagingrc
+.stagingrc
+slackrc
+stagingrc
+*.macaroon
+macaroon.txt
+webdav_links.txt*

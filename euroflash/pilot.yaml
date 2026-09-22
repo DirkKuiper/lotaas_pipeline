@@ -1,0 +1,12 @@
+# Diagnostic smoke test only, NOT the production DM coverage.
+rfi_block_size: 128
+rfi_averaging_factor: 16
+dedispersion_plan:
+  - low_dm: 0.0
+    high_dm: 5.0
+    ddm: 1.0
+    downsample: 1
+  - low_dm: 5.0
+    high_dm: 10.0
+    ddm: 1.0
+    downsample: 2

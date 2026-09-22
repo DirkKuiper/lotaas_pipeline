@@ -1,123 +1,96 @@
 #!/usr/bin/env python3
-import os
-import sys
+"""Stream PSRFITS subintegrations into a 32-bit SIGPROC filterbank."""
 import argparse
+import os
+import re
 import numpy as np
 from astropy.io import fits
 from astropy.time import Time
+from lotaas_reprocessing import filterbank
 
-# Optional tqdm for local testing
-in_slurm = "SLURM_JOB_ID" in os.environ
-if not in_slurm:
-    from tqdm import tqdm
-
-from lotaas_reprocessing import filterbank 
 
 def parse_ids(filename):
-    """Extract OBSID, SAP, and BEAM from filename."""
-    parts = os.path.basename(filename.replace(".fits", "")).split("_")
-    obsid = parts[0]
-    sap = int(parts[1][3:])
-    beam = int(parts[2][4:])
-    return obsid, sap, beam
+    match = re.search(r'(L\d+)_SAP(\d+)_(?:BEAM|B)(\d+)', os.path.basename(filename))
+    if not match:
+        raise ValueError(f'Cannot parse observation/SAP/beam: {filename}')
+    return match[1], int(match[2]), int(match[3])
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Downsample PSRFITS to 32-bit filterbank")
-    parser.add_argument("-f", "--fscrunch", type=int, default=4, help="Average in frequency [default: 4]")
-    parser.add_argument("-t", "--tscrunch", type=int, default=16, help="Average in time [default: 16]")
-    parser.add_argument("-o", "--output", help="Output filterbank file name")
-    parser.add_argument("-d", "--dc", action="store_true", help="Mask DC channel [default: False]")
-    parser.add_argument("input", help="Input PSRFITS file")
-    args = parser.parse_args()
 
-    mchan, msamp = args.fscrunch, args.tscrunch
-    obsid, sap, beam = parse_ids(args.input)
-
-    # Default output
-    if args.output is None:
-        outfname = f"{obsid}_SAP{sap:03d}_B{beam:03d}_32bit.fil"
+def unpack(data, nbits, nsamp, nchan):
+    if nbits == 2:
+        packed = np.asarray(data, dtype=np.uint8).reshape(-1)
+        # PSRFITS packs four unsigned values, most significant bits first.
+        values = ((packed[:, None] >> np.array([6, 4, 2, 0], dtype=np.uint8)) & 3).reshape(-1)
+    elif nbits == 8:
+        values = np.asarray(data).reshape(-1)
     else:
-        outfname = args.output
+        raise ValueError(f'Unsupported PSRFITS bit depth: {nbits}')
+    return values.reshape(nsamp, nchan)
 
-    # Open file and extract headers
-    hdu = fits.open(args.input, mode="readonly", memmap=True)
-    hdr = hdu[0].header
-    subhdr = hdu["SUBINT"].header
 
-    nchan, nsamp, nsub = subhdr["NCHAN"], subhdr["NSBLK"], subhdr["NAXIS2"]
-    tsamp, nbit = subhdr["TBIN"], subhdr["NBITS"]
-    obsfreq, chanbw = hdr["OBSFREQ"], subhdr["CHAN_BW"]
-
-    # Fix bandwidths
-    subbandbw = 0.1953125
-    chanbw = subbandbw / np.round(subbandbw / np.abs(chanbw))
-    rawtsamp = 5.12e-6
-
-    # New frequency/time info
-    new_tsamp = np.round(tsamp * msamp / rawtsamp) * rawtsamp
-    new_nchan = nchan // mchan
-    new_freq = np.mean(hdu["SUBINT"].data["DAT_FREQ"][0].reshape(-1, mchan), axis=1)
-
-    # Allocate array
-    outdata = np.zeros((new_nchan, nsamp * nsub // msamp), dtype="float32")
-
-    subint_iter = range(nsub)
-    if not in_slurm:
-        subint_iter = tqdm(subint_iter)
-
-    for isub in subint_iter:
-        row = hdu["SUBINT"].data[isub]
-        data = row["DATA"]
-        offsets = row["DAT_OFFS"]
-        scales = row["DAT_SCL"]
-        weights = row["DAT_WTS"]
-
-        # Unpack
-        if nbit == 2:
-            spec = np.packbits(np.unpackbits(np.squeeze(data)).reshape(-1, 2), axis=1).reshape(-1, nchan)
-        elif nbit == 8:
-            spec = data.reshape(-1, nchan)
+def convert(input_path, output_path, fscrunch=4, tscrunch=16, dc=False, max_subints=None):
+    if fscrunch <= 0 or tscrunch <= 0:
+        raise ValueError('Scrunch factors must be positive')
+    with fits.open(input_path, memmap=True) as hdus:
+        hdr, sub = hdus[0].header, hdus['SUBINT']
+        nchan, nsamp = sub.header['NCHAN'], sub.header['NSBLK']
+        if sub.header.get('NPOL', 1) != 1:
+            raise ValueError('Only Stokes-I PSRFITS (NPOL=1) is supported')
+        if nchan % fscrunch or nsamp % tscrunch:
+            raise ValueError('Channel/subintegration lengths must be divisible by scrunch factors')
+        freqs = np.asarray(sub.data['DAT_FREQ'][0]).reshape(-1, fscrunch).mean(axis=1)
+        if freqs.size < 2 or not np.allclose(np.diff(freqs), np.median(np.diff(freqs)), rtol=1e-3, atol=1e-5):
+            raise ValueError('Expected uniformly spaced frequency channels')
+        reverse = freqs[0] < freqs[-1]
+        if reverse:
+            freqs = freqs[::-1]
+        if 'STT_IMJD' in hdr:
+            start = hdr['STT_IMJD'] + (hdr.get('STT_SMJD', 0) + hdr.get('STT_OFFS', 0)) / 86400
         else:
-            raise ValueError(f"Unsupported bit depth: {nbit}")
+            start = float(Time(hdr['DATE-OBS'], format='isot', scale='utc').mjd)
+        header = dict(telescope_id=11, machine_id=-1, data_type=1,
+                      source_name=hdr['SRC_NAME'], barycentric=0, pulsarcentric=0,
+                      src_raj=float(hdr['RA'].replace(':', '')),
+                      src_dej=float(hdr['DEC'].replace(':', '')), tstart=start,
+                      tsamp=float(sub.header['TBIN']) * tscrunch,
+                      foff=float(freqs[1] - freqs[0]), fch1=float(freqs[0]),
+                      nchans=len(freqs), nifs=1, nbits=32)
+        partial = str(output_path) + '.partial'
+        output = filterbank.create_filterbank_file(partial, header, nbits=32)
+        count = min(len(sub.data), max_subints) if max_subints else len(sub.data)
+        try:
+            for index in range(count):
+                row = sub.data[index]
+                data = unpack(row['DATA'], sub.header['NBITS'], nsamp, nchan).astype(np.float32)
+                data = (data * row['DAT_SCL'].reshape(1, nchan) + row['DAT_OFFS'].reshape(1, nchan)) * row['DAT_WTS'].reshape(1, nchan)
+                if dc:
+                    data[:, ::16] = np.nan
+                data = np.nanmean(data.reshape(nsamp, -1, fscrunch), axis=2)
+                data = np.nanmean(data.reshape(-1, tscrunch, len(freqs)), axis=1)
+                if reverse:
+                    data = data[:, ::-1]
+                if not np.isfinite(data).all():
+                    raise ValueError(f'Nonfinite output in subintegration {index}')
+                output.append_spectra(data)
+        finally:
+            output.close()
+        os.replace(partial, output_path)
+    print(f'Converted {count} subintegrations: {output_path}', flush=True)
 
-        # Scale
-        data = (spec * scales + offsets) * weights
 
-        # Mask DC
-        if args.dc:
-            data[:, 0::16] = np.nan
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('-f', '--fscrunch', type=int, default=4)
+    p.add_argument('-t', '--tscrunch', type=int, default=16)
+    p.add_argument('-o', '--output')
+    p.add_argument('-d', '--dc', action='store_true')
+    p.add_argument('--max-subints', type=int, help='Pilot only: convert a prefix')
+    p.add_argument('input')
+    a = p.parse_args()
+    obs, sap, beam = parse_ids(a.input)
+    output = a.output or f'{obs}_SAP{sap:03d}_B{beam:03d}_32bit.fil'
+    convert(a.input, output, a.fscrunch, a.tscrunch, a.dc, a.max_subints)
 
-        # Downsample
-        data = np.nanmean(data.reshape(nsamp, -1, mchan), axis=2)
-        data = np.nanmean(data.reshape(-1, msamp, new_nchan), axis=1)
 
-        # Store
-        imin = isub * nsamp // msamp
-        outdata[:, imin:imin + data.shape[0]] = data.T.astype("float32")
-
-    # Build filterbank header
-    fil_header = {
-        "telescope_id": 11,
-        "machine_id": -1,
-        "data_type": 1,
-        "source_name": hdr["SRC_NAME"],
-        "barycentric": 0,
-        "pulsarcentric": 0,
-        "src_raj": float(hdr["RA"].replace(":", "")),
-        "src_dej": float(hdr["DEC"].replace(":", "")),
-        "tstart": Time(hdr["DATE-OBS"], format="isot", scale="utc").mjd,
-        "tsamp": new_tsamp,
-        "foff": -chanbw * mchan,
-        "fch1": obsfreq - np.abs(chanbw) * nchan / 2 + chanbw * nchan,
-        "nchans": new_nchan,
-        "nifs": 1,
-        "nbits": 32
-    }
-
-    # Write out filterbank
-    print(f"Writing filterbank to {outfname}")
-    outfil = filterbank.create_filterbank_file(outfname, fil_header, nbits=32)
-    outfil.append_spectra(np.flipud(outdata).T)  # Match format
-    outfil.close()
-
-    print(f"Done. Output: {outfname}")
+if __name__ == '__main__':
+    main()

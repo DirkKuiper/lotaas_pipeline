@@ -1,75 +1,63 @@
-from stager_access import stage, get_status, get_webdav_urls_requested, get_macaroons
-import sys
-import os
+#!/usr/bin/env python3
+"""Submit once, persist the request ID, and resume polling without restaging."""
+import argparse
+import json
+from pathlib import Path
 import time
+try:
+    from .client import StageIT, private_json
+except ImportError:
+    from client import StageIT, private_json
 
-# Usage: python stage_and_extract.py <srm_list.txt> <output_directory>
-if len(sys.argv) != 3:
-    print("Usage: python stage_and_extract.py <srm_list.txt> <output_directory>")
-    sys.exit(1)
 
-srm_file = sys.argv[1]
-output_dir = sys.argv[2]
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('srm_list', type=Path)
+    p.add_argument('output_directory', type=Path)
+    p.add_argument('--config')
+    p.add_argument('--poll-seconds', type=float, default=60)
+    p.add_argument('--timeout-hours', type=float, default=24)
+    p.add_argument('--submit-only', action='store_true')
+    a = p.parse_args()
+    api = StageIT(a.config)
+    surls = list(dict.fromkeys(line.strip() for line in a.srm_list.read_text().splitlines()
+                               if line.strip() and not line.lstrip().startswith('#')))
+    a.output_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state_path = a.output_directory / 'request.json'
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        if state['surls'] != surls:
+            raise ValueError('Existing request has different input; use a new staging directory')
+    else:
+        state = {'request_id': api.submit(surls), 'surls': surls}
+        private_json(state_path, state)
+    print('StageIT request:', state['request_id'], flush=True)
+    if a.submit_only:
+        return
+    deadline = time.monotonic() + a.timeout_hours * 3600
+    while True:
+        result = api.status(state['request_id'])
+        private_json(a.output_directory / 'status.json', result)
+        status = result['currentStatus'].lower()
+        print('StageIT status:', status, flush=True)
+        if status == 'success':
+            manifest = api.downloads(state['request_id'])
+            if len(manifest['urls']) != len(surls):
+                raise RuntimeError('StageIT returned fewer URLs than requested')
+            private_json(a.output_directory / 'downloads.json', manifest)
+            (a.output_directory / 'webdav_links.txt').write_text('\n'.join(manifest['urls']) + '\n')
+            if len(manifest['macaroons']) == 1:
+                token_path = a.output_directory / 'macaroon.txt'
+                token_path.touch(mode=0o600)
+                token_path.chmod(0o600)
+                token_path.write_text(manifest['macaroons'][0]['content'])
+            return
+        if status in {'failed', 'aborted', 'partial success'}:
+            raise RuntimeError(f'Staging {status}; inspect status.json. Incomplete data will not be processed silently.')
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Staging deadline reached; rerun to resume the same request')
+        time.sleep(a.poll_seconds)
 
-# Check that the SRM file exists
-if not os.path.isfile(srm_file):
-    print(f"Error: SRM list file '{srm_file}' not found.")
-    sys.exit(1)
 
-# Ensure the output directory exists
-os.makedirs(output_dir, exist_ok=True)
-
-# Read SRM URLs from file, stripping whitespace and skipping empty lines
-with open(srm_file, 'r') as f:
-    surls = [line.strip() for line in f if line.strip()]
-
-# Submit staging request
-print("Submitting staging request...")
-stageid = stage(surls)
-print(f"Stage ID: {stageid}")
-
-# Poll for staging completion
-tries = 0
-max_tries = 1440 # Maximum wait one day for data to be staged
-final_states = {"success", "failed", "aborted", "partial success"}
-
-while True:
-    status = get_status(stageid)
-    state = status if isinstance(status, str) else status.get("status", "unknown")
-    print(f"[try {tries}] Status: {state}")
-
-    if state.lower() in final_states:
-        break
-
-    tries += 1
-    if tries >= max_tries:
-        print("Max retries exceeded.")
-        sys.exit(1)
-
-    time.sleep(60)
-
-# If successful, extract WebDAV URLs and macaroon token and save them
-if state.lower() == "success":
-    webdav_urls = get_webdav_urls_requested(stageid)
-    macaroons = get_macaroons(stageid)
-    token = next(iter(macaroons[0].values()))
-
-    webdav_path = os.path.join(output_dir, "webdav_links.txt")
-    macaroon_path = os.path.join(output_dir, "macaroon.txt")
-
-    # Write WebDAV URLs to file
-    with open(webdav_path, "w") as f:
-        for url in webdav_urls:
-            f.write(url + "\n")
-
-    # Write macaroon token to file
-    with open(macaroon_path, "w") as f:
-        f.write(token)
-
-    print("Staging complete.")
-    print(f"Saved WebDAV links to {webdav_path}")
-    print(f"Saved macaroon token to {macaroon_path}")
-
-else:
-    print(f"Staging failed: status = {state}")
-    sys.exit(1)
+if __name__ == '__main__':
+    main()

@@ -1,5 +1,7 @@
 # LOTAAS Reprocessing Pipeline
 
+For the EuroFlash Apptainer port without Slurm, see [euroflash/README.md](euroflash/README.md).
+
 This repository contains a modular, SLURM-based pipeline for processing LOTAAS beams using Singularity containers. It handles staging, downloading, downsampling, flatfielding, GPU/CPU-based candidate generation, and post-processing.
 
 ## Directory Overview

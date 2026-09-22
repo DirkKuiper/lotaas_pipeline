@@ -3,9 +3,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import logging
-import ssl
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 from your.candidate import Candidate
 from your.utils.math import normalise
 from your.candidate import crop
@@ -20,29 +17,17 @@ from psrqpy import QueryATNF
 # Import DB utils
 from db.db_utils import insert_beam_run, update_beam_run, insert_detection
 
-SLACK_BOT_TOKEN = "xoxb-513966140291-8603128801253-OIZMLciSFmNefi4An84YDNKE"
-CHANNEL_ID = "C08HHTN8CTG"
-
-client = WebClient(token=SLACK_BOT_TOKEN, ssl=ssl._create_unverified_context())
 logger = logging.getLogger(__name__)
 
+
 def send_slack_message(text):
-    try:
-        client.chat_postMessage(channel=CHANNEL_ID, text=text)
-        print("Slack message sent.")
-    except SlackApiError as e:
-        print(f"Slack error: {e}")
+    # Notifications are deliberately local; cluster runs never send messages.
+    logger.info(text)
+
 
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None):
     os.makedirs(output_dir, exist_ok=True)
-
-    if not os.path.exists(candidate_file):
-        print(f"Candidate file {candidate_file} not found. Skipping.")
-        return
-
-    candidates_df = pd.read_csv(candidate_file, delim_whitespace=True)
-    candidates_df.columns = candidates_df.columns.str.strip().str.lower()
-
+    observation_info = observation_info or {}
     beam_id = os.path.basename(filterbank_file)
     observation_date = observation_info.get("Observation Date", "Unknown")
     output_dir = os.path.abspath(output_dir)
@@ -53,10 +38,17 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
         observation_date=observation_date,
         output_dir=output_dir,
         log_file=log_file,
-        code_version="v1.0"
+        code_version=os.environ.get("LOTAAS_RUN_FINGERPRINT", "unversioned")
     )
 
     try:
+        candidates_df = pd.read_csv(candidate_file, sep=r"\s+")
+        candidates_df.columns = candidates_df.columns.str.strip().str.lower()
+        candidates_df = candidates_df[(candidates_df["dm"] >= 10) & (candidates_df["s/n"] > 7)]
+        if candidates_df.empty:
+            update_beam_run(beam_run_id, outcome="no_candidates", num_candidates=0,
+                           num_redetections=0, highest_snr=0)
+            return
         skycoord = SkyCoord(
             observation_info["RA (J2000)"],
             observation_info["DEC (J2000)"],
@@ -83,7 +75,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
         )
 
         model_names = ["a", "b", "c", "d", "e", "f"]
-        fetch_models = {name: get_model(name) for name in model_names}
+        fetch_models = None
 
         # Dict to store highest S/N redetections per pulsar
         redetections_best = {}
@@ -117,9 +109,14 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     redetections_best[psr_name] = {
                         "dm": dm,
                         "snr": snr,
-                        "width": width
+                        "width": width,
+                        "time": tcand,
+                        "sample": sample_number,
                     }
                 continue  # Skip further processing for redetections
+
+            if fetch_models is None:
+                fetch_models = {name: get_model(name) for name in model_names}
 
             # Proceed with classification of non-pulsar candidates
             time_size, freq_size, dm_size = 256, 256, 256
@@ -132,7 +129,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 label=-1,
                 snr=snr,
                 min_samp=256,
-                device=0,
+                device=-1,
             )
             cand.get_chunk()
             cand.dmtime(dmsteps=256)
@@ -140,12 +137,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             fil = FilterbankFile(filterbank_file, "read")
             f_start, delta_f, nchan = fil.fch1, fil.foff, fil.nchans
+            fil.close()
             frequency_axis = np.flip(f_start + np.arange(nchan) * delta_f)
 
             # Decimate, crop, and normalize FT
             cand.decimate(key="ft", axis=0, pad=True, decimate_factor=max(1, width // 2), mode="median")
             cand.dedispersed = crop(cand.dedispersed, cand.dedispersed.shape[0] // 2 - time_size // 2, time_size, 0)
-            cand.decimate(key="ft", axis=1, pad=True, decimate_factor=cand.dedispersed.shape[1] // freq_size, mode="median")
+            cand.decimate(key="ft", axis=1, pad=True, decimate_factor=max(1, cand.dedispersed.shape[1] // freq_size), mode="median")
             cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
             cand.dedispersed = normalise(cand.dedispersed)
 
@@ -170,9 +168,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             # Prepare data for FETCH classification
             X = np.reshape(cand.dedispersed, (1, 256, 256, 1))
             Y = np.reshape(cand.dmt, (1, 256, 256, 1))  # Ensure `dmt` is included
+            if not np.isfinite(X).all() or not np.isfinite(Y).all():
+                raise ValueError(f"Nonfinite FETCH input at DM={dm}, time={tcand}")
 
             fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
                            for name, model in fetch_models.items()}
+            if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
+                raise ValueError(f"Invalid FETCH probabilities at DM={dm}, time={tcand}")
             highest_prob = max(fetch_probs.values())
 
             if highest_prob <= 0.5:
@@ -180,6 +182,9 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             insert_detection(
                 beam_id=beam_id,
+                beam_run_id=beam_run_id,
+                time_seconds=tcand,
+                sample_number=sample_number,
                 candidate_dm=dm,
                 snr=snr,
                 width_samples=width,
@@ -198,11 +203,15 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 f"Max DM NE2001: {dm_ne2001:.1f} | Max DM YMW16: {dm_ymw16:.1f}"
             )
 
-            dm_time_axis = np.arange(cand.dmt.shape[1]) * cand.tsamp + tcand
+            # Both arrays have been time-decimated and cropped around the event.
+            # Display relative time, including the decimation factor, rather than
+            # labelling the beginning of the cropped window as the event time.
+            plot_tsamp = cand.tsamp * time_decimate_factor
+            dm_time_axis = (np.arange(cand.dmt.shape[1]) - (cand.dmt.shape[1]-1)/2) * plot_tsamp
             dm_values = np.linspace(dm - 5, dm + 5, dm_size)
             time_series = np.sum(cand.dedispersed, axis=1)
             time_series = time_series * (snr / np.max(time_series))
-            time_axis = np.arange(len(time_series)) * cand.tsamp + tcand
+            time_axis = (np.arange(len(time_series)) - (len(time_series)-1)/2) * plot_tsamp
 
             # Figure
             fig = plt.figure(figsize=(14,10))
@@ -214,7 +223,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             ax_obs = fig.add_subplot(gs[0,0:5])
             ax_obs.axis("off")
             ax_obs.text(0.5,0.5,
-                f"{beam_id} DM={dm:.2f} Width={width} S/N={snr:.2f}",
+                f"{beam_id} DM={dm:.2f} Width={width} S/N={snr:.2f} Time={tcand:.3f}s",
                 ha="center",va="center",fontsize=10,family="monospace")
 
             ax_fetch = fig.add_subplot(gs[1,0:5])
@@ -234,14 +243,14 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             ax_ft = fig.add_subplot(gs[3,0:3])
             ax_ft.imshow(cand.dedispersed.T,aspect="auto",cmap="viridis",
-                extent=[tcand,tcand+time_size*cand.tsamp,frequency_axis.min(),frequency_axis.max()])
-            ax_ft.set_xlabel("Time(s)")
+                extent=[time_axis.min(),time_axis.max(),frequency_axis.min(),frequency_axis.max()])
+            ax_ft.set_xlabel("Time relative to candidate (s)")
             ax_ft.set_ylabel("Freq(MHz)")
 
             ax_dmt = fig.add_subplot(gs[3,3:5])
-            ax_dmt.imshow(cand.dmt,aspect="auto",cmap="viridis",
+            ax_dmt.imshow(cand.dmt,aspect="auto",cmap="viridis",origin="lower",
                 extent=[dm_time_axis.min(),dm_time_axis.max(),dm_values.min(),dm_values.max()])
-            ax_dmt.set_xlabel("Time(s)")
+            ax_dmt.set_xlabel("Time relative to candidate (s)")
             ax_dmt.set_ylabel("DM")
 
             ax_psr = fig.add_subplot(gs[4,0:5])
@@ -259,29 +268,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             plt.savefig(out_path,dpi=300)
             plt.close()
 
-            # Send Slack message for new real candidate
-            try:
-                response = client.files_upload_v2(
-                    channels=CHANNEL_ID,
-                    initial_comment=(
-                        f"*New candidate detected!*\n"
-                        f"{beam_id}\n"
-                        f"DM = {dm:.2f} pc/cm³\n"
-                        f"S/N = {snr:.2f}\n"
-                        f"Width = {width} samples\n"
-                        f"FETCH max probability = {highest_prob:.2f}"
-                    ),
-                    file=out_path,
-                    title=os.path.basename(out_path)
-                )
-                print(f"Slack image sent for candidate DM={dm:.2f}, SNR={snr:.2f}")
-            except SlackApiError as e:
-                print(f"Slack error when sending candidate image: {e}")
-
         # Insert and announce only the best redetections per pulsar
         for psr_name, info in redetections_best.items():
             insert_detection(
                 beam_id=beam_id,
+                beam_run_id=beam_run_id,
+                time_seconds=info["time"],
+                sample_number=info["sample"],
                 candidate_dm=info["dm"],
                 snr=info["snr"],
                 width_samples=info["width"],

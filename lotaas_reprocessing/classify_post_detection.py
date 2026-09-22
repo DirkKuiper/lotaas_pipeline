@@ -31,7 +31,7 @@ from lotaas_reprocessing.sap_beam_map import plot_sap_beam_layout, matched_filte
 logger = logging.getLogger(__name__)
 
 # Slack setup
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "xoxb-513966140291-8603128801253-OIZMLciSFmNefi4An84YDNKE")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", os.environ.get("LOTAAS_SLACK_TOKEN", ""))
 CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C08HHTN8CTG")
 _client = WebClient(token=SLACK_BOT_TOKEN, ssl=ssl._create_unverified_context()) if SLACK_BOT_TOKEN else None
 

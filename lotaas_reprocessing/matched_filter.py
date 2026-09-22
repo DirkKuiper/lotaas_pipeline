@@ -4,6 +4,7 @@ import os
 import re
 from tqdm import tqdm
 from matplotlib.gridspec import GridSpec
+from functools import lru_cache
 
 def heaviside_step(t, step_time, slope):
     """Smoothed Heaviside step function."""
@@ -30,50 +31,67 @@ def compute_filter_widths(tsamp, downsample, max_duration=600):
             np.array: Optimized filter widths in samples.
         """
         min_width = 1  # Smallest width to test in samples
-        max_width = int(max_duration / (tsamp * downsample))  # Convert max duration to samples
+        max_width = max(1, int(max_duration / (tsamp * downsample)))  # Convert max duration to samples
         
         # Generate exponentially spaced filter widths
         filter_widths = np.unique(np.geomspace(min_width, max_width, num=16).astype(int))
         
         return np.array(filter_widths)
 
-def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5):
-    filter_widths_samples = compute_filter_widths(tsamp, downsample)
+@lru_cache(maxsize=8)
+def _kernel_spectra(nsamp, tsamp, downsample):
+    """Reuse identical filters across DM trials of the same length/sampling."""
+    # Windows as long as a short pilot observation wrap onto themselves and
+    # become constant. Restrict the search to half of the available duration.
+    widths = compute_filter_widths(tsamp, downsample,
+                                  max_duration=min(600, (nsamp-1)*tsamp*downsample/2))
+    t = np.arange(nsamp) * tsamp * downsample
+    spectra = tuple(np.fft.rfft(generate_boxcar_kernel(t, int(w) * tsamp * downsample, slope=1000))
+                    for w in widths)
+    return widths, spectra
 
-    # Load dedispersed data and set up time axis
+
+def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5):
     signal_data = np.fromfile(data_file, dtype="float32")
     nsamp = signal_data.size
-    t = np.arange(nsamp) * tsamp * downsample  # Time array
-    
-    # Fourier transform of the signal data
+    if nsamp < 2 or not np.isfinite(signal_data).all():
+        raise ValueError(f"Invalid DM trial: {data_file}")
+    if np.ptp(signal_data) == 0:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty, np.array([], dtype=int)
+    widths, kernels = _kernel_spectra(nsamp, tsamp, downsample)
     signal_fft = np.fft.rfft(signal_data)
-    filtered_responses = np.zeros((len(filter_widths_samples), nsamp))
+    indices, strengths, detected_widths = [], [], []
+    # Keep one response at a time, retaining the original FFT/kernel statistic.
+    for width, kernel_fft in zip(widths, kernels):
+        response = np.fft.irfft(signal_fft * np.conj(kernel_fft), n=nsamp)
+        std = np.std(response)
+        if std <= 0:
+            continue
+        response /= std
+        selected = np.flatnonzero(response >= detection_threshold)
+        indices.append(selected)
+        strengths.append(response[selected])
+        detected_widths.append(np.full(len(selected), width, dtype=int))
+    if not indices:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty, np.array([], dtype=int)
+    samples = np.concatenate(indices)
+    strengths = np.concatenate(strengths)
+    return (samples * tsamp * downsample, np.full(len(samples), dm), strengths,
+            np.concatenate(detected_widths))
 
-    # Apply matched filtering for each filter width
-    for i, width_samples in enumerate(filter_widths_samples):
-        width_seconds = width_samples * tsamp * downsample  # Convert to seconds
-        kernel = generate_boxcar_kernel(t, width_seconds, slope=1000)
-        kernel_fft = np.fft.rfft(kernel)
-        response_fft = signal_fft * np.conj(kernel_fft)
-        filtered_response = np.fft.irfft(response_fft)
-        filtered_responses[i] = filtered_response / np.std(filtered_response)
-
-    # Identify significant responses
-    significant_indices = np.where(filtered_responses >= detection_threshold)
-    detection_times = t[significant_indices[1]]
-    detection_strengths = filtered_responses[significant_indices]
-    detection_dms = np.full(len(detection_strengths), dm)
-    detection_widths_samples = filter_widths_samples[significant_indices[0]]  # Corresponding filter widths in samples
-
-    return detection_times, detection_dms, detection_strengths, detection_widths_samples
 
 def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan, detection_threshold=5):
     """Runs CPU-based matched filtering across all DM trials."""
     
     all_candidates = []
+    candidate_count = 0
 
     # Find all .dat files in the DM trials directory
-    dm_files = [f for f in os.listdir(dm_trials_dir) if f.endswith(".dat")]
+    dm_files = sorted(f for f in os.listdir(dm_trials_dir) if f.endswith(".dat"))
+    if not dm_files:
+        raise ValueError("No dedispersed trials to search")
 
     # Progress bar for matched filtering
     for dm_file in tqdm(dm_files, desc="Matched Filtering Progress", unit="file"):
@@ -94,33 +112,36 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
             )
 
             # Calculate sample indices
-            detection_samples = (detection_times / tsamp).astype(int)
+            detection_samples = np.rint(detection_times / tsamp).astype(int)
+            detection_widths_samples = detection_widths_samples * downsample  # base filterbank samples
+            from lotaas_reprocessing.cluster import MAX_CANDIDATES
+            candidate_count += len(detection_times)
+            if candidate_count > MAX_CANDIDATES:
+                raise RuntimeError(f"Too many candidates (>{MAX_CANDIDATES}) at {dm_file}; inspect RFI before retrying")
 
             # Collect all candidates
-            for time, dm, strength, sample, width_samples in zip(detection_times, detection_dms, detection_strengths, detection_samples, detection_widths_samples):
-                all_candidates.append((dm, strength, time, sample, width_samples))
+            if len(detection_times):
+                all_candidates.append(np.column_stack((detection_dms,detection_strengths,
+                    detection_times,detection_samples,detection_widths_samples)))
+
+    # Compact numeric arrays avoid millions of Python tuples and scalar objects.
+    candidates = np.concatenate(all_candidates) if all_candidates else np.empty((0,5))
+    del all_candidates
 
     # Write all candidates to a .cands file
     cands_filepath = os.path.join(output_dir, "all_detected_candidates.cands")
     with open(cands_filepath, "w") as cands_file:
         cands_file.write("# DM(pc/cm^3)  Detection Strength  Time(s)  Sample  Filter Width(samples)\n")
-        for dm, strength, time, sample, width_samples in all_candidates:
-            cands_file.write(f"{dm:.3f}  {strength:.3f}  {time:.6f}  {sample}  {width_samples}\n")
+        np.savetxt(cands_file,candidates,fmt=['%.3f','%.3f','%.6f','%d','%d'],delimiter='  ')
     print(f"All candidates written to {cands_filepath}")
 
     # Separate candidates into lists for plotting
-    dms = [c[0] for c in all_candidates]
-    strengths = [c[1] for c in all_candidates]
-    times = [c[2] for c in all_candidates]
+    dms,strengths,times = candidates[:,:3].T
 
     # Calculate summed S/N for each DM
-    from collections import defaultdict
-    summed_sn_by_dm = defaultdict(float)
-    for dm, strength in zip(dms, strengths):
-        summed_sn_by_dm[dm] += strength
-
-    sorted_dms = sorted(summed_sn_by_dm.keys())
-    summed_sn = [summed_sn_by_dm[dm] for dm in sorted_dms]
+    sorted_dms,dm_inverse = np.unique(dms,return_inverse=True)
+    summed_sn = np.bincount(dm_inverse,weights=strengths)
+    del dm_inverse
 
     # Multi-panel plot setup
     fig = plt.figure(figsize=(12, 12))
@@ -142,14 +163,15 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
 
     # Top-right: Signal-to-Noise vs. DM
     ax3 = fig.add_subplot(gs[0, 2])
-    ax3.scatter(dms, strengths, color='black', s=1)
+    display_stride=max(1,int(np.ceil(len(times)/100000)))
+    ax3.scatter(dms[::display_stride], strengths[::display_stride], color='black', s=1)
     ax3.set_xlabel("DM (pc cm$^{-3}$)")
     ax3.set_xscale('log')
     ax3.set_ylabel("Signal-to-Noise")
 
     # Middle panel: Time vs. DM scatter plot
     ax4 = fig.add_subplot(gs[1, :])
-    scatter = ax4.scatter(times, dms, c=strengths, cmap='viridis', s=5)
+    scatter = ax4.scatter(times[::display_stride], dms[::display_stride], c=strengths[::display_stride], cmap='viridis', s=5)
     ax4.set_xlabel("Time (s)")
     ax4.set_ylabel("DM (pc cm$^{-3}$)")
     ax4.set_yscale('log')
@@ -157,7 +179,7 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
 
     # Bottom panel: Summed S/N by DM
     ax5 = fig.add_subplot(gs[2, :])
-    ax5.bar(sorted_dms, summed_sn, width=sorted_dms[1] - sorted_dms[0], color='blue', alpha=0.7, edgecolor='black')
+    ax5.bar(sorted_dms, summed_sn, width=(sorted_dms[1] - sorted_dms[0]) if len(sorted_dms) > 1 else 0.1, color='blue', alpha=0.7, edgecolor='black')
     ax5.set_xlabel("DM (pc cm$^{-3}$)")
     ax5.set_xscale('log')
     ax5.set_ylabel("Summed Signal-to-Noise")
@@ -175,5 +197,3 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
     plt.savefig(overview_path, bbox_inches='tight', dpi=300)
     plt.close(fig)
     print(f"Overview plot saved as {overview_path}")
-
-

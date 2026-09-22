@@ -89,9 +89,11 @@ class StagerProxy:
         local_path = os.path.join(os.path.dirname(__file__), ".stagingrc")
         home_path = expanduser("~/.stagingrc")
 
-        for file in [local_path, home_path]:
+        for file in [os.environ.get("LOTAAS_STAGING_CONFIG", expanduser("~/.config/lotaas/stagingrc")), home_path, local_path]:
             try:
                 credentials = self.parse_config_file(file)
+                if not credentials.get("api_token"):
+                    continue
                 return credentials.get("user"), credentials.get("password"), credentials.get("api_token"), credentials.get("hostname")
             except Exception:
                 print("%s - stager_access: Could not parse user credential file '%s'." % (datetime.datetime.now(), file))
@@ -179,7 +181,7 @@ class JsonApiStager:
 """
 
     def graphql_query(self, query, *keys):
-        response = requests.post('{0}'.format(self.graphql_uri), json={'query': query}, headers=self.headers)
+        response = requests.post('{0}'.format(self.graphql_uri), json={'query': query}, headers=self.headers, timeout=60)
         response.raise_for_status()
         json = response.json()
         errors = json.get('errors', {})
@@ -189,7 +191,7 @@ class JsonApiStager:
             return self.get_from_json(json, *keys)
 
     def rest_api_call(self, method, endpoint, data):
-        response = requests.request(method, '{0}{1}'.format(self.rest_uri, endpoint), json=data, headers=self.headers)
+        response = requests.request(method, '{0}{1}'.format(self.rest_uri, endpoint), json=data, headers=self.headers, timeout=60)
         response.raise_for_status()
 
         # stageit backend returns 202 for empty bodies
