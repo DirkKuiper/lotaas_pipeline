@@ -44,7 +44,7 @@ def initialize_database(db_path="db/processing.db"):
             candidate_dm REAL,
             snr REAL,
             width_samples INTEGER,
-            detection_type TEXT,  -- "known_pulsar" or "candidate"
+            detection_type TEXT,  -- "candidate", "known_pulsar" or "rejected"
             pulsar_name TEXT,
             classification_probability REAL,
             beam_run_id INTEGER REFERENCES beam_runs(id)

@@ -84,8 +84,15 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             # a detection in a tied-array beam, and at DM < 150 the grid is
             # dense enough that some catalogue entry usually falls within the
             # DM tolerance.
+            # The veto uses the nearby set; the plot footer keeps the whole
+            # cone. A pulsar 1.2 degrees away cannot account for a detection
+            # in this beam, but a human judging the candidate still wants to
+            # know it is there.
+            catalogue_psrs_df = known_psrs_df
             known_psrs_df = known_psrs_df[
                 known_psrs_df["separation_deg"] <= VETO_RADIUS_DEG].reset_index(drop=True)
+        else:
+            catalogue_psrs_df = known_psrs_df
         dm_tolerance = 0.5
         highest_snr = 0
 
@@ -202,6 +209,26 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             highest_prob = max(fetch_probs.values())
 
             if highest_prob <= 0.5:
+                # Record the rejection. A bare `continue` left no plot, no row
+                # and no log line, so a candidate the classifier discarded was
+                # indistinguishable in the outputs from one never found. An
+                # injected pulse recovered at S/N 14.7 scored 0.374 here while
+                # three fainter ones from the same beam scored above 0.97, and
+                # nothing recorded that it had been considered at all.
+                logger.info(
+                    "FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
+                    dm, tcand, snr, width, highest_prob)
+                insert_detection(
+                    beam_id=beam_id,
+                    beam_run_id=beam_run_id,
+                    time_seconds=tcand,
+                    sample_number=sample_number,
+                    candidate_dm=dm,
+                    snr=snr,
+                    width_samples=width,
+                    detection_type="rejected",
+                    classification_probability=highest_prob,
+                )
                 continue
 
             insert_detection(
@@ -305,9 +332,12 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             ax_psr = fig.add_subplot(gs[4,0:5])
             ax_psr.axis("off")
-            if not known_psrs_df.empty:
+            if not catalogue_psrs_df.empty:
                 psr_list = "\n".join(
-                    [f"{r['PSRJ']} RA:{r['RAJ']} DEC:{r['DECJ']} DM:{r['DM']}" for _,r in known_psrs_df.iterrows()]
+                    [f"{r['PSRJ']} RA:{r['RAJ']} DEC:{r['DECJ']} DM:{r['DM']}"
+                     f" sep:{r['separation_deg']:.2f}deg"
+                     + ("" if r['separation_deg'] <= VETO_RADIUS_DEG else " (outside veto radius)")
+                     for _,r in catalogue_psrs_df.iterrows()]
                 )
             else:
                 psr_list = "No known pulsars"

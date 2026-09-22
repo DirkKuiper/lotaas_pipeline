@@ -42,6 +42,37 @@ def make_ledger(root, detections=()):
     return path
 
 
+class RejectedCandidateTests(unittest.TestCase):
+    """A candidate FETCH threw away is recorded, and never announced.
+
+    The classifier used to skip a rejection with a bare `continue`: no plot,
+    no row, no log line, so a discarded candidate looked exactly like one
+    that was never found. Recording it must not make it an alert.
+    """
+
+    def test_a_rejected_candidate_is_kept_but_not_posted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = make_ledger(root, [
+                (83.2, 9.19, 20, 'candidate', None, .97),
+                (83.8, 14.70, 20, 'rejected', None, .374),
+            ])
+            db = sqlite3.connect(ledger)
+            kept = db.execute("SELECT detection_type,snr,classification_probability"
+                              " FROM detections ORDER BY snr").fetchall()
+            db.close()
+            self.assertEqual(kept, [('candidate', 9.19, .97), ('rejected', 14.7, .374)])
+
+            make_plot(root, 'a'*16, 'DM83.2_Width20_SNR9.19.png')
+            make_plot(root, 'a'*16, 'DM83.8_Width20_SNR14.7.png')
+            slack = FakeSlack()
+            notify.run_once(slack, notify.connect(ledger), [root], 25, False, False, False)
+            posted = [str(path) for path, _ in slack.uploads]
+            self.assertTrue(any('SNR9.19' in name for name in posted))
+            self.assertFalse(any('SNR14.7' in name for name in posted),
+                             'a FETCH rejection must not be announced as a candidate')
+
+
 class FakeSlack:
     channel = 'C0TEST'
     enabled = True
