@@ -86,13 +86,16 @@ if __name__ == "__main__":
     data = data / median - 1
 
    
-    # Define the bad channel index
-    bad_channel = 138
-
-    # Add the bad channel to the mask
-    if bad_channel < nchan:
-        mask[bad_channel, :] = True  # Mask all time samples for channel 138
-    print(f"Channel {bad_channel} has been added to the mask.")
+    # Channels always masked, from settings rather than a literal, so a
+    # change of band or station set does not need a code edit.
+    bad_channels = settings.get("bad_channels") or []
+    masked_channels = []
+    for bad_channel in bad_channels:
+        if not 0 <= bad_channel < nchan:
+            raise ValueError(f"bad_channels entry {bad_channel} is outside 0..{nchan-1}")
+        mask[bad_channel, :] = True
+        masked_channels.append(bad_channel)
+    print(f"Channels always masked: {masked_channels}")
     
     # # Apply mask
     masked_data = data.copy()

@@ -1,3 +1,7 @@
+# Channels masked in every beam regardless of the RFI statistics, by index
+# into the filterbank's own channel ordering. Empty is allowed.
+bad_channels:
+  - 138
 rfi_block_size: 1000
 rfi_averaging_factor: 128
 dedispersion_plan:

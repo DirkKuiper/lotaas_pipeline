@@ -6,7 +6,9 @@ required. SSH must already authenticate, optionally via a ControlPath.
 """
 import argparse
 import concurrent.futures as futures
+import getpass
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -17,7 +19,19 @@ from euroflash.collect import collect
 from euroflash.ledger import Ledger
 
 REPO=Path(__file__).resolve().parents[1]
-ALLOWED={'efc-gpu-00','efc-gpu-01'}
+
+# Nodes this runner may dispatch to. The allowlist exists to keep work off
+# the BFC nodes, so it stays an opt-in: set LOTAAS_ALLOWED_NODES to a
+# comma-separated list to run somewhere else. efc-gpu-00 is listed but
+# cannot currently run CUDA; see the README on its UVM module.
+DEFAULT_ALLOWED={'efc-gpu-00','efc-gpu-01'}
+
+
+def allowed_nodes():
+    configured=os.environ.get('LOTAAS_ALLOWED_NODES','').strip()
+    if not configured:
+        return set(DEFAULT_ALLOWED)
+    return {name.strip() for name in configured.split(',') if name.strip()}
 
 
 def ssh_args(node,control_dir=None):
@@ -51,6 +65,8 @@ def main():
     p.add_argument('--work',type=Path,required=True,help='Head-node collection directory')
     p.add_argument('--ledger',type=Path,required=True)
     p.add_argument('--nodes',nargs='+',default=['efc-gpu-01'])
+    p.add_argument('--remote-root',default=f'/home/{getpass.getuser()}/lotaas-runs',
+                   help='Absolute directory on each compute node to stage runs under')
     p.add_argument('--control-dir',type=Path)
     p.add_argument('--image',type=Path,default=REPO/'containers/euroflash-runtime.sif')
     p.add_argument('--settings',type=Path,default=REPO/'settings.yaml')
@@ -59,8 +75,12 @@ def main():
     p.add_argument('--pilot',action='store_true')
     p.add_argument('--run-name',required=True)
     a=p.parse_args()
-    if not set(a.nodes)<=ALLOWED or len(set(a.nodes))!=len(a.nodes):
-        p.error('Only unique efc-gpu-00/efc-gpu-01 nodes are allowed')
+    permitted=allowed_nodes()
+    if not set(a.nodes)<=permitted or len(set(a.nodes))!=len(a.nodes):
+        p.error('Nodes must be unique and among '+', '.join(sorted(permitted))
+                +' (set LOTAAS_ALLOWED_NODES to change)')
+    if not a.remote_root.startswith('/'):
+        p.error('--remote-root must be an absolute path on the compute node')
     if not a.run_name.replace('-','').replace('_','').isalnum():p.error('Use letters, digits, hyphens and underscores in run-name')
     beams=sorted(a.input.resolve().rglob('*_ff.fil'))
     if not beams:p.error('No prepared beams found')
@@ -75,7 +95,7 @@ def main():
         index,node=pair
         assigned=beams[index::len(a.nodes)]
         if not assigned:return None
-        root=f'/home/dkuiper/lotaas-runs/{a.run_name}'
+        root=a.remote_root.rstrip('/')+'/'+a.run_name
         repo=root+'/source';inputs=root+'/input';work=root+'/work'
         upload(node,source,repo,a.control_dir)
         upload(node,[(f,f.name) for f in assigned],inputs,a.control_dir)

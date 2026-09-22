@@ -59,7 +59,9 @@ FIRST_URL=$(head -n 1 "$CLEANED_INPUT_FILE")
 FILENAME=$(basename "$FIRST_URL")
 OBSID=$(echo "$FILENAME" | awk -F'_' '{print $1}')
 SAP=$(echo "$FILENAME" | awk -F'_' '{print $2}')
-SAP_DIR="/project/euflash/Data/$OBSID/$SAP"
+# Data root, overridable so the legacy Slurm path is not tied to one site.
+DATA_ROOT="${LOTAAS_DATA_ROOT:-/project/euflash/Data}"
+SAP_DIR="$DATA_ROOT/$OBSID/$SAP"
 
 SAP_LOG_DIR="logs/${OBSID}_${SAP}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SAP_LOG_DIR"
@@ -99,11 +101,13 @@ if [ -z "$GPU_JOB_ID" ]; then
     exit 1
 fi
 
-# Step 5b: CPU pipeline (array job, e.g. 0-72 for 73 beams)
+# Step 5b: CPU pipeline, one array task per beam actually being processed
+# rather than a fixed 73. Tasks past the beams found exit cleanly anyway,
+# but a fixed count wastes slots on a partial batch and truncates a larger one.
 echo "Submitting CPU pipeline array job after GPU pipeline completes..."
 CPU_JOB_ID=$(sbatch --parsable \
   --dependency=afterok:$GPU_JOB_ID \
-  --array=0-72 \
+  --array=0-$(($NUM_URLS - 1)) \
   --output="$SAP_LOG_DIR/cpu_pipeline/%A_%a.log" \
   --error="$SAP_LOG_DIR/cpu_pipeline/%A_%a.log" \
   bin/run_cpu_pipeline.slurm "$SAP_DIR")

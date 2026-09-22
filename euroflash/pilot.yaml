@@ -1,3 +1,6 @@
+# Kept in step with settings.yaml so a pilot masks what production masks.
+bad_channels:
+  - 138
 # Diagnostic smoke test only, NOT the production DM coverage.
 rfi_block_size: 128
 rfi_averaging_factor: 16

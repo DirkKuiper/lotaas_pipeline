@@ -30,7 +30,8 @@ fi
 URL=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$INPUT_FILE")
 FILENAME=$(basename "$URL")
 OBS_SAP_BEAM=$(echo "$FILENAME" | awk -F'_' '{print $1"/"$2"/"$3}')
-OUTPUT_DIR="/project/euflash/Data/$OBS_SAP_BEAM"
+DATA_ROOT="${LOTAAS_DATA_ROOT:-/project/euflash/Data}"
+OUTPUT_DIR="$DATA_ROOT/$OBS_SAP_BEAM"
 mkdir -p "$OUTPUT_DIR"
 
 # Define base repo path and container path BEFORE switching to scratch dir
