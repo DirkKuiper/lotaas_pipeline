@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 import os
 
+from lotaas_reprocessing.dm_plan import dm_values
+
 # Define a hard limit for number of candidates
 MAX_CANDIDATES = 25_000_000
 
@@ -57,29 +59,69 @@ def cluster_labels(points, eps=5.):
     cell_labels=np.array([mapping.get(root(i),-1) for i in range(len(keys))])
     return cell_labels[inverse]
 
-# Define dedispersion plan
-DEDISPERSION_PLAN = [
-    (0.000, 150.600, 0.10),
-    (150.600, 289.800, 0.30),
-    (289.800, 511.800, 0.50),
-    (511.800, 1010.800, 1.00),
-    (1010.800, 2014.800, 2.00),
-    (2014.800, 4469.800, 5.00),
-    (4469.800, 8939.800, 10.00),
-    (8939.800, 10019.800, 20.00),
+# Default plan, matching settings.yaml. Callers that know which plan produced
+# the trials should pass it, so the grid used to cluster is the grid searched.
+DEFAULT_PLAN = [
+    {"low_dm": 0.000, "high_dm": 150.600, "ddm": 0.10},
+    {"low_dm": 150.600, "high_dm": 289.800, "ddm": 0.30},
+    {"low_dm": 289.800, "high_dm": 511.800, "ddm": 0.50},
+    {"low_dm": 511.800, "high_dm": 1010.800, "ddm": 1.00},
+    {"low_dm": 1010.800, "high_dm": 2014.800, "ddm": 2.00},
+    {"low_dm": 2014.800, "high_dm": 4469.800, "ddm": 5.00},
+    {"low_dm": 4469.800, "high_dm": 8939.800, "ddm": 10.00},
+    {"low_dm": 8939.800, "high_dm": 10019.800, "ddm": 20.00},
 ]
 
-def get_ddm(dm_value):
-    """Finds the corresponding ddm value for a given DM based on dedispersion plan."""
-    for low_dm, high_dm, ddm in DEDISPERSION_PLAN:
-        if low_dm <= dm_value < high_dm:
-            return ddm
-    return 1.0  # Default to 1.0 if not found (shouldn't happen)
+# Neighbourhood in which two detections are taken to be the same event.
+# Five trials matches the DM tolerance the original DM/ddm scaling gave inside
+# a single plan range. Half a second covers the residual dispersion sweep
+# across five trials (0.054 s at the finest spacing) and a boxcar of up to
+# that width, while keeping pulses seconds apart distinct: the original
+# tolerance of five seconds merged a source repeating every four seconds
+# into one candidate.
+DM_EPS_TRIALS = 5.0
+TIME_EPS_SECONDS = 0.5
 
-def cluster_candidates(candidate_file, output_file):
+# A beam yielding more distinct events than this is RFI, not astronomy.
+MAX_CLUSTERS = 2_000_000
+
+
+def dm_trial_position(dms, plan=None):
+    """Position of each DM on the concatenated trial grid, counting from zero.
+
+    The earlier coordinate was DM/ddm, which is not monotonic across plan
+    boundaries. DM 50.2 and DM 150.6 both mapped to 502, so unrelated events
+    at opposite ends of the low-DM search collided whenever they fell close
+    in time. Adjacent trials DM 150.5 and DM 150.6 mapped to 1505 and 502, so
+    one pulse straddling a boundary was split in two. Counting trials is
+    monotonic and uniformly spaced, which is what a fixed epsilon needs.
     """
-    Perform DBSCAN clustering first, then filter clusters by S/N threshold.
-    Normalize DM values by ddm to avoid bias due to uneven spacing in the dedispersion plan.
+    plan = plan or DEFAULT_PLAN
+    dms = np.asarray(dms, dtype=float)
+    edges = np.array([entry["low_dm"] for entry in plan] + [plan[-1]["high_dm"]])
+    steps = np.array([entry["ddm"] for entry in plan])
+    counts = np.array([len(dm_values(entry)) for entry in plan])
+    starts = np.concatenate([[0], np.cumsum(counts)])[:len(plan)]
+    which = np.clip(np.searchsorted(edges, dms, side="right") - 1, 0, len(plan) - 1)
+    return starts[which] + (dms - edges[which]) / steps[which]
+
+
+def get_ddm(dm_value):
+    """DM step at a given DM. Retained for the review diagnostics."""
+    for entry in DEFAULT_PLAN:
+        if entry["low_dm"] <= dm_value < entry["high_dm"]:
+            return entry["ddm"]
+    return 1.0
+
+
+def cluster_candidates(candidate_file, output_file, plan=None,
+                       dm_eps=DM_EPS_TRIALS, time_eps=TIME_EPS_SECONDS):
+    """Group threshold crossings into events, then keep clusters reaching S/N 6.
+
+    Detections are clustered on the trial grid and in arrival time, each axis
+    divided by its own tolerance so a single epsilon is dimensionless. Mixing
+    trial index with seconds under one epsilon, as before, gave the time axis
+    whatever scale the DM axis happened to have.
     """
     # Ensure the candidate file exists
     if not os.path.exists(candidate_file):
@@ -101,14 +143,23 @@ def cluster_candidates(candidate_file, output_file):
         raise RuntimeError(f"Too many candidates ({num_candidates} > {MAX_CANDIDATES}). Data may be bad. Exiting clustering...")
         return
 
-    # Normalize DM values by ddm
-    df["DM_scaled"] = df["DM"] / df["DM"].apply(get_ddm)
+    # Position on the trial grid, monotonic across plan boundaries.
+    df["DM_scaled"] = dm_trial_position(df["DM"].values, plan)
 
-    # Stack normalized features for clustering (DM_scaled and Time)
-    X = df[["DM_scaled", "Time"]].values  
+    # Each axis in units of its own tolerance, so one epsilon is dimensionless.
+    X = np.column_stack([df["DM_scaled"].values / dm_eps,
+                         df["Time"].values / time_eps])
 
-    # Perform DBSCAN clustering
-    df["Cluster"] = cluster_labels(X, eps=5)
+    labels = cluster_labels(X, eps=1.)
+
+    # A point with no neighbour is its own event, not a member of one shared
+    # bucket. Treating the DBSCAN noise label as a cluster collapsed every
+    # isolated detection in a beam into a single reported candidate.
+    isolated = labels == -1
+    if isolated.any():
+        labels = labels.copy()
+        labels[isolated] = labels.max() + 1 + np.arange(isolated.sum())
+    df["Cluster"] = labels
 
     # Now filter by S/N ≥ 6 (but preserve cluster structure)
     valid_clusters = set(df[df["S/N"] >= 6]["Cluster"])  # Find clusters with at least one strong S/N
@@ -119,15 +170,14 @@ def cluster_candidates(candidate_file, output_file):
         print("No valid clusters with S/N ≥ 6 found. Exiting clustering...")
         return
 
-    # Find the highest S/N pulse in each remaining cluster
-    cluster_centers = []
-    for cluster in valid_clusters:
-        cluster_points = df[df["Cluster"] == cluster]
-        highest_sn_point = cluster_points.loc[cluster_points["S/N"].idxmax()]
-        cluster_centers.append(highest_sn_point)
+    if len(valid_clusters) > MAX_CLUSTERS:
+        raise RuntimeError(
+            f"Too many distinct events ({len(valid_clusters)} > {MAX_CLUSTERS}); "
+            "inspect RFI before retrying")
 
-    # Convert to DataFrame
-    cluster_centers_df = pd.DataFrame(cluster_centers)
+    # Highest S/N detection in each cluster, in one pass rather than a scan
+    # per cluster: isolated events now make clusters numerous.
+    cluster_centers_df = df.loc[df.groupby("Cluster")["S/N"].idxmax()].reset_index(drop=True)
 
     # Save clustered candidates
     cluster_centers_df.to_csv(output_file, sep="\t", index=False)

@@ -59,7 +59,8 @@ if __name__ == "__main__":
 
         # Run clustering
         print("Running clustering on detected candidates...")
-        cluster.cluster_candidates(all_candidates_file, clustered_output_file)
+        cluster.cluster_candidates(all_candidates_file, clustered_output_file,
+                                   plan=dedispersion_plan)
         print("Clustering completed.")
 
         # Run classification

@@ -80,6 +80,49 @@ def test_candidate_limit_precedes_large_plot(tmp_path,monkeypatch):
     assert not (tmp_path/'all_matched_filter_overview.png').exists()
 
 
+def _cluster(tmp_path, rows, name):
+    from lotaas_reprocessing.cluster import cluster_candidates
+    import pandas as pd
+    source, output = tmp_path/(name+'.cands'), tmp_path/(name+'.tsv')
+    source.write_text(''.join(f'{dm} {snr} {time} {round(time/DT)} 1\n'
+                              for dm, snr, time in rows))
+    cluster_candidates(source, output)
+    return pd.read_csv(output, sep='\t')
+
+
+def test_isolated_events_are_not_collapsed_into_one_candidate(tmp_path):
+    """The DBSCAN noise label was treated as a cluster, so every detection in
+    a beam without a neighbour was reduced to a single reported row."""
+    rows = [(20, 12, 100), (40, 11, 200), (60, 10, 300)]
+    assert len(_cluster(tmp_path, rows, 'isolated')) == 3
+
+
+def test_distant_dms_do_not_collide_on_the_cluster_grid(tmp_path):
+    """DM/ddm mapped both DM 50.2 and DM 150.6 to 502."""
+    rows = [(50.2, 12, 100), (150.6, 11, 100)]
+    assert len(_cluster(tmp_path, rows, 'collision')) == 2
+
+
+def test_one_pulse_across_a_plan_boundary_stays_one_candidate(tmp_path):
+    """DM/ddm mapped adjacent trials DM 150.5 and DM 150.6 to 1505 and 502."""
+    rows = [(150.5, 12, 100), (150.6, 11, 100)]
+    assert len(_cluster(tmp_path, rows, 'boundary')) == 1
+
+
+def test_a_source_repeating_every_four_seconds_keeps_its_pulses(tmp_path):
+    """A five-second tolerance merged a repeater into one candidate."""
+    rows = [(30, 12, 100), (30, 11, 104), (30, 10, 108)]
+    assert len(_cluster(tmp_path, rows, 'repeater')) == 3
+
+
+def test_trial_position_is_monotonic_over_the_whole_plan():
+    from lotaas_reprocessing.cluster import dm_trial_position
+    position = dm_trial_position(np.linspace(0, 10019, 200000))
+    assert np.all(np.diff(position) > 0)
+    assert dm_trial_position([150.5])[0] == 1505
+    assert dm_trial_position([150.6])[0] == 1506
+
+
 def test_cell_clustering_matches_dbscan_including_duplicates_and_boundaries():
     from sklearn.cluster import DBSCAN
     from lotaas_reprocessing.cluster import cluster_labels
