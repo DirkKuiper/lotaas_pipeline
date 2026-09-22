@@ -28,6 +28,7 @@ Rolling sums are also roughly an order of magnitude cheaper than one inverse
 FFT per width per DM trial, which was the pipeline's throughput bottleneck.
 """
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import os
 import re
@@ -204,6 +205,30 @@ def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshol
             np.concatenate(detected_widths))
 
 
+def _dm_axis(axis, dms, which="x"):
+    """Scale a DM axis so its labels are readable for the range actually searched.
+
+    A log scale was applied unconditionally. Over a narrow range it produces
+    minor ticks in scientific notation that overlap into an unreadable smear,
+    and it cannot show DM 0 at all. Log only earns its place when the range
+    spans more than a decade, which the production plan does and a targeted
+    search does not.
+    """
+    values = np.asarray(dms, dtype=float)
+    positive = values[values > 0]
+    decades = (positive.max() / positive.min()) if positive.size and positive.min() > 0 else 1.
+    scale = "log" if decades >= 10 else "linear"
+    (axis.set_xscale if which == "x" else axis.set_yscale)(scale)
+    if scale == "linear":
+        return
+    # Plain numbers at every decade, including the sub-unit DMs that a
+    # ScalarFormatter rounds to "0".
+    formatter = matplotlib.ticker.FuncFormatter(lambda value, _: f"{value:g}")
+    target = axis.xaxis if which == "x" else axis.yaxis
+    target.set_major_formatter(formatter)
+    target.set_minor_formatter(matplotlib.ticker.NullFormatter())
+
+
 def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info,
                               dedispersion_plan, detection_threshold=5,
                               nu_min=None, nu_max=None, trim_wrap=True):
@@ -299,7 +324,7 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.hist(dms, bins=100, color='black', edgecolor='black')
     ax2.set_xlabel("DM (pc cm$^{-3}$)")
-    ax2.set_xscale('log')
+    _dm_axis(ax2, dms)
     ax2.set_ylabel("Number of Pulses")
 
     # Top-right: Signal-to-Noise vs. DM
@@ -307,7 +332,7 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
     display_stride=max(1,int(np.ceil(len(times)/100000)))
     ax3.scatter(dms[::display_stride], strengths[::display_stride], color='black', s=1)
     ax3.set_xlabel("DM (pc cm$^{-3}$)")
-    ax3.set_xscale('log')
+    _dm_axis(ax3, dms)
     ax3.set_ylabel("Signal-to-Noise")
 
     # Middle panel: Time vs. DM scatter plot
@@ -315,14 +340,21 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
     scatter = ax4.scatter(times[::display_stride], dms[::display_stride], c=strengths[::display_stride], cmap='viridis', s=5)
     ax4.set_xlabel("Time (s)")
     ax4.set_ylabel("DM (pc cm$^{-3}$)")
-    ax4.set_yscale('log')
+    _dm_axis(ax4, dms, which='y')
     fig.colorbar(scatter, ax=ax4, label="Detection Strength")
 
     # Bottom panel: Summed S/N by DM
     ax5 = fig.add_subplot(gs[2, :])
-    ax5.bar(sorted_dms, summed_sn, width=(sorted_dms[1] - sorted_dms[0]) if len(sorted_dms) > 1 else 0.1, color='blue', alpha=0.7, edgecolor='black')
+    # Per-bar widths: the plan's DM spacing changes by a factor 200 across
+    # ranges, so one global width either leaves gaps or overlaps.
+    if len(sorted_dms) > 1:
+        steps = np.diff(sorted_dms)
+        bar_width = np.concatenate([steps, steps[-1:]])
+    else:
+        bar_width = 0.1
+    ax5.bar(sorted_dms, summed_sn, width=bar_width, color='blue', alpha=0.7, edgecolor='black')
     ax5.set_xlabel("DM (pc cm$^{-3}$)")
-    ax5.set_xscale('log')
+    _dm_axis(ax5, dms)
     ax5.set_ylabel("Summed Signal-to-Noise")
     ax5.set_title("Summed Signal-to-Noise as a Function of DM")
 
@@ -331,7 +363,9 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
     fig.text(0.5, 0.97, f"Telescope: {observation_info['Telescope']}   Instrument: {observation_info['Instrument']}", ha='center', va='top', fontsize=10)
     fig.text(0.5, 0.95, f"Observation Date: {observation_info['Observation Date']}", ha='center', va='top', fontsize=10)
     fig.text(0.5, 0.93, f"N positives: {len(times)}   Sampling time: {np.round(tsamp * 1e3, 2)} ms   Frequency Range: {observation_info['Frequency Range (MHz)']}", ha='center', va='top', fontsize=10)
-    fig.suptitle(f"Single Pulse Results for '{output_dir}'", fontsize=14, fontweight='bold', y=1.02)
+    # The beam, not the absolute path of wherever this happened to run.
+    fig.suptitle(f"Single Pulse Results: {os.path.basename(os.path.normpath(output_dir))}",
+                 fontsize=14, fontweight='bold', y=1.02)
 
     # Save the figure
     overview_path = os.path.join(output_dir, "all_matched_filter_overview.png")

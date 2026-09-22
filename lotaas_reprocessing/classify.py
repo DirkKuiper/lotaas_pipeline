@@ -233,8 +233,30 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             plot_tsamp = cand.tsamp * time_decimate_factor
             dm_time_axis = (np.arange(cand.dmt.shape[1]) - (cand.dmt.shape[1]-1)/2) * plot_tsamp
             dm_values = np.linspace(dm - 5, dm + 5, dm_size)
-            time_series = np.sum(cand.dedispersed, axis=1)
-            time_series = time_series * (snr / np.max(time_series))
+            # Per-channel robust normalisation for display. A handful of
+            # channels carry a persistent offset or several times the typical
+            # noise, and on a shared colour scale they stripe the waterfall
+            # and take the dynamic range with them. That matters most for a
+            # marginal candidate, which is exactly what the plot is for.
+            waterfall = np.asarray(cand.dedispersed, dtype=float).T   # (freq, time)
+            channel_median = np.median(waterfall, axis=1, keepdims=True)
+            channel_scale = np.median(np.abs(waterfall - channel_median),
+                                      axis=1, keepdims=True) * 1.4826
+            # A flat channel normalises to zero rather than to a division error.
+            channel_scale[~np.isfinite(channel_scale) | (channel_scale <= 0)] = np.inf
+            waterfall = np.nan_to_num((waterfall - channel_median) / channel_scale)
+            # Robust limits, so one surviving spike cannot flatten the rest.
+            vmin, vmax = np.percentile(waterfall, [1, 99])
+
+            # Profile measured against its own off-pulse noise, rather than
+            # rescaled so its maximum equals the reported S/N. A reader needs
+            # to see how far the pulse stands out here, not be told again; and
+            # the old scaling silently keyed on whatever the largest sample
+            # was, noise spike included.
+            time_series = waterfall.sum(axis=0)
+            baseline = np.median(time_series)
+            spread = np.median(np.abs(time_series - baseline)) * 1.4826
+            time_series = (time_series - baseline) / (spread if spread > 0 else 1.)
             time_axis = (np.arange(len(time_series)) - (len(time_series)-1)/2) * plot_tsamp
 
             # Figure
@@ -262,11 +284,15 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             ax_ts = fig.add_subplot(gs[2,0:3])
             ax_ts.plot(time_axis,time_series,color="black")
-            ax_ts.set_ylabel("S/N")
+            ax_ts.axhline(0,color="0.7",lw=.5)
+            ax_ts.set_ylabel("S/N in window")
             ax_ts.set_xticks([])
 
             ax_ft = fig.add_subplot(gs[3,0:3])
-            ax_ft.imshow(cand.dedispersed.T,aspect="auto",cmap="viridis",
+            # Orientation is unchanged from the original: the transposed array
+            # with the default origin puts each channel at its own frequency.
+            ax_ft.imshow(waterfall,aspect="auto",cmap="viridis",
+                vmin=vmin,vmax=vmax,
                 extent=[time_axis.min(),time_axis.max(),frequency_axis.min(),frequency_axis.max()])
             ax_ft.set_xlabel("Time relative to candidate (s)")
             ax_ft.set_ylabel("Freq(MHz)")
