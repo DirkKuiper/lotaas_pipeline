@@ -3,6 +3,36 @@
 What has been measured, and what it does and does not imply for a one-year
 campaign.
 
+## The survey in the archive (23 September)
+
+`lotaas_observations/` lists every LOTAAS dataproduct in the LTA (8 projects,
+1,987 observations). A searchable beam is a `L*_SAP*_B*` tar other than the
+incoherent beam 12; summary tars are left out.
+
+| scope | observations | searchable beams | TB |
+| --- | ---: | ---: | ---: |
+| campaign inventory (`lt5_004-inventory.txt`, 294 archive observations) | — | 63,635 | 335 |
+| LT5_004, all | 1,105 | 220,191 | 1,169 |
+| LT5_004, 224-file survey observations | 925 | 202,576 | — |
+| all eight projects | 1,987 | 398,283 | 2,502 |
+
+LC3_014 beams are ~17 GB each, against ~5.3 GB in LT5_004, so its throughput
+in beams is lower for the same bytes. LC0_034 holds only pulsar-archive tars.
+
+**Staging, window 8 (measured since the continuous driver started,
+2026-09-22 21:30 UTC):**
+
+- 8.7 TB/day over the whole 17 hours so far, 11.7 TB/day after the first 6.
+- That is 1,690–2,260 files/day and 14–17 complete SAPs/day.
+- Delivery comes in bursts as tape requests complete, and all eight window
+  slots sat waiting on tape for hours.
+- The old estimate of 0.65–1.1 TB/day came from one request at a time.
+
+At window 8 the 328 TB still to stage takes **about 27–38 days**. All of
+LT5_004 would take **100–135 days** and every project **215–290 days**. The
+window-16 and window-32 phases of the staging experiment will say how far
+more requests in flight shorten this (see operations.md).
+
 ## Current measurements, 22–23 September
 
 These replace the older stage timings further down, which are kept for their

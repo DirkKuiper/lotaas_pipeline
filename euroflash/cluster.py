@@ -351,55 +351,70 @@ def main():
             with cpu_log.open('a') as stream:stream.write(time.strftime('%H:%M:%S ')+text+'\n')
         try:
             with CpuSlot(a.cpu_nodes,lock_dir,a.cpu_slots,a.control_dir,'/home',log=note) as cpu:
-                upload(cpu,source,repo,a.control_dir)
-                remote(cpu,['mkdir','-p',inputs,work+'/handoff'],a.control_dir)
-                cpu_state={}
-                cpu_thread=threading.Thread(target=lambda:cpu_state.update(
-                    code=run_remote(cpu,runner_command('cpu',gpu_node=False),a.work/(cpu+'.log'))))
-                cpu_thread.start()
-                relayed,failed_relays=set(),{}
-                with futures.ThreadPoolExecutor(max_workers=max(1,a.relay_streams)) as pool:
-                    while True:
-                        if not cpu_thread.is_alive():
-                            raise RuntimeError(f'CPU runner on {cpu} exited {cpu_state.get("code")} before the batch was handed over')
-                        finished=not gpu_thread.is_alive()
-                        ready={name[:-6] for name in listing(node,work+'/handoff',a.control_dir) if name.endswith('.ready')}
-                        there=listing(cpu,work+'/handoff',a.control_dir)
-                        backlog=len({n[:-6] for n in there if n.endswith('.ready')}-{n[:-9] for n in there if n.endswith('.searched')})
-                        todo=sorted(ready-relayed-set(failed_relays))[:max(0,a.relay_backlog-backlog)]
-                        def move(item):
-                            marker=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/{item}.ready'],
-                                                             capture_output=True,text=True,check=True).stdout)
-                            members=[str(PurePosixPath(marker['input']).relative_to(root)),'work/'+marker['output']]
-                            relay(node,cpu,root,members,a.control_dir,['--exclude=DM_trials'])
-                            put_text(cpu,f'{work}/handoff/{item}.ready',json.dumps(marker),a.control_dir)
-                            remote(node,['rm','-rf',marker['input'],work+'/'+marker['output'],
-                                         f'{work}/handoff/{item}.ready'],a.control_dir)
-                            return item
-                        for future,item in [(pool.submit(move,item),item) for item in todo]:
-                            try:
-                                relayed.add(future.result())
-                            except Exception as error:
-                                failed_relays[item]=str(error)
-                                note(f'relay of {item} failed: {error}')
-                        if finished and not (ready-relayed-set(failed_relays)):
-                            break
-                        if not todo:
-                            time.sleep(15)
-                note(f'GPU node {node} exited {state["gpu"]}; {len(relayed)} beams relayed, {len(failed_relays)} failed')
-                # The GPU node's own stages are over: record them and free it for the next batch.
-                collect_node(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
-                state['collected']=True
-                (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
-                done=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/.done'],
-                                               capture_output=True,text=True).stdout or '{}')
-                put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
-                cleanup(node)
-                state['cleaned']=True
-                cpu_thread.join()
-                collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
-                cleanup(cpu)
-                return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays
+              try:
+                  upload(cpu,source,repo,a.control_dir)
+                  remote(cpu,['mkdir','-p',inputs,work+'/handoff'],a.control_dir)
+                  cpu_state={}
+                  cpu_thread=threading.Thread(target=lambda:cpu_state.update(
+                      code=run_remote(cpu,runner_command('cpu',gpu_node=False),a.work/(cpu+'.log'))))
+                  cpu_thread.start()
+                  relayed,failed_relays,tries=set(),{},{}
+                  with futures.ThreadPoolExecutor(max_workers=max(1,a.relay_streams)) as pool:
+                      while True:
+                          if not cpu_thread.is_alive():
+                              raise RuntimeError(f'CPU runner on {cpu} exited {cpu_state.get("code")} before the batch was handed over')
+                          finished=not gpu_thread.is_alive()
+                          ready={name[:-6] for name in listing(node,work+'/handoff',a.control_dir) if name.endswith('.ready')}
+                          there=listing(cpu,work+'/handoff',a.control_dir)
+                          backlog=len({n[:-6] for n in there if n.endswith('.ready')}-{n[:-9] for n in there if n.endswith('.searched')})
+                          todo=sorted(ready-relayed-set(failed_relays))[:max(0,a.relay_backlog-backlog)]
+                          def move(item):
+                              marker=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/{item}.ready'],
+                                                               capture_output=True,text=True,check=True).stdout)
+                              members=[str(PurePosixPath(marker['input']).relative_to(root)),'work/'+marker['output']]
+                              relay(node,cpu,root,members,a.control_dir,['--exclude=DM_trials'])
+                              put_text(cpu,f'{work}/handoff/{item}.ready',json.dumps(marker),a.control_dir)
+                              remote(node,['rm','-rf',marker['input'],work+'/'+marker['output'],
+                                           f'{work}/handoff/{item}.ready'],a.control_dir)
+                              return item
+                          for future,item in [(pool.submit(move,item),item) for item in todo]:
+                              try:
+                                  relayed.add(future.result())
+                              except Exception as error:
+                                  # A dropped connection should not lose a beam; three strikes do.
+                                  tries[item]=tries.get(item,0)+1
+                                  note(f'relay of {item} failed (attempt {tries[item]}): {error}')
+                                  if tries[item]>=3:
+                                      failed_relays[item]=str(error)
+                          if finished and not (ready-relayed-set(failed_relays)):
+                              break
+                          if not todo:
+                              time.sleep(15)
+                  note(f'GPU node {node} exited {state["gpu"]}; {len(relayed)} beams relayed, {len(failed_relays)} failed')
+                  # The GPU node's own stages are over: record them and free it for the next batch.
+                  collect_node(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                  state['collected']=True
+                  (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
+                  done=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/.done'],
+                                                 capture_output=True,text=True).stdout or '{}')
+                  put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
+                  cleanup(node)
+                  state['cleaned']=True
+                  cpu_thread.join()
+                  collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                  cleanup(cpu)
+                  return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays
+              except Exception:
+                # Record what the CPU node did and leave it empty before its slot is released.
+                try:
+                    collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                except Exception as error:
+                    note(f'CPU node {cpu} could not be collected: {error}')
+                try:
+                    cleanup(cpu)
+                except Exception:
+                    pass
+                raise
         finally:
             gpu_thread.join()
             # Whatever happened, leave the GPU node recorded and empty before it takes another batch.

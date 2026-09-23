@@ -132,7 +132,9 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
         ra_str = skycoord.ra.to_string(unit=u.hour, sep=':', pad=True, precision=2)
         dec_str = skycoord.dec.to_string(unit=u.deg, sep=':', alwayssign=True, pad=True, precision=2)
 
-        query = QueryATNF(
+        from lotaas_reprocessing.atnf import query_atnf
+        query = query_atnf(
+            factory=QueryATNF,
             params=['PSRJ', 'RAJ', 'DECJ', 'DM'],
             coord1=ra_str,
             coord2=dec_str,

@@ -324,3 +324,19 @@ def test_the_runner_hands_over_without_numpy(tmp_path, monkeypatch):
     dirs = [beam_dir(tmp_path/'veto', b, [row(0.2, b * 10.)]) for b in (13, 14, 15, 16)]
     from lotaas_reprocessing.periodicity_veto import apply
     assert sum(apply(dirs).values()) == 4
+
+
+def test_a_failed_catalogue_query_is_retried_under_the_node_lock(tmp_path, monkeypatch):
+    from lotaas_reprocessing import atnf
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setattr(atnf.time, 'sleep', lambda s: None)
+    calls = []
+
+    def flaky(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError('Problem getting catalogue: Compressed file ended before the end-of-stream marker')
+        return 'catalogue'
+    assert atnf.query_atnf(factory=flaky, radius=1.0) == 'catalogue' and len(calls) == 2
+    assert (tmp_path/'.lotaas-atnf.ready').exists(), 'later queries skip the lock'
+    assert atnf.query_atnf(factory=lambda **k: 'cached') == 'cached'

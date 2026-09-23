@@ -51,7 +51,8 @@ def catalogue_matches(metadata):
         return [],'coordinates unavailable'
     beam=SkyCoord(info['RA (J2000)'],info['DEC (J2000)'],unit=(u.hourangle,u.deg))
     try:
-        query=QueryATNF(params=['PSRJ','RAJ','DECJ','DM','P0','F0','F1','PEPOCH'],
+        from lotaas_reprocessing.atnf import query_atnf
+        query=query_atnf(factory=QueryATNF,params=['PSRJ','RAJ','DECJ','DM','P0','F0','F1','PEPOCH'],
                         coord1=info['RA (J2000)'],coord2=info['DEC (J2000)'],radius=1.,checkupdate=False)
         rows=[]
         for _,row in query.pandas.iterrows():
