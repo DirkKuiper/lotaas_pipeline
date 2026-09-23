@@ -11,11 +11,16 @@ each), 96 physical cores and about 750 GiB RAM. Storage on the compute nodes is
 local: do not assume `/home` or `/shared/results` is shared. BFC nodes are
 excluded from the dispatcher.
 
-**`efc-gpu-00` cannot currently run CUDA.** `modprobe -n -v nvidia_uvm` reports
-a `modulejail` block and host `cuInit(0)` returns 999. An administrator must
-enable the UVM module; installing another container will not repair a host
-condition. Until it is fixed, only `efc-gpu-01` is usable, which puts both GPUs
-in every capacity estimate on one machine.
+**Both GPU nodes run CUDA since 23 September 2026.** `efc-gpu-00` could not
+until then: `modulejail` blocked `nvidia_uvm`. It has `/dev/nvidia-uvm` now and
+both of its GPUs pass CUDA memory checks, so four GPUs on two nodes are usable.
+
+**CPU nodes:** `efc-cpu-00`–`efc-cpu-06` were reachable on 23 September, each
+with 96 physical cores, ~750 GiB RAM and apptainer; `efc-cpu-07` (and
+`efc-cpu-08`, which is in DNS) answered "No route to host". `/shared/results`
+is NFS-mounted from the head on every node. `/home` on a node is its own local
+disk (~830 GB root filesystem), and `/scratch` (2.9 TB) belongs to root, so
+runs are staged under `/home/$USER/lotaas-runs` on each node.
 
 `euroflash.cluster` probes each node before splitting a batch, using the
 presence of `/dev/nvidia-uvm` alongside `nvidia-smi`. An unusable node gets a
@@ -31,7 +36,9 @@ depending on the forwarded agent for the length of a long job:
 
 ```bash
 mkdir -p ~/.ssh/control
-ssh -M -S ~/.ssh/control/lotaas-gpu01 -o ControlPersist=86400 -fN efc-gpu-01
+for node in efc-gpu-00 efc-gpu-01 efc-cpu-0{0..6}; do
+  ssh -M -S ~/.ssh/control/lotaas-$(echo ${node#efc-} | tr -d -) -o ControlPersist=yes -fN $node
+done
 ```
 
 An SSH master expiring during overnight tape staging caused the first full-SAP
@@ -83,12 +90,104 @@ the node ledger.
 ```bash
 python3 -m euroflash.campaign run --root RESULTS_ROOT/campaign \
   --inventory RESULTS_ROOT/lt5_004-inventory.txt --ledger CAMPAIGN.sqlite \
-  --max-staging-saps 8 --max-prepared-saps 100 --min-free-tb 10 \
-  --dispatch-nodes efc-gpu-01 --gpus 0,1 --workers-per-gpu 3 --cpu-workers 24 \
-  --control-dir ~/.ssh/control
+  --max-staging-saps 8 --staging-schedule RESULTS_ROOT/campaign/staging-schedule.json \
+  --max-prepared-saps 100 --min-free-tb 10 --download-workers 4 \
+  --dispatch-nodes efc-gpu-00 efc-gpu-01 --gpus 0,1 --workers-per-gpu 3 --cpu-workers 24 \
+  --dispatch-saps 2 --batches-per-node 2 \
+  --cpu-nodes efc-cpu-00 efc-cpu-01 efc-cpu-02 efc-cpu-03 efc-cpu-04 efc-cpu-05 efc-cpu-06 \
+  --cpu-tier-workers 64 --control-dir ~/.ssh/control \
+  --image CONTAINERS/euroflash-runtime.sif --settings RELEASE/settings.yaml
 
 python3 -m euroflash.campaign status --root RESULTS_ROOT/campaign
 ```
+
+Run the driver from a **pinned release worktree**, never from a checkout being
+edited. Each dispatch copies the driver's own checkout to the nodes, and every
+Python file under the code folders is part of the search fingerprint. On 23
+September, edits between dispatches gave the campaign five fingerprints in one
+day:
+
+```bash
+git worktree add ~/lotaas-release RELEASE_COMMIT
+cd ~/lotaas-release && setsid nohup python3 -m euroflash.campaign run … &
+```
+
+### Two tiers: GPU nodes and CPU nodes
+
+With `--cpu-nodes`, each batch is split between two machines:
+
+1. **GPU node:** dedispersion and the single-pulse search (matched filter and
+   clustering). As each beam finishes, the node marks it ready in
+   `work/handoff/`.
+2. **Head:** relays every ready beam to a CPU node through SSH pipes and then
+   deletes it from the GPU node. What is relayed is the filterbank, clusters,
+   metadata and periodic trials, about 5.2 GB. Nothing is written to shared
+   storage on the way.
+3. **CPU node:** FETCH classification and the periodic search, beam by beam as
+   they arrive. A periodic search prunes every trial no sifted-best peak points
+   to, freeing ~4 GB at once. When the batch is complete, the cross-beam veto
+   runs, then folding and finalisation.
+
+The GPU node is free for the next batch as soon as its own stages end. The
+head records this in `results/<run>/<node>.gpu-done`, and the driver then
+starts another batch there. Two batches, one on each GPU node, run at once. A
+slow beam holds only its CPU node.
+
+- CPU nodes are taken through flock slots in `campaign/.cpu-slots/`, one batch
+  per node, shared by concurrent runs.
+- A node without apptainer or 300 GB free is skipped for 10 minutes.
+- The head keeps at most `--relay-backlog` (40) relayed-but-unsearched beams on
+  a CPU node.
+- Each node keeps its own ledger. Both snapshots are merged into the campaign
+  ledger and results are collected from the CPU node.
+
+Without `--cpu-nodes`, a GPU node runs every stage itself, as before.
+
+**Stage limits.** Every stage runs in its own process group, and a stage past
+its limit is killed, children included:
+
+| Stage | Limit |
+| --- | --- |
+| dedisperse | 30 min |
+| single_pulse | 60 min |
+| sp_classify | 45 min |
+| periodicity | 60 min |
+| periodicity_fold | 30 min |
+| classify | 15 min |
+
+The beam fails and its SAP goes to `attention`, keeping the filterbank for a
+retry. On 23 September two FETCH runs over 600 s-wide clusters held a batch for
+five hours. `euroflash.run --stage-timeout STAGE=SECONDS` overrides a limit.
+
+### The staging window experiment
+
+`--staging-schedule` changes `--max-staging-saps` at set times. Download
+workers stay at four: transfers of online files are fast, and SURF has
+answered HTTP 429. The experiment runs windows of 8, 16 and 32 SAPs for 30–36
+hours each; the schedule file is `campaign/staging-schedule.json`:
+
+```json
+{"phases": [
+  {"start": "2026-09-23T06:00:00Z", "max_staging_saps": 8,  "label": "window-8"},
+  {"start": "2026-09-24T12:00:00Z", "max_staging_saps": 16, "label": "window-16"},
+  {"start": "2026-09-26T00:00:00Z", "max_staging_saps": 32, "label": "window-32"}]}
+```
+
+Each change is logged as a `staging_window` event and shown in `status.json`.
+The report gives delivered bytes (SHA256 receipts of successful downloads),
+files, complete SAPs, 429/503 throttling and restages per phase. It gives each
+phase whole and again without its first hours, while earlier requests still
+arrive:
+
+```bash
+python3 -m euroflash.staging_report --root RESULTS_ROOT/campaign --ledger CAMPAIGN.sqlite \
+  --schedule RESULTS_ROOT/campaign/staging-schedule.json --ramp-hours 6
+```
+
+Do not read `files_converted_last_24h` in `status.json` as throughput. It
+counts files still in the `converted` state, not those already searched. On
+23 September it showed 887 while the receipts showed about 2,500–2,950 files
+(13–15 TB) a day.
 
 Run it detached (`setsid nohup … &`) so it survives a closed session. State is
 kept in `campaign-state.sqlite` under the root, and a restart resumes where it

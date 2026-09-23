@@ -10,7 +10,7 @@
 </div>
 <form class="filters" method="get">
   <label>Type <select name="type">
-    {% for value, text in [('queue', 'Positives and pulsars'), ('candidate', 'FETCH positives'), ('known_pulsar', 'Known pulsars'), ('rejected', 'FETCH rejects'), ('all', 'Everything')] %}
+    {% for value, text in [('queue', 'Positives and pulsars'), ('candidate', 'FETCH positives'), ('known_pulsar', 'Known pulsars'), ('rejected', 'FETCH rejects'), ('unclassified', 'Not sent to FETCH (too wide, or past the budget)'), ('all', 'Everything')] %}
       <option value="{{ value }}" {{ 'selected' if params.get('type') == value }}>{{ text }}{% if types.get(value) %} ({{ types[value] }}){% endif %}</option>
     {% endfor %}</select></label>
   <label>Review <select name="review">

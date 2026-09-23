@@ -40,7 +40,7 @@ STATE_ORDER = ['pending', 'staging', 'flatfielding', 'prepared', 'dispatched', '
 FILE_ORDER = ['pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
 # Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
 # what waits for a person; the other types can be listed but are not queued.
-KINDS = {'sp': {'types': ('candidate', 'known_pulsar', 'rejected'), 'queue': ('candidate', 'known_pulsar'),
+KINDS = {'sp': {'types': ('candidate', 'known_pulsar', 'rejected', 'unclassified'), 'queue': ('candidate', 'known_pulsar'),
                 'page': '/single-pulse', 'sort': 'recent'},
          'periodic': {'types': ('periodic', 'periodic_rfi'), 'queue': ('periodic',),
                       'page': '/periodic', 'sort': 'snr'}}
@@ -291,6 +291,7 @@ def create_app(cfg, run_background=True):
     env.filters.update(ago=ago, duration=duration, when=when, size=size, beam=beam_label,
                        kind=lambda t: {'candidate': 'FETCH positive', 'known_pulsar': 'known pulsar',
                                        'rejected': 'FETCH reject', 'periodic': 'periodic',
+                                       'unclassified': 'not sent to FETCH',
                                        'periodic_rfi': 'periodic, RFI-like'}.get(t, t),
                        json=lambda v: Markup(json.dumps(clean(v)).replace('</', '<\\/')))
     env.globals.update(LABELS=LABELS, now=time.time)
@@ -464,7 +465,8 @@ def create_app(cfg, run_background=True):
                   for b in beams if b['ra_deg'] is not None]
         return page(request, 'sap.html', sap=dict(row), info=dict(info) if info else None, files=files,
                     requests=requests, events=events, beams=beams, stages=by_item,
-                    stage_names=['retrieve', 'downsample', 'dedisperse', 'single_pulse', 'periodicity', 'classify'],
+                    stage_names=['retrieve', 'downsample', 'dedisperse', 'single_pulse', 'sp_classify', 'periodicity',
+                                 'periodicity_fold', 'classify'],
                     flatfield=dict(flatfield) if flatfield else None,
                     charts={'layout': layout})
 

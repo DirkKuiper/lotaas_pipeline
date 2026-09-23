@@ -25,6 +25,7 @@ restart resumes where it stopped. Create a file named STOP in the campaign
 root, or send SIGTERM, to stop after the current step.
 """
 import argparse
+import calendar
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import fcntl
@@ -156,8 +157,8 @@ class State:
 class AdoptedProcess:
     """poll()/wait() for a cluster run started by an earlier driver process."""
 
-    def __init__(self, pid, run_name):
-        self.pid, self.run_name, self.returncode = pid, run_name, None
+    def __init__(self, pid, run_name, node=None):
+        self.pid, self.run_name, self.node, self.returncode = pid, run_name, node, None
 
     def poll(self):
         if Path(f'/proc/{self.pid}').exists():
@@ -185,8 +186,35 @@ def running_dispatch(run_name):
         if b'euroflash.cluster' in argv and b'--run-name' in argv:
             i = argv.index(b'--run-name')
             if i + 1 < len(argv) and argv[i + 1].decode(errors='replace') == run_name:
-                return AdoptedProcess(int(proc.name), run_name)
+                node = argv[argv.index(b'--nodes') + 1].decode() if b'--nodes' in argv else None
+                return AdoptedProcess(int(proc.name), run_name, node)
     return None
+
+
+def staging_window(schedule, default, now=None):
+    """SAP requests allowed in flight now, from a schedule of timed phases.
+
+    The schedule is JSON: {"phases": [{"start": "2026-09-24T16:00:00Z",
+    "max_staging_saps": 16, "label": "window-16"}, ...]}. The latest phase
+    that has started applies; before the first, the command-line default.
+    """
+    if not schedule:
+        return default, None
+    try:
+        phases = json.loads(Path(schedule).read_text())['phases']
+    except (OSError, ValueError, KeyError):
+        return default, None
+    now = time.time() if now is None else now
+    current = None
+    for phase in phases:
+        start = phase['start']
+        start = start if isinstance(start, (int, float)) else calendar.timegm(
+            time.strptime(start, '%Y-%m-%dT%H:%M:%SZ'))
+        if start <= now and (current is None or start >= current[0]):
+            current = (start, phase)
+    if current is None:
+        return default, None
+    return int(current[1]['max_staging_saps']), current[1].get('label')
 
 
 def flattened(path):
@@ -221,9 +249,13 @@ class Campaign:
         self.flatfield_pool = ThreadPoolExecutor(max_workers=max(1, getattr(options, 'flatfield_workers', 2)))
         self.flatfield_jobs = {}
         self.throttle_until = 0.
-        self.dispatch_process = None
-        self.dispatch_failures = 0
-        self.dispatch_retry_after = 0.
+        # Cluster runs in flight by run name. Each holds one GPU node until the
+        # node's own stages end (<run>/<node>.gpu-done); a CPU node may still be
+        # classifying and folding the batch after that.
+        self.dispatches = {}
+        self.dispatch_failures = {}
+        self.dispatch_retry_after = {}
+        self.window = (getattr(options, 'max_staging_saps', 8), None)
         self.stopping = False
 
     def _runner(self):
@@ -240,13 +272,21 @@ class Campaign:
         return runner
 
     # ------------------------------------------------------------ staging
+    def staging_limit(self):
+        window = staging_window(getattr(self.o, 'staging_schedule', None), self.o.max_staging_saps)
+        if window != self.window:
+            self.state.event('staging_window', window[1] or 'default', f'{self.window[0]} -> {window[0]} SAPs in flight')
+            self.window = window
+        return window[0]
+
     def admit(self):
         """Start staging further SAPs while every bound allows it."""
         free_tb = shutil.disk_usage(self.root).free / 1e12
         staging = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state='staging'")[0]['n']
         waiting = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state IN ('prepared','dispatched')")[0]['n']
+        limit = self.staging_limit()
         admitted = []
-        while (staging < self.o.max_staging_saps and waiting < self.o.max_prepared_saps
+        while (staging < limit and waiting < self.o.max_prepared_saps
                and free_tb > self.o.min_free_tb and not self.stopping):
             candidates = self.state.rows("SELECT key FROM saps WHERE state='pending' ORDER BY position LIMIT 1")
             if self.o.only_sap:
@@ -492,22 +532,38 @@ class Campaign:
         return True
 
     # ----------------------------------------------------------- dispatch
+    def gpu_busy(self, node):
+        """A GPU node is busy while a run on it has not finished its GPU stages."""
+        for process in self.dispatches.values():
+            if process.node == node and not (self.root/'results'/process.run_name/f'{node}.gpu-done').exists():
+                return True
+        return False
+
     def dispatch(self):
-        """Search prepared SAPs on the GPU nodes, one cluster run at a time."""
-        # A running (or adopted) run is followed even with dispatch turned off.
-        if self.dispatch_process is not None:
-            if self.dispatch_process.poll() is None:
-                return 'running'
-            self.finish_dispatch()
-        if not self.o.dispatch_nodes:
-            return None
-        if time.time() < self.dispatch_retry_after or self.stopping:
-            return None
-        ready = self.state.rows("SELECT * FROM saps WHERE state='prepared' ORDER BY position LIMIT ?",
-                                self.o.dispatch_saps)
-        if not ready:
-            return None
-        run_name = time.strftime('campaign-%Y%m%d-%H%M%S')
+        """Search prepared SAPs: a batch per free GPU node, several runs in flight."""
+        # Running (or adopted) runs are followed even with dispatch turned off.
+        for run_name, process in list(self.dispatches.items()):
+            if process.poll() is not None:
+                self.finish_dispatch(process)
+        started = []
+        for node in (self.o.dispatch_nodes or []) if not self.stopping else []:
+            on_node = sum(1 for p in self.dispatches.values() if p.node == node)
+            if (self.gpu_busy(node) or on_node >= getattr(self.o, 'batches_per_node', 2)
+                    or time.time() < self.dispatch_retry_after.get(node, 0)):
+                continue
+            ready = self.state.rows("SELECT * FROM saps WHERE state='prepared' ORDER BY position LIMIT ?",
+                                    self.o.dispatch_saps)
+            if not ready:
+                break
+            started.append(self.start_dispatch(node, ready))
+        return started or ('running' if self.dispatches else None)
+
+    def start_dispatch(self, node, ready):
+        base = time.strftime('campaign-%Y%m%d-%H%M%S-') + node.removeprefix('efc-').replace('-', '')
+        run_name, n = base, 1
+        while (self.root/'dispatch'/run_name).exists() or (self.root/'results'/run_name).exists():
+            n += 1
+            run_name = f'{base}-{n}'
         batch = self.root/'dispatch'/run_name
         batch.mkdir(parents=True)
         from euroflash.beams import excluded
@@ -517,18 +573,24 @@ class Campaign:
                     os.link(path, batch/path.name)   # hard link: no copy, originals survive cleanup
         command = [sys.executable, '-m', 'euroflash.cluster', '--input', str(batch),
                    '--work', str(self.root/'results'/run_name), '--ledger', str(Path(self.o.ledger).resolve()),
-                   '--nodes', *self.o.dispatch_nodes, '--run-name', run_name, '--gpus', self.o.gpus,
+                   '--nodes', node, '--run-name', run_name, '--gpus', self.o.gpus,
                    '--workers-per-gpu', str(self.o.workers_per_gpu), '--cpu-workers', str(self.o.cpu_workers),
                    '--image', str(self.o.image), '--settings', str(self.o.settings),
                    '--exclude-beams', *map(str, self.o.exclude_beams), '--skip-trials', '--cleanup-remote']
+        if getattr(self.o, 'remote_root', None):
+            command += ['--remote-root', self.o.remote_root]
+        if getattr(self.o, 'cpu_nodes', None):
+            command += ['--cpu-nodes', *self.o.cpu_nodes, '--cpu-tier-workers', str(getattr(self.o, 'cpu_tier_workers', 64)),
+                        '--cpu-lock-dir', str(self.root/'.cpu-slots')]
         if self.o.control_dir:
             command += ['--control-dir', str(self.o.control_dir)]
         log = (self.root/'logs'/f'{run_name}.log').open('a')
-        self.dispatch_process = subprocess.Popen(command, cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
-        self.dispatch_process.run_name = run_name
+        process = subprocess.Popen(command, cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
+        process.run_name, process.node = run_name, node
+        self.dispatches[run_name] = process
         for sap in ready:
             self.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
-        self.state.event('dispatched', run_name, ','.join(s['key'] for s in ready))
+        self.state.event('dispatched', run_name, f'{node}: ' + ','.join(s['key'] for s in ready))
         return run_name
 
     def searched_items(self, run_name):
@@ -544,21 +606,21 @@ class Campaign:
             succeeded |= {item for item, status in latest if status == 'success'}
         return succeeded, seen
 
-    def finish_dispatch(self):
-        process, self.dispatch_process = self.dispatch_process, None
-        run_name = process.run_name
+    def finish_dispatch(self, process):
+        self.dispatches.pop(process.run_name, None)
+        run_name, node = process.run_name, getattr(process, 'node', None)
         succeeded, collected = self.searched_items(run_name)
         saps = self.state.rows("SELECT * FROM saps WHERE state='dispatched' AND run_name=?", run_name)
         if not collected:
-            # Nothing ran (SSH, node health): put the SAPs back and back off.
-            self.dispatch_failures += 1
-            self.dispatch_retry_after = time.time() + min(4 * 3600, 600 * 2 ** self.dispatch_failures)
+            # Nothing ran (SSH, node health): put the SAPs back and back off that node.
+            self.dispatch_failures[node] = self.dispatch_failures.get(node, 0) + 1
+            self.dispatch_retry_after[node] = time.time() + min(4 * 3600, 600 * 2 ** self.dispatch_failures[node])
             for sap in saps:
                 self.state.set_sap(sap['key'], state='prepared', run_name=None,
                                    detail=f'dispatch {run_name} exited {process.returncode} before searching')
             self.state.event('dispatch_failed', run_name, f'exit {process.returncode}; see logs/{run_name}.log')
         else:
-            self.dispatch_failures = 0
+            self.dispatch_failures[node] = 0
             found = self.findings(run_name)
             for sap in saps:
                 done = kept = failed = 0
@@ -622,7 +684,9 @@ class Campaign:
                         GROUP BY r.id HAVING waiting>0 ORDER BY r.submitted'''),
                   'attention': self.state.rows("SELECT key,detail FROM saps WHERE state='attention'"),
                   'kept_for_review': self.kept_summary(),
-                  'dispatch_running': getattr(self.dispatch_process, 'run_name', None),
+                  'dispatch_running': sorted(self.dispatches),
+                  'dispatch_nodes': {p.run_name: p.node for p in self.dispatches.values()},
+                  'staging_window': {'max_staging_saps': self.window[0], 'phase': self.window[1]},
                   'recent_events': self.state.rows('SELECT * FROM events ORDER BY time DESC LIMIT 20')}
         partial = self.root/'status.json.partial'
         partial.write_text(json.dumps(report, indent=2, default=str))
@@ -642,18 +706,18 @@ class Campaign:
                 self.state.set_file(f['surl'], state='searched', detail='searched before per-beam states')
         self.apply_exclusions()
         for sap in self.state.rows("SELECT * FROM saps WHERE state='dispatched'"):
+            if sap['run_name'] in self.dispatches:
+                continue
             running = running_dispatch(sap['run_name'])
             if running is not None:
                 # A cluster run outlived the driver that started it: follow it
                 # rather than dispatch the same SAPs again beside it.
-                self.dispatch_process = running
+                self.dispatches[sap['run_name']] = running
                 self.state.event('dispatch_adopted', sap['key'], f'{sap["run_name"]} pid {running.pid}')
                 continue
             succeeded, collected = self.searched_items(sap['run_name'])
             if collected:
-                process = SimpleNamespace(run_name=sap['run_name'], returncode=None)
-                self.dispatch_process = process
-                self.finish_dispatch()
+                self.finish_dispatch(SimpleNamespace(run_name=sap['run_name'], returncode=None, node=None))
             else:
                 self.state.set_sap(sap['key'], state='prepared', run_name=None,
                                    detail=f'dispatch {sap["run_name"]} interrupted by a driver restart')
@@ -709,7 +773,7 @@ class Campaign:
                   flush=True)
             idle = not self.state.rows("SELECT 1 FROM saps WHERE state IN "
                                        "('pending','staging','flatfielding','prepared','dispatched') LIMIT 1")
-            if self.o.once or self.should_stop() or (idle and self.dispatch_process is None):
+            if self.o.once or self.should_stop() or (idle and not self.dispatches):
                 break
             # Retrieval work is taken in bounded batches; go straight back for more.
             if self.state.rows("SELECT 1 FROM files WHERE state='online' LIMIT 1"):
@@ -721,9 +785,10 @@ class Campaign:
             # Record flatfields still running rather than redo them next start.
             wait(list(self.flatfield_jobs.values()))
             self.prepare()
-        if self.dispatch_process is not None and not self.o.once:
-            self.dispatch_process.wait()
-            self.finish_dispatch()
+        if not self.o.once:
+            for process in list(self.dispatches.values()):
+                process.wait()
+                self.finish_dispatch(process)
         self.status()
         self.flatfield_pool.shutdown(wait=True)
 
@@ -757,8 +822,15 @@ def parser():
     run.add_argument('--keep-unflattened', action='store_true')
     run.add_argument('--keep-prepared', action='store_true',
                      help='Keep every flatfielded beam after its search, not only those with findings')
+    run.add_argument('--staging-schedule', type=Path,
+                     help='JSON phases that change --max-staging-saps at set times (the staging experiment)')
     run.add_argument('--dispatch-nodes', nargs='+', help='Search prepared SAPs on these GPU nodes')
     run.add_argument('--dispatch-saps', type=int, default=2, help='SAPs per cluster run')
+    run.add_argument('--batches-per-node', type=int, default=2,
+                     help='Runs per GPU node at once: one in its GPU stages, the others finishing on CPU nodes')
+    run.add_argument('--cpu-nodes', nargs='+', help='Classify and search for periodicity on these CPU nodes')
+    run.add_argument('--cpu-tier-workers', type=int, default=64, help='Concurrent beams on a CPU node')
+    run.add_argument('--remote-root', help='Run directory on the compute nodes (euroflash.cluster default if unset)')
     run.add_argument('--gpus', default='0,1')
     run.add_argument('--workers-per-gpu', type=int, default=3)
     run.add_argument('--cpu-workers', type=int, default=24)

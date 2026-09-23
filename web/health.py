@@ -130,6 +130,8 @@ def check(cfg):
     control_dir = Path(driver_options.get('control-dir') or cfg.control_dir)
     nodes = driver_options.get('dispatch-nodes') or ['efc-gpu-01']
     nodes = [nodes] if isinstance(nodes, str) else nodes
+    cpu_nodes = driver_options.get('cpu-nodes') or []
+    nodes = nodes + ([cpu_nodes] if isinstance(cpu_nodes, str) else cpu_nodes)
     report['ssh'] = {node: ssh_master(control_socket(control_dir, node), node) for node in nodes}
     for run in report['dispatch']:
         run['stages'] = {node: stage_processes(control_socket(control_dir, node), node, run['run_name'])

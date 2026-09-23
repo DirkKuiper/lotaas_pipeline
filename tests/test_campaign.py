@@ -228,8 +228,7 @@ def test_a_search_removes_prepared_beams_that_succeeded_and_keeps_failures(tmp_p
     statuses = {b.stem: 'success' for b in beams}
     statuses[beams[0].stem] = 'failed'
     snapshot(tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'/'ledger-snapshot.sqlite', statuses)
-    campaign.dispatch_process = Namespace(run_name=run_name, returncode=1)
-    campaign.finish_dispatch()
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=1, node='efc-gpu-01'))
     assert [b.exists() for b in beams] == [True] + [False] * (len(beams) - 1)
     after = campaign.state.rows('SELECT state,detail FROM saps')[0]
     assert after['state'] == 'attention' and after['detail'].startswith('1 beams')
@@ -273,10 +272,9 @@ def test_a_dispatch_that_never_ran_puts_saps_back_and_backs_off(tmp_path, monkey
     settle(campaign)
     key = campaign.state.rows('SELECT key FROM saps')[0]['key']
     campaign.state.set_sap(key, state='dispatched', run_name='campaign-ssh-down')
-    campaign.dispatch_process = Namespace(run_name='campaign-ssh-down', returncode=255)
-    campaign.finish_dispatch()
+    campaign.finish_dispatch(Namespace(run_name='campaign-ssh-down', returncode=255, node='efc-gpu-01'))
     assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'prepared'
-    assert campaign.dispatch_retry_after > time.time()
+    assert campaign.dispatch_retry_after['efc-gpu-01'] > time.time()
 
 
 def test_an_interrupted_driver_resumes_its_work(tmp_path, monkeypatch):
@@ -321,7 +319,8 @@ def test_several_workers_share_each_gpu(tmp_path):
         with lock:
             active[gpu] -= 1
     run.step = step
-    run.analyze = lambda item, output: None
+    run.search = lambda item, output: []
+    run.finish_batch = lambda searched, pool: []
     beams = []
     for i in range(12):
         path = tmp_path/f'beam{i:02d}_ff.fil'; path.write_bytes(b'x'); beams.append(path)
@@ -512,11 +511,11 @@ def test_a_cluster_run_that_outlived_its_driver_is_followed_not_repeated(tmp_pat
     try:
         campaign.recover()
         assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'dispatched'
-        assert campaign.dispatch_process.pid == orphan.pid
+        assert campaign.dispatches['campaign-orphan'].pid == orphan.pid
         assert campaign.dispatch() == 'running'
     finally:
         orphan.kill(); orphan.wait()
-    assert campaign.dispatch_process.poll() is not None
+    assert orphan.poll() is not None
 
 
 def test_retry_requeues_attention_saps_with_prepared_beams(tmp_path, monkeypatch):
@@ -589,8 +588,7 @@ def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, mo
     folds(30, [{'rfi_like': False, 'catalogue_matches': []}])
     folds(31, [{'rfi_like': True, 'catalogue_matches': []}])
     folds(32, [{'rfi_like': False, 'catalogue_matches': [{'name': 'J0323+3944'}]}])
-    campaign.dispatch_process = Namespace(run_name=run_name, returncode=0)
-    campaign.finish_dispatch()
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
     remaining = sorted(b for b, p in beams.items() if p.exists())
     assert remaining == [20, 30]
     assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'searched'
