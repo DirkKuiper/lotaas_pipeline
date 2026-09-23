@@ -320,6 +320,19 @@ def main():
         collect(destination/'ledger-snapshot.sqlite',a.ledger,node+'/'+a.run_name)
         return destination
 
+    def collect_live(node):
+        """Import a consistent ledger while work runs; final products stay separate."""
+        snapshot(node,work,a.control_dir)
+        destination=a.work/'live'/node
+        destination.mkdir(parents=True,exist_ok=True)
+        partial=destination/'ledger-snapshot.sqlite.partial'
+        with partial.open('wb') as stream:
+            subprocess.run(ssh_args(node,a.control_dir)+[shlex.join(['cat',work+'/ledger-snapshot.sqlite'])],
+                           stdout=stream,check=True,timeout=120)
+        target=destination/'ledger-snapshot.sqlite'
+        partial.replace(target)
+        collect(target,a.ledger,node+'/'+a.run_name)
+
     def cleanup(node):
         if a.cleanup_remote:
             # Only after the results and ledger are safely on the head. A
@@ -359,11 +372,18 @@ def main():
                       code=run_remote(cpu,runner_command('cpu',gpu_node=False),a.work/(cpu+'.log'))))
                   cpu_thread.start()
                   relayed,failed_relays,tries=set(),{},{}
+                  last_live=0.
                   with futures.ThreadPoolExecutor(max_workers=max(1,a.relay_streams)) as pool:
                       while True:
                           if not cpu_thread.is_alive():
                               raise RuntimeError(f'CPU runner on {cpu} exited {cpu_state.get("code")} before the batch was handed over')
                           finished=not gpu_thread.is_alive()
+                          if time.monotonic()-last_live>=60:
+                              try:
+                                  collect_live(cpu)
+                              except Exception as error:
+                                  note(f'Live ledger update deferred for {cpu}: {error}')
+                              last_live=time.monotonic()
                           ready={name[:-6] for name in listing(node,work+'/handoff',a.control_dir) if name.endswith('.ready')}
                           there=listing(cpu,work+'/handoff',a.control_dir)
                           backlog=len({n[:-6] for n in there if n.endswith('.ready')}-{n[:-9] for n in there if n.endswith('.searched')})
@@ -400,7 +420,13 @@ def main():
                   put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
                   cleanup(node)
                   state['cleaned']=True
-                  cpu_thread.join()
+                  while cpu_thread.is_alive():
+                      cpu_thread.join(timeout=60)
+                      if cpu_thread.is_alive():
+                          try:
+                              collect_live(cpu)
+                          except Exception as error:
+                              note(f'Live ledger update deferred for {cpu}: {error}')
                   collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
                   cleanup(cpu)
                   return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays

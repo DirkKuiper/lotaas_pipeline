@@ -120,6 +120,24 @@ def put_online(api, where, obs, sap, beams):
 FULL = list(range(0, 74))
 
 
+def test_staging_refills_late_files_without_unbounded_sap_admission(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch,
+        [('1000001', s, FULL) for s in range(6)], max_staging_saps=4, staging_files_target=146)
+    campaign.tick()
+    assert len(api.requests) == 2
+    # Almost-complete SAPs still wait for one archive each, but no longer
+    # leave the tape queue empty. Converted bytes do not count as requests.
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET state='converted' WHERE state='requested' AND beam!=13")
+    campaign.admit()
+    campaign.request()
+    assert len(api.requests) == 4
+    assert campaign.admit() == [], 'the hard SAP limit still bounds prepared data'
+    campaign.o.max_prepared_saps = 0
+    campaign.o.max_staging_saps = 6
+    assert campaign.admit() == [], 'prepared-space backpressure is preserved'
+
+
 def test_a_rolling_window_keeps_requests_in_flight_and_skips_incomplete_saps(tmp_path, monkeypatch):
     saps = [('1000001', 0, FULL), ('1000001', 1, FULL), ('1000001', 2, [b for b in FULL if b != 40]),
             ('1000002', 0, FULL)]

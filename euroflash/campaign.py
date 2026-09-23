@@ -161,8 +161,12 @@ class AdoptedProcess:
         self.pid, self.run_name, self.node, self.returncode = pid, run_name, node, None
 
     def poll(self):
-        if Path(f'/proc/{self.pid}').exists():
-            return None
+        try:
+            command = Path(f'/proc/{self.pid}/cmdline').read_bytes().split(b'\0')
+            if b'euroflash.cluster' in command and self.run_name.encode() in command:
+                return None
+        except OSError:
+            pass
         self.returncode = -1          # unknown: the results decide, as for any run
         return self.returncode
 
@@ -285,9 +289,13 @@ class Campaign:
         staging = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state='staging'")[0]['n']
         waiting = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state IN ('prepared','dispatched')")[0]['n']
         limit = self.staging_limit()
+        target = getattr(self.o, 'staging_files_target', 0)
+        outstanding = self.state.rows("""SELECT COUNT(*) AS n FROM files f JOIN saps s ON s.key=f.sap_key
+            WHERE s.state='staging' AND f.state IN ('pending','requested','online','working')""")[0]['n']
         admitted = []
         while (staging < limit and waiting < self.o.max_prepared_saps
-               and free_tb > self.o.min_free_tb and not self.stopping):
+               and free_tb > self.o.min_free_tb and not self.stopping
+               and (not target or outstanding < target)):
             candidates = self.state.rows("SELECT key FROM saps WHERE state='pending' ORDER BY position LIMIT 1")
             if self.o.only_sap:
                 candidates = self.state.rows(
@@ -299,6 +307,7 @@ class Campaign:
             self.state.set_sap(key, state='staging', detail=None)
             admitted.append(key)
             staging += 1
+            outstanding += self.state.rows("SELECT COUNT(*) AS n FROM files WHERE sap_key=? AND state='pending'", key)[0]['n']
         return admitted
 
     def request(self):
@@ -584,6 +593,8 @@ class Campaign:
                         '--cpu-lock-dir', str(self.root/'.cpu-slots')]
         if self.o.control_dir:
             command += ['--control-dir', str(self.o.control_dir)]
+        for timeout in getattr(self.o, 'stage_timeout', []):
+            command += ['--stage-timeout', timeout]
         log = (self.root/'logs'/f'{run_name}.log').open('a')
         process = subprocess.Popen(command, cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
         process.run_name, process.node = run_name, node
@@ -687,6 +698,7 @@ class Campaign:
                   'dispatch_running': sorted(self.dispatches),
                   'dispatch_nodes': {p.run_name: p.node for p in self.dispatches.values()},
                   'staging_window': {'max_staging_saps': self.window[0], 'phase': self.window[1]},
+                  'staging_files_target': getattr(self.o, 'staging_files_target', 0),
                   'recent_events': self.state.rows('SELECT * FROM events ORDER BY time DESC LIMIT 20')}
         partial = self.root/'status.json.partial'
         partial.write_text(json.dumps(report, indent=2, default=str))
@@ -803,6 +815,8 @@ def parser():
     run.add_argument('--image', type=Path, default=REPO/'containers/euroflash-runtime.sif')
     run.add_argument('--settings', type=Path, default=REPO/'settings.yaml')
     run.add_argument('--max-staging-saps', type=int, default=8, help='SAP requests in flight at once')
+    run.add_argument('--staging-files-target', type=int, default=0,
+                     help='Replenish outstanding files up to this target, bounded by max-staging-saps; 0 disables')
     run.add_argument('--max-prepared-saps', type=int, default=20, help='Prepared SAPs allowed to wait for a search')
     run.add_argument('--min-free-tb', type=float, default=5.0, help='Stop admitting SAPs below this free space')
     run.add_argument('--download-workers', type=int, default=4)
@@ -834,6 +848,7 @@ def parser():
     run.add_argument('--gpus', default='0,1')
     run.add_argument('--workers-per-gpu', type=int, default=3)
     run.add_argument('--cpu-workers', type=int, default=24)
+    run.add_argument('--stage-timeout', action='append', default=[], metavar='STAGE=SECONDS')
     run.add_argument('--control-dir', type=Path)
     run.add_argument('--once', action='store_true', help='One pass, then exit')
     status = sub.add_parser('status', help='Print the campaign state summary')

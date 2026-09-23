@@ -474,8 +474,18 @@ class Runner:
         with futures.ThreadPoolExecutor(max_workers=self.args.cpu_workers) as cpu_pool:
             def first_pass(item, output):
                 found = self.search(item, output)
-                (handoff/f'{item}.searched').write_text(json.dumps({'errors': found}))
-                return item, output, found
+                # Without a cross-beam veto there is no scientific dependency
+                # on the slowest beam. Finalise and release trials immediately.
+                config = json.loads((output/'metadata.json').read_text()).get('periodicity') or {}
+                if not config.get('multibeam_veto', False):
+                    try:
+                        self.fold_and_finish(item, output, list(found))
+                    except Exception as error:
+                        found.append(str(error))
+                    atomic_json(handoff/f'{item}.searched', {'errors': found, 'finalized': True})
+                    return item, output, found, True
+                atomic_json(handoff/f'{item}.searched', {'errors': found, 'finalized': False})
+                return item, output, found, False
             while True:
                 done = (handoff/'.done').is_file()   # read before listing, so no beam is missed
                 for marker in sorted(handoff.glob('*.ready')):
@@ -495,7 +505,11 @@ class Runner:
             searched = []
             for future in pending:
                 try:
-                    searched.append(future.result())
+                    item, output, found, finalized = future.result()
+                    if finalized:
+                        errors.extend(found)
+                    else:
+                        searched.append((item, output, found))
                 except Exception as e:
                     errors.append(str(e))
             errors += self.finish_batch(searched, cpu_pool)

@@ -205,12 +205,42 @@ def test_a_cpu_node_searches_beams_as_they_arrive_then_finishes_the_batch(tmp_pa
     run.search = lambda item, output: seen.append(item) or []
     run.finish_batch = lambda searched, pool: finished.extend(item for item, _, _ in searched) or []
     for item in ('b1', 'b2'):
+        output = run.root/'processed'/item/'x'
+        output.mkdir(parents=True)
+        atomic_json(output/'metadata.json', {'periodicity': {'multibeam_veto': True}})
         atomic_json(handoff/f'{item}.ready', {'item': item, 'fingerprint': run.fp, 'output': f'processed/{item}/x',
                                               'input': f'/x/{item}.fil'})
     atomic_json(handoff/'.done', {})
     run.process_stream(poll=0)
     assert sorted(seen) == ['b1', 'b2'] and sorted(finished) == ['b1', 'b2']
     assert (handoff/'b1.searched').exists() and (handoff/'b2.searched').exists()
+
+
+def test_a_slow_beam_cannot_block_completed_results_without_a_veto(tmp_path):
+    import threading
+    run = runner(tmp_path, stages='cpu')
+    run.fp = 'e' * 64
+    completed = threading.Event()
+    finished = []
+    def search(item, output):
+        if item == 'slow':
+            assert completed.wait(5), 'fast beam must finalize while slow beam is still running'
+        return []
+    def finish(item, output, errors):
+        finished.append(item)
+        if item == 'fast':
+            completed.set()
+    run.search, run.fold_and_finish = search, finish
+    for item in ('fast', 'slow'):
+        output = run.root/'processed'/item/'x'
+        output.mkdir(parents=True)
+        atomic_json(output/'metadata.json', {'periodicity': {'multibeam_veto': False}})
+        atomic_json(run.handoff()/f'{item}.ready', {'item': item, 'fingerprint': run.fp,
+                    'output': f'processed/{item}/x', 'input': f'/x/{item}.fil'})
+    atomic_json(run.handoff()/'.done', {})
+    run.process_stream(poll=0)
+    assert finished == ['fast', 'slow']
+    assert json.loads((run.handoff()/'fast.searched').read_text())['finalized'] is True
 
 
 def test_the_staging_window_follows_its_schedule(tmp_path):

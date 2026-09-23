@@ -1,0 +1,81 @@
+# Channels masked in every beam regardless of the RFI statistics, by index
+# into the filterbank's own channel ordering. Empty is allowed.
+bad_channels:
+  - 138
+rfi_block_size: 1000
+rfi_averaging_factor: 128
+dedispersion_plan:
+  - low_dm: 0.000
+    high_dm: 150.600
+    ddm: 0.10
+    downsample: 1
+  - low_dm: 150.600
+    high_dm: 289.800
+    ddm: 0.30
+    downsample: 2
+  - low_dm: 289.800
+    high_dm: 511.800
+    ddm: 0.50
+    downsample: 4
+  - low_dm: 511.800
+    high_dm: 1010.800
+    ddm: 1.00
+    downsample: 8
+  - low_dm: 1010.800
+    high_dm: 2014.800
+    ddm: 2.00
+    downsample: 16
+  - low_dm: 2014.800
+    high_dm: 4469.800
+    ddm: 5.00
+    downsample: 32
+  - low_dm: 4469.800
+    high_dm: 8939.800
+    ddm: 10.00
+    downsample: 64
+  - low_dm: 8939.800
+    high_dm: 10019.800
+    ddm: 20.00
+    downsample: 128
+periodicity:
+  enabled: true
+  period_min_seconds: 0.016
+  period_max_seconds: 300.0
+  harmonics: [1, 2, 4, 8, 16]
+  threshold: 12.0  # nominal -log10 Gamma tail; not Gaussian sigma
+  red_noise_window_bins: 257
+  rfi_frequencies_hz: [1.0, 50.0, 60.0]
+  rfi_tolerance_bins: 2
+  sift_dm_tolerance: 2.0
+  sift_period_fraction: 0.001
+  # Retention, not coverage: every template is searched. A crowded trial keeps
+  # its strongest distinct peaks and a crowded beam sifts its strongest; the
+  # numbers dropped are recorded in the coverage report and summary.
+  max_candidates_per_trial: 100
+  max_candidates_per_beam: 20000
+  max_sift_comparisons: 200000000
+  max_folds: 16
+  fold_bins: 64
+  fold_subintegrations: 32
+  catalogue_match: true
+  # Zero-pad each trial to a 7-smooth FFT length instead of letting prime-factor
+  # lengths fall back to a several-times slower FFT. No samples are dropped.
+  fft_fast_lengths: true
+  # Periodicity uses a dedicated grid.  The transient plan becomes too coarse
+  # at high DM for narrow pulses once its downsampling is included.
+  dm_plan:
+    - {low_dm: 0.000, high_dm: 150.600, ddm: 0.10, downsample: 1}
+    - {low_dm: 150.600, high_dm: 300.000, ddm: 0.20, downsample: 2}
+    - {low_dm: 300.000, high_dm: 600.000, ddm: 0.40, downsample: 4}
+    - {low_dm: 600.000, high_dm: 1200.000, ddm: 0.50, downsample: 8}
+    - {low_dm: 1200.000, high_dm: 2400.000, ddm: 1.00, downsample: 16}
+    - {low_dm: 2400.000, high_dm: 4800.000, ddm: 2.00, downsample: 32}
+    - {low_dm: 4800.000, high_dm: 9600.000, ddm: 4.00, downsample: 64}
+    - {low_dm: 9600.000, high_dm: 10019.800, ddm: 8.00, downsample: 128}
+
+# Preserve the live campaign science settings during the scheduler migration.
+classification:
+  min_dm: 10.0
+  min_snr: 7.0
+  max_width_seconds: null
+  max_fetch_candidates: null
