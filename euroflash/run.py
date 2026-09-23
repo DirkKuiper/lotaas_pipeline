@@ -34,6 +34,14 @@ TIMEOUTS = {'dedisperse': 1800, 'single_pulse': 3600, 'sp_classify': 2700, 'peri
 MODES = ('all', 'gpu', 'cpu')
 
 
+def atomic_json(path, value):
+    """Write JSON atomically. The runner uses the node's own Python, without numpy."""
+    path = Path(path)
+    partial = path.with_name(path.name + '.partial')
+    partial.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+    os.replace(partial, path)
+
+
 class StageTimeout(RuntimeError):
     """A stage ran past its limit and was killed."""
 
@@ -310,7 +318,6 @@ class Runner:
 
     def mark_ready(self, item, output):
         """Tell the head this beam can go to a CPU node (euroflash.cluster relays it)."""
-        from lotaas_reprocessing.periodicity import atomic_json
         metadata = json.loads((output/'metadata.json').read_text())
         atomic_json(self.handoff()/f'{item}.ready', {
             'item': item, 'fingerprint': self.fp, 'output': str(output.relative_to(self.root)),
@@ -450,7 +457,6 @@ class Runner:
         """GPU mode: no more beams will be marked ready in this run."""
         if self.mode != 'gpu':
             return
-        from lotaas_reprocessing.periodicity import atomic_json
         atomic_json(self.handoff()/'.done', {'fingerprint': self.fp,
                                              'failed': sorted(item for item, _, found in searched if found),
                                              'errors': len(errors)})

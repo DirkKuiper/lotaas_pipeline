@@ -305,3 +305,22 @@ def test_the_staging_report_measures_each_phase(tmp_path):
     assert rows[0]['whole']['bytes'] == 10e9 and rows[0]['whole']['saps_complete'] == 1
     assert rows[0]['whole']['throttled_429_503'] == 1 and rows[1]['whole']['files_retrieved'] == 1
     assert rows[0]['after_ramp']['files_retrieved'] == 0
+
+
+def test_the_runner_hands_over_without_numpy(tmp_path, monkeypatch):
+    """euroflash.run runs on a node's own Python, which has no numpy or scipy."""
+    for name in ('numpy', 'scipy'):
+        monkeypatch.setitem(sys.modules, name, None)
+    for name in [m for m in sys.modules if m.startswith('lotaas_reprocessing.periodicity')]:
+        monkeypatch.delitem(sys.modules, name)
+    run = runner(tmp_path, stages='gpu')
+    run.fp = 'd' * 64
+    output = tmp_path/'work'/'processed'/'beam'/'x'; output.mkdir(parents=True)
+    (output/'metadata.json').write_text(json.dumps({'filename': '/runs/input/beam.fil'}))
+    run.mark_ready('beam', output)
+    run.write_done([('beam', output, [])], [])
+    assert json.loads((run.handoff()/'beam.ready').read_text())['input'] == '/runs/input/beam.fil'
+    assert json.loads((run.handoff()/'.done').read_text())['failed'] == []
+    dirs = [beam_dir(tmp_path/'veto', b, [row(0.2, b * 10.)]) for b in (13, 14, 15, 16)]
+    from lotaas_reprocessing.periodicity_veto import apply
+    assert sum(apply(dirs).values()) == 4
