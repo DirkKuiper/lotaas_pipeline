@@ -232,7 +232,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             counts["fetch"] += 1
 
             if fetch_models is None:
-                fetch_models = {name: get_model(name) for name in model_names}
+                from lotaas_reprocessing.fetch_models import load_models
+                fetch_models = load_models(model_names, factory=get_model)
 
             # Proceed with classification of non-pulsar candidates
             time_size, freq_size, dm_size = 256, 256, 256
