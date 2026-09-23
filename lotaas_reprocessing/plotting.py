@@ -253,8 +253,9 @@ def rfi_diagnostic_plot(masked_data, original_data, mask, t, nu, factor, filenam
 
     # Add a title at the top of the figure
     fig.suptitle(f"RFI Diagnostic Plot for {filename}", fontsize=16, fontweight='bold', y=0.9)
-    # Save the plot
-    plt.savefig(save_path, dpi=300)
+    # Save the plot. At 300 dpi this figure was 5400 x 4800 px and 6.5 MB for
+    # every beam, 16% of each beam's results; 110 dpi still shows every block.
+    plt.savefig(save_path, dpi=110)
     print(f"Plot saved to {save_path}")
     plt.close(fig)
 

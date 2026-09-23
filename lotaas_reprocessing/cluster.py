@@ -196,7 +196,7 @@ def cluster_candidates(candidate_file, output_file, plan=None,
 
     # Save the plot
     output_filename = os.path.join(os.path.dirname(output_file), "dm_vs_time_clusters.png")
-    plt.savefig(output_filename, dpi=300, bbox_inches="tight")
+    plt.savefig(output_filename, dpi=150, bbox_inches="tight")
     plt.close()
 
     print(f"Figure saved as {output_filename}")

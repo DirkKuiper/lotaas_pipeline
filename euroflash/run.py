@@ -431,11 +431,13 @@ class Runner:
                     inflight.acquire()
                     try:
                         from lotaas_reprocessing.trials import validate_products
+                        # The manifest lists every trial with its size and digest and
+                        # validate_products checks them on success and on resume, so
+                        # the ledger records the manifest, not ~4,400 trial paths:
+                        # those were 2.4 MB per beam, 1.7 GB of the campaign ledger.
                         self.step(item, 'dedisperse', self.command('pipeline/pipeline_gpu.py', args, gpu),
-                                  lambda output=output: [output/'metadata.yaml', output/'metadata.json', output/'trial_manifest.json']
-                                  + list((output/'DM_trials').glob('*.dat'))
-                                  + list((output/'Periodic_DM_trials').glob('*.dat')), gpu,
-                                  validator=lambda output=output: validate_products(output))
+                                  lambda output=output: [output/'metadata.yaml', output/'metadata.json', output/'trial_manifest.json'],
+                                  gpu, validator=lambda output=output: validate_products(output))
                         future = cpu_pool.submit(lambda item=item, output=output: (item, output, self.search(item, output)))
                         future.add_done_callback(lambda _: inflight.release())
                         cpu_futures.append(future)
