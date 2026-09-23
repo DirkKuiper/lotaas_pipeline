@@ -266,10 +266,15 @@ def test_fold_refinement_and_products_survive_trial_cleanup(tmp_path):
 
 
 
+def complete(output,name):
+    from lotaas_reprocessing.periodicity import atomic_json
+    (output/(name+'.product')).write_text('ok')
+    atomic_json(output/name,{'complete':True,'outputs':{name+'.product':2}})
+
+
 def test_independent_search_checkpoints_retry_only_failed_branch(tmp_path):
     from argparse import Namespace
     from euroflash.run import Runner
-    import yaml
     image=tmp_path/'runtime.sif';image.write_bytes(b'image')
     settings=tmp_path/'settings.yaml';settings.write_text('periodicity: {enabled: true}')
     args=Namespace(work=tmp_path/'work',ledger=tmp_path/'ledger.sqlite',settings=settings,
@@ -277,20 +282,26 @@ def test_independent_search_checkpoints_retry_only_failed_branch(tmp_path):
     runner=Runner(args);runner.fp='version'
     out=tmp_path/'products';out.mkdir()
     (out/'metadata.json').write_text(json.dumps({'periodicity_enabled':True}))
+    summaries={'single_pulse':'single_pulse_summary.json','sp_classify':'sp_classify_summary.json',
+               'periodicity':'periodicity_search_summary.json','periodicity_fold':'periodicity_summary.json'}
     calls=[];completed=set()
     def step(item,stage,command,expected,**kwargs):
         if stage in completed:return
         calls.append(stage)
         if stage=='periodicity' and calls.count('periodicity')==1:
             raise RuntimeError('interrupted search')
+        if stage in summaries:complete(out,summaries[stage])
         completed.add(stage)
     runner.step=step
+    # The periodic search fails: nothing is folded and the beam is recorded as failed.
+    errors=runner.search('beam',out)
     with pytest.raises(RuntimeError,match='interrupted'):
-        runner.analyze('beam',out)
-    runner.analyze('beam',out)
-    assert calls==['single_pulse','periodicity','periodicity','classify']
+        runner.fold_and_finish('beam',out,errors)
     with runner.ledger.connect() as db:
         assert db.execute("SELECT status FROM attempts WHERE stage='classify'").fetchone()[0]=='failed'
+    # The retry reruns only the periodic branch, then folds and finishes.
+    runner.fold_and_finish('beam',out,runner.search('beam',out))
+    assert calls==['single_pulse','sp_classify','periodicity','periodicity','periodicity_fold','classify']
 
 
 def test_single_pulse_failure_still_runs_periodicity(tmp_path):
@@ -303,10 +314,14 @@ def test_single_pulse_failure_still_runs_periodicity(tmp_path):
     stages=[]
     def step(item,stage,*args,**kwargs):
         stages.append(stage)
-        if stage=='single_pulse':raise RuntimeError('FETCH failed')
+        if stage=='sp_classify':raise RuntimeError('FETCH failed')
+        if stage=='periodicity':complete(out,'periodicity_search_summary.json')
     runner.step=step
-    with pytest.raises(RuntimeError,match='FETCH failed'):runner.analyze('beam',out)
-    assert stages==['single_pulse','periodicity']
+    errors=runner.search('beam',out)
+    assert stages==['single_pulse','sp_classify','periodicity']
+    # The periodic branch is still folded, for review, before the beam is failed.
+    with pytest.raises(RuntimeError,match='FETCH failed'):runner.fold_and_finish('beam',out,errors)
+    assert stages[-1]=='periodicity_fold'
 
 
 def test_finalize_refuses_to_remove_trials_if_fold_product_is_missing(tmp_path):

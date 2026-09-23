@@ -49,6 +49,10 @@ DEFAULTS = {
     # length keeps every sample and cut the FFT cost of a beam from 88 s to
     # ~15-25 s; the Fourier grid becomes at most ~2% finer.
     "fft_fast_lengths": True,
+    # Cross-beam veto before folding (see lotaas_reprocessing.periodicity_veto).
+    "multibeam_veto": False,
+    "veto_bins": 1.1,
+    "veto_beams": 4,
 }
 
 
@@ -77,6 +81,10 @@ def resolved_config(config=None):
         raise ValueError("max_folds must be an integer in 0..128")
     if any(not np.isfinite(f) or f <= 0 for f in result["rfi_frequencies_hz"]):
         raise ValueError("RFI frequencies must be finite and positive")
+    if not np.isfinite(result["veto_bins"]) or not 0 < result["veto_bins"] <= 10:
+        raise ValueError("periodicity.veto_bins must be in (0, 10]")
+    if int(result["veto_beams"]) != result["veto_beams"] or result["veto_beams"] < 2:
+        raise ValueError("periodicity.veto_beams must be an integer of at least 2")
     return result
 
 
@@ -420,14 +428,24 @@ def valid_trial(path, metadata, dm, downsample):
     return data[:valid],polluted
 
 
-def run_periodicity_search(trial_dir, output_dir, metadata, config=None):
+def _configured(metadata, config):
+    return resolved_config(config if config is not None else metadata.get("periodicity", {}))
+
+
+def search_periodicity(trial_dir, output_dir, metadata, config=None):
+    """Search every trial and sift the peaks; folding is a separate step.
+
+    Folding waits for the cross-beam veto, which needs the sifted peaks of
+    every beam in a batch. The search summary carries what the fold step
+    needs to complete the beam's periodicity summary.
+    """
     from .trials import trial_specs, validate_trials
-    config=resolved_config(config if config is not None else metadata.get("periodicity",{}))
+    config=_configured(metadata, config)
     trial_dir,output_dir=Path(trial_dir),Path(output_dir)
     output_dir.mkdir(parents=True,exist_ok=True)
     # A previous success must not survive a failed rerun.
-    summary_path=output_dir/"periodicity_summary.json"
-    summary_path.unlink(missing_ok=True)
+    for name in ("periodicity_search_summary.json","periodicity_summary.json"):
+        (output_dir/name).unlink(missing_ok=True)
     plan=metadata.get("periodicity_dm_plan") or metadata["dedispersion_plan"]
     validate_trials(metadata,trial_dir,plan)
     specs=trial_specs(metadata,plan)
@@ -461,15 +479,9 @@ def run_periodicity_search(trial_dir, output_dir, metadata, config=None):
     sift_seconds=time.perf_counter()-sift_start
     _write_jsonl(output_dir/"periodicity_candidates.jsonl",sifted)
     atomic_json(output_dir/"periodicity_coverage.json",coverage)
-    from .periodicity_folding import fold_candidates
-    fold_start=time.perf_counter()
-    folds=fold_candidates(sifted,trial_dir,output_dir,metadata,config)
-    _write_jsonl(output_dir/"periodicity_folded_candidates.jsonl",folds)
-    files=[raw_path,output_dir/"periodicity_candidates.jsonl",output_dir/"periodicity_coverage.json",
-           output_dir/"periodicity_folded_candidates.jsonl"]
-    for fold in folds:
-        files += [output_dir/fold["plot"],output_dir/fold["fold_data"]]
-    summary={"schema":"lotaas.periodicity.v2","complete":True,"algorithm":"fractional_fft_harmonic_sum_zero_acceleration",
+    files=[raw_path,output_dir/"periodicity_candidates.jsonl",output_dir/"periodicity_coverage.json"]
+    summary={"schema":"lotaas.periodicity.search.v1","complete":True,
+        "algorithm":"fractional_fft_harmonic_sum_zero_acceleration",
         "configuration":config,"trials_searched":len(coverage),"raw_candidates":len(candidates),
         "peaks_found":sum(c["peaks_found"] for c in coverage),
         "peaks_dropped_in_crowded_trials":sum(c["peaks_dropped"] for c in coverage),
@@ -478,12 +490,62 @@ def run_periodicity_search(trial_dir, output_dir, metadata, config=None):
         "sift_input_limit":sift_limit,
         "candidates_not_sifted":sum(1 for r in sifted if r["sift_status"]=="not_sifted_beam_limit"),
         "sifted_candidates":len(sifted),"best_candidates":sum(r["is_sifted_best"] for r in sifted),
-        "rfi_like_candidates":sum(r["rfi_like"] for r in candidates),"folded_candidates":len(folds),
+        "rfi_like_candidates":sum(r["rfi_like"] for r in candidates),
         "elapsed_seconds":time.perf_counter()-started,"cpu_seconds":time.process_time()-cpu_started,
-        "stage_seconds":{"search":search_seconds,"sift":sift_seconds,"fold":time.perf_counter()-fold_start},
+        "stage_seconds":{"search":search_seconds,"sift":sift_seconds},
         "process_peak_rss_bytes":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
-        "statistic_note":"-log10 nominal Gamma noise tail; not Gaussian S/N or survey significance",
-        "period_frame":"topocentric","acceleration_searched":False,"ffa_searched":False,
         "outputs":{str(p.relative_to(output_dir)):p.stat().st_size for p in files}}
+    atomic_json(output_dir/"periodicity_search_summary.json",summary)
+    return summary
+
+
+def read_jsonl(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def fold_periodicity(trial_dir, output_dir, metadata, config=None):
+    """Fold the strongest sifted peaks the cross-beam veto left, then summarise.
+
+    Reads periodicity_veto.json when the batch step wrote one. Vetoed peaks
+    keep their rows and are counted in the summary; they only lose their
+    place in the fold shortlist.
+    """
+    config=_configured(metadata, config)
+    trial_dir,output_dir=Path(trial_dir),Path(output_dir)
+    summary_path=output_dir/"periodicity_summary.json"
+    summary_path.unlink(missing_ok=True)
+    started=time.perf_counter()
+    search=json.loads((output_dir/"periodicity_search_summary.json").read_text())
+    if search.get("complete") is not True:
+        raise ValueError("Periodicity search incomplete; fold refused")
+    sifted=read_jsonl(output_dir/"periodicity_candidates.jsonl")
+    veto_path=output_dir/"periodicity_veto.json"
+    veto=json.loads(veto_path.read_text()) if veto_path.is_file() else None
+    vetoed=set(veto.get("vetoed_indices",[])) if veto else set()
+    for index,row in enumerate(sifted):
+        row["multibeam_rfi"]=index in vetoed
+    from .periodicity_folding import fold_candidates
+    folds=fold_candidates(sifted,trial_dir,output_dir,metadata,config)
+    _write_jsonl(output_dir/"periodicity_folded_candidates.jsonl",folds)
+    files=[output_dir/name for name in search["outputs"]]
+    files+=[output_dir/"periodicity_search_summary.json",output_dir/"periodicity_folded_candidates.jsonl"]
+    if veto is not None:
+        files.append(veto_path)
+    for fold in folds:
+        files += [output_dir/fold["plot"],output_dir/fold["fold_data"]]
+    summary=dict(search,schema="lotaas.periodicity.v3",complete=True,folded_candidates=len(folds),
+        multibeam_veto={"applied":veto is not None,
+                        "vetoed_best_candidates":sum(1 for r in sifted if r["multibeam_rfi"] and r.get("is_sifted_best")),
+                        "compared_beams":veto.get("compared_beams") if veto else None},
+        stage_seconds=dict(search.get("stage_seconds",{}),fold=time.perf_counter()-started),
+        statistic_note="-log10 nominal Gamma noise tail; not Gaussian S/N or survey significance",
+        period_frame="topocentric",acceleration_searched=False,ffa_searched=False,
+        outputs={str(p.relative_to(output_dir)):p.stat().st_size for p in files})
     atomic_json(summary_path,summary)
     return summary
+
+
+def run_periodicity_search(trial_dir, output_dir, metadata, config=None):
+    """Search, sift and fold one beam without a cross-beam veto."""
+    search_periodicity(trial_dir, output_dir, metadata, config)
+    return fold_periodicity(trial_dir, output_dir, metadata, config)

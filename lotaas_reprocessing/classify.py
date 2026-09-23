@@ -29,6 +29,10 @@ CATALOGUE_RADIUS_DEG = 5.0
 # LOTAAS_ATNF_VETO_RADIUS_DEG once the tied-array beam response is measured.
 VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 
+# Which clusters reach FETCH; settings.yaml `classification` overrides these.
+# Without a width cap or budget every cluster above the floors is classified.
+DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None, "max_fetch_candidates": None}
+
 
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
     """The decimated, time-cropped DM-time plane FETCH receives.
@@ -82,7 +86,20 @@ def send_slack_message(text):
     logger.info(text)
 
 
-def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None):
+def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
+                        limits=None, tsamp=None):
+    """Classify one beam's clusters; returns how many went to FETCH and why others did not.
+
+    A cluster wider than `max_width_seconds` (needs `tsamp`, the native sample
+    time), or beyond the `max_fetch_candidates` strongest, is recorded as
+    'unclassified' instead of being sent to FETCH. Known pulsars never use
+    the budget.
+    """
+    limits = dict(DEFAULT_LIMITS, **{k: v for k, v in (limits or {}).items() if k in DEFAULT_LIMITS})
+    counts = {"fetch": 0, "known_pulsar": 0, "unclassified_wide": 0, "unclassified_budget": 0}
+    width_limit = (limits["max_width_seconds"] / float(tsamp)
+                   if limits["max_width_seconds"] is not None and tsamp else None)
+    budget = limits["max_fetch_candidates"]
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
     beam_id = os.path.basename(filterbank_file)
@@ -101,11 +118,12 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     try:
         candidates_df = pd.read_csv(candidate_file, sep=r"\s+")
         candidates_df.columns = candidates_df.columns.str.strip().str.lower()
-        candidates_df = candidates_df[(candidates_df["dm"] >= 10) & (candidates_df["s/n"] > 7)]
+        candidates_df = candidates_df[(candidates_df["dm"] >= limits["min_dm"])
+                                      & (candidates_df["s/n"] > limits["min_snr"])]
         if candidates_df.empty:
             update_beam_run(beam_run_id, outcome="no_candidates", num_candidates=0,
                            num_redetections=0, highest_snr=0)
-            return
+            return counts
         skycoord = SkyCoord(
             observation_info["RA (J2000)"],
             observation_info["DEC (J2000)"],
@@ -166,7 +184,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             snr = row["s/n"]
             sample_number = int(row["sample"])
 
-            if dm < 10 or snr <= 7:
+            if dm < limits["min_dm"] or snr <= limits["min_snr"]:
                 continue
 
             if snr > highest_snr:
@@ -192,6 +210,24 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                         "separation_deg": float(matched_psr["separation_deg"]),
                     }
                 continue  # Skip further processing for redetections
+
+            # Too wide for FETCH, or past the budget: kept as a record, not classified.
+            reason = ("unclassified_wide" if width_limit is not None and width > width_limit
+                      else "unclassified_budget" if budget is not None and counts["fetch"] >= budget else None)
+            if reason:
+                counts[reason] += 1
+                insert_detection(
+                    beam_id=beam_id,
+                    beam_run_id=beam_run_id,
+                    time_seconds=tcand,
+                    sample_number=sample_number,
+                    candidate_dm=dm,
+                    snr=snr,
+                    width_samples=width,
+                    detection_type="unclassified",
+                )
+                continue
+            counts["fetch"] += 1
 
             if fetch_models is None:
                 fetch_models = {name: get_model(name) for name in model_names}
@@ -407,6 +443,11 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 f"  Width={info['width']}  separation={info['separation_deg']:.3f} deg"
             )
             num_redetections += 1
+        counts["known_pulsar"] = num_redetections
+        if counts["unclassified_wide"] or counts["unclassified_budget"]:
+            logger.info("Not sent to FETCH: %d wider than %s s, %d beyond the budget of %s",
+                        counts["unclassified_wide"], limits["max_width_seconds"],
+                        counts["unclassified_budget"], budget)
 
         update_beam_run(
             row_id=beam_run_id,
@@ -420,6 +461,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             send_slack_message("\n".join(slack_messages))
 
         print("Finished processing.")
+        return counts
 
     except Exception as e:
         update_beam_run(

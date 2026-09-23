@@ -268,7 +268,7 @@ if __name__ == "__main__":
 
     # Save metadata to a YAML file
     metadata_file = os.path.join(output_dir, "metadata.yaml")
-    metadata = {"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "periodicity": periodicity, "periodicity_enabled": periodicity_enabled, "periodicity_dm_plan": periodicity_plan if periodicity_enabled else [], "stage_timings": {"dedispersion": dedispersion_timing, "periodicity_dedispersion": periodicity_timing}, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
+    metadata = {"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "periodicity": periodicity, "periodicity_enabled": periodicity_enabled, "periodicity_dm_plan": periodicity_plan if periodicity_enabled else [], "classification": settings.get("classification") or {}, "stage_timings": {"dedispersion": dedispersion_timing, "periodicity_dedispersion": periodicity_timing}, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
                    # Band limits, so the search can size the tail that circular
                    # dedispersion pollutes at each DM.
                    "nu_min": float(np.min(nu)), "nu_max": float(np.max(nu)),

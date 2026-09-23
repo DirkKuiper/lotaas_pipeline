@@ -163,7 +163,8 @@ def plot_fold(path,fold,candidate,metadata,dm_curve,subbands=None,band_limits=No
 
 def fold_candidates(candidates,trial_dir,output_dir,metadata,config):
     from .periodicity import valid_trial
-    best=sorted((r for r in candidates if r['is_sifted_best']),
+    # Peaks the cross-beam veto found in many beams never take a fold slot.
+    best=sorted((r for r in candidates if r['is_sifted_best'] and not r.get('multibeam_rfi')),
                 key=lambda r:(r['rfi_like'],-r['statistic']))[:config['max_folds']]
     if not best:return []
     catalogue,status=catalogue_matches(metadata) if config['catalogue_match'] else ([], 'disabled')

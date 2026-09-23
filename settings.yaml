@@ -63,12 +63,34 @@ periodicity:
   fft_fast_lengths: true
   # Periodicity uses a dedicated grid.  The transient plan becomes too coarse
   # at high DM for narrow pulses once its downsampling is included.
+  # It stops at DM 1000. At 135 MHz the median scatter broadening (Bhat et al.
+  # 2004) is ~0.8 s at DM 200, ~7 s at DM 300 and minutes by DM 500, and ATNF
+  # lists no LOTAAS detection above DM 217. The 4,053 trials above DM 1000 were
+  # 52% of the grid but ~8% of the samples; they contributed 4 of the 7 folds
+  # of the first production run and 142 of 226 in L559955 SAP000.
   dm_plan:
     - {low_dm: 0.000, high_dm: 150.600, ddm: 0.10, downsample: 1}
     - {low_dm: 150.600, high_dm: 300.000, ddm: 0.20, downsample: 2}
     - {low_dm: 300.000, high_dm: 600.000, ddm: 0.40, downsample: 4}
-    - {low_dm: 600.000, high_dm: 1200.000, ddm: 0.50, downsample: 8}
-    - {low_dm: 1200.000, high_dm: 2400.000, ddm: 1.00, downsample: 16}
-    - {low_dm: 2400.000, high_dm: 4800.000, ddm: 2.00, downsample: 32}
-    - {low_dm: 4800.000, high_dm: 9600.000, ddm: 4.00, downsample: 64}
-    - {low_dm: 9600.000, high_dm: 10019.800, ddm: 8.00, downsample: 128}
+    - {low_dm: 600.000, high_dm: 1000.000, ddm: 0.50, downsample: 8}
+  # A period found in several beams of one observation is RFI: a pulsar lies
+  # in one beam or a few neighbours, at one DM. Sifted peaks of a batch are
+  # compared across beams before folding, so RFI cannot take the fold slots.
+  # Frequencies match within this many Fourier bins; a peak is vetoed when its
+  # frequency appears in at least veto_beams beams, or in two SAPs of the same
+  # observation, unless every match keeps one DM above 2 (a bright pulsar).
+  multibeam_veto: true
+  veto_bins: 1.1
+  veto_beams: 4
+classification:
+  # Single-pulse clusters sent to FETCH. B0950+08 (DM 2.97) and 17 other
+  # LOTAAS pulsars sit below the former floor of DM 10.
+  min_dm: 2.0
+  min_snr: 7.0
+  # FETCH is built for pulses of milliseconds to a fraction of a second. The
+  # boxcar ladder runs to 600 s; at DM > 3000 those windows follow the slow
+  # baseline, and one such cluster took minutes of single-threaded work. Wider
+  # clusters, and those beyond the per-beam budget (strongest first), are
+  # recorded as 'unclassified' rather than sent to FETCH.
+  max_width_seconds: 1.0
+  max_fetch_candidates: 200
