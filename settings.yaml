@@ -12,6 +12,13 @@ single_pulse:
   # one per sample and width: identical clusters, 40-180x fewer rows, and RFI
   # beams no longer stop at the 25 million-crossing guard.
   merge_events: true
+  # Remove a running baseline, the median of window/2-sample blocks with
+  # window max(2 s, 64 w), before each boxcar. On 187 pulses injected into four
+  # real beams the median recovered S/N rose 1.43x; after FETCH, real pulses
+  # kept end to end rose from 129 to 268 in five beams, and FETCH accepted none
+  # of the 315 extra false candidates (search audit, 23 September 2026).
+  baseline_seconds: 2.0
+  baseline_widths: 64
 # Broad FRB coverage; high DM alone is neither evidence nor an RFI veto.
 dedispersion_plan:
   - low_dm: 0.000
@@ -91,6 +98,7 @@ classification:
   # Demote only candidates whose same-width local noise check falls below 5.
   # Evidence and original search scores are retained; unknown checks pass on.
   min_local_snr: 5.0
+  min_raw_local_snr: 4.0
   # Match the search cap. Old wider candidates and budget overflow are
   # recorded as unclassified; surviving in-range events still require FETCH.
   max_width_seconds: 1.0
