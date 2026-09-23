@@ -9,7 +9,7 @@ import concurrent.futures as futures
 import getpass
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shlex
 import subprocess
 import tarfile
@@ -99,20 +99,32 @@ def main():
     p.add_argument('--image',type=Path,default=REPO/'containers/euroflash-runtime.sif')
     p.add_argument('--settings',type=Path,default=REPO/'settings.yaml')
     p.add_argument('--gpus',default='0,1')
+    p.add_argument('--workers-per-gpu',type=int,default=3,
+                   help='Dedispersion workers sharing each GPU (3 measured 1.77x one worker)')
     p.add_argument('--cpu-workers',type=int,default=24)
     p.add_argument('--pilot',action='store_true')
     p.add_argument('--run-name',required=True)
     p.add_argument('--skip-health-check',action='store_true',
                    help='Dispatch without probing CUDA on each node first')
+    p.add_argument('--skip-trials',action='store_true',
+                   help='Collect results without retained DM trials; a retry regenerates them on the GPU')
+    p.add_argument('--exclude-beams',type=int,nargs='+',default=[12],
+                   help='Beams never searched (default: 12, the incoherent beam)')
+    p.add_argument('--cleanup-remote',action='store_true',
+                   help="Remove this run's input, work and source copy from each node after collection")
     a=p.parse_args()
+    if a.workers_per_gpu<1:p.error('--workers-per-gpu must be positive')
     permitted=allowed_nodes()
     if not set(a.nodes)<=permitted or len(set(a.nodes))!=len(a.nodes):
         p.error('Nodes must be unique and among '+', '.join(sorted(permitted))
                 +' (set LOTAAS_ALLOWED_NODES to change)')
     if not a.remote_root.startswith('/'):
         p.error('--remote-root must be an absolute path on the compute node')
+    if a.cleanup_remote and len(PurePosixPath(a.remote_root).parts)<3:
+        p.error('--cleanup-remote needs a --remote-root at least two levels deep')
     if not a.run_name.replace('-','').replace('_','').isalnum():p.error('Use letters, digits, hyphens and underscores in run-name')
-    beams=sorted(a.input.resolve().rglob('*_ff.fil'))
+    from euroflash.beams import excluded
+    beams=[f for f in sorted(a.input.resolve().rglob('*_ff.fil')) if not excluded(f,a.exclude_beams)]
     if not beams:p.error('No prepared beams found')
     if len({f.name for f in beams})!=len(beams):p.error('Duplicate beam basenames')
     # A frozen source snapshot avoids edits to a checkout changing a running job.
@@ -153,6 +165,8 @@ def main():
         command=['python3','-m','euroflash.run','--prepared','--input',inputs,'--work',work,
                  '--ledger',work+'/ledger.sqlite','--image',repo+'/containers/runtime.sif',
                  '--settings',repo+'/campaign-settings.yaml','--backend','gpu','--gpus',a.gpus,
+                 '--workers-per-gpu',str(a.workers_per_gpu),
+                 '--exclude-beams',*map(str,a.exclude_beams),
                  '--cpu-workers',str(a.cpu_workers)]+(['--pilot'] if a.pilot else [])
         expression='cd '+shlex.quote(repo)+' && '+shlex.join(command)
         log=a.work/(node+'.log')
@@ -161,7 +175,9 @@ def main():
         # Snapshot even failed runs so their errors reach the campaign ledger.
         remote(node,['python3','-c','import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close();',work+'/ledger.sqlite',work+'/ledger-snapshot.sqlite'],a.control_dir)
         destination=a.work/node;destination.mkdir(exist_ok=True)
-        process=subprocess.Popen(ssh_args(node,a.control_dir)+[shlex.join(['tar','cf','-','-C',work,'.'])],stdout=subprocess.PIPE)
+        # Trials of a failed beam are ~4.7 GB and regenerate in seconds on a GPU.
+        excludes=['--exclude=DM_trials','--exclude=Periodic_DM_trials'] if a.skip_trials else []
+        process=subprocess.Popen(ssh_args(node,a.control_dir)+[shlex.join(['tar','cf','-',*excludes,'-C',work,'.'])],stdout=subprocess.PIPE)
         try:
             with tarfile.open(fileobj=process.stdout,mode='r|') as archive:
                 for member in archive:
@@ -181,6 +197,10 @@ def main():
         try:
             _,destination,ok=worker_body(pair)
             collect(destination/'ledger-snapshot.sqlite',a.ledger,node+'/'+a.run_name)
+            if a.cleanup_remote:
+                # Only after the results and ledger are safely on the head. A
+                # continuous campaign otherwise leaves ~90 GB per SAP on the node.
+                remote(node,['rm','-rf','--one-file-system',a.remote_root.rstrip('/')+'/'+a.run_name],a.control_dir)
             if not ok:raise RuntimeError('Remote pipeline failed; collected stage errors are in the campaign ledger')
             ledger.finish(attempt,[destination/'ledger-snapshot.sqlite',log])
             return None

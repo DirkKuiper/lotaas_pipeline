@@ -86,6 +86,8 @@ class Runner:
         self.ledger = Ledger(args.ledger)
         self.settings = args.settings.resolve()
         self.image = args.image.resolve()
+        from euroflash.beams import INCOHERENT_BEAMS
+        self.excluded_beams = tuple(getattr(args, 'exclude_beams', None) or INCOHERENT_BEAMS)
         self.fp = ''
 
     def command(self, script, arguments, gpu=None):
@@ -129,48 +131,73 @@ class Runner:
             self.ledger.finish(attempt, error=str(error))
             raise RuntimeError(f'{stage} failed for {item}; log: {log}') from error
 
-    def prepare(self):
+    def conversion_job(self, raw):
+        """The ledger step converting one PSRFITS into its SAP directory."""
         import re
+        match = re.search(r'(L\d+)_SAP(\d+)_(?:BEAM|B)(\d+)', raw.name)
+        if not match:
+            raise ValueError(f'Unknown PSRFITS filename: {raw}')
+        obs, sap, beam = match[1], int(match[2]), int(match[3])
+        item = f'{obs}_SAP{sap:03d}_B{beam:03d}'
+        directory = self.root/'data'/obs/f'SAP{sap:03d}'/f'B{beam:03d}'
+        directory.mkdir(parents=True, exist_ok=True)
+        output = directory/f'downsampled_{obs}_SAP{sap:03d}_BEAM{beam:03d}_32bit.fil'
+        command = self.command('preproc/downsample_psrfits2fil_32bit.py', ['-o', output, raw])
+        # Conversion is keyed on the one file it reads, by name and size,
+        # so a re-extracted or truncated archive member is converted again.
+        conversion_fp = fingerprint(self.settings, self.image,
+            {'stage': 'downsample', 'fscrunch': 4, 'tscrunch': 16,
+             'source': raw.name, 'source_bytes': raw.stat().st_size},
+            [REPO/'preproc/downsample_psrfits2fil_32bit.py', REPO/'lotaas_reprocessing/filterbank.py', REPO/'lotaas_reprocessing/sigproc.py'])
+        return item, directory.parent, output, (item, 'downsample', command, [output], None, conversion_fp)
+
+    def convert(self, raw, delete_raw=False):
+        """Convert one beam; with delete_raw, drop its FITS and tar on success only."""
+        from euroflash.rawdata import delete_converted
+        _, sap, output, job = self.conversion_job(raw)
+        self.step(*job)
+        if delete_raw:
+            delete_converted(raw)
+        return sap, output
+
+    def flatfield(self, sap):
+        """Flatfield every converted beam present in one SAP directory."""
+        paths = sorted(sap.glob('B*/*_32bit.fil'))
+        if not paths:
+            raise ValueError(f'No converted beams in {sap}')
+        arguments = [sap] + (['--allow-partial'] if self.args.pilot else [])
+        self.step(sap.parent.name+'_'+sap.name, 'flatfield',
+                  self.command('preproc/flatfield_fil.py', arguments),
+                  [p.with_name(p.stem+'_ff.fil') for p in paths])
+        return [p.with_name(p.stem+'_ff.fil') for p in paths]
+
+    def prepare(self):
         from euroflash.provenance import reconcile
         reconcile(self.args.input, self.ledger)
+        from euroflash.beams import excluded
         files = sorted(self.args.input.rglob('*.fits'))
         if not files:
             raise ValueError('No input PSRFITS files found')
-        grouped = {}
+        skipped = [raw for raw in files if excluded(raw, self.excluded_beams)]
+        for raw in skipped:
+            print('Excluded (incoherent beam):', raw, flush=True)
+        files = [raw for raw in files if raw not in skipped]
+        if not files:
+            raise ValueError('Only excluded beams among the input PSRFITS files')
         ids = set()
-        jobs = []
         for raw in files:
-            match = re.search(r'(L\d+)_SAP(\d+)_(?:BEAM|B)(\d+)', raw.name)
-            if not match:
-                raise ValueError(f'Unknown PSRFITS filename: {raw}')
-            obs, sap, beam = match[1], int(match[2]), int(match[3])
-            item = f'{obs}_SAP{sap:03d}_B{beam:03d}'
+            item = self.conversion_job(raw)[0]
             if item in ids:
                 raise ValueError(f'Multiple PSRFITS parts/replicas for {item}; resolve before processing')
             ids.add(item)
-            directory = self.root/'data'/obs/f'SAP{sap:03d}'/f'B{beam:03d}'
-            directory.mkdir(parents=True, exist_ok=True)
-            output = directory/f'downsampled_{obs}_SAP{sap:03d}_BEAM{beam:03d}_32bit.fil'
-            command = self.command('preproc/downsample_psrfits2fil_32bit.py', ['-o', output, raw])
-            # Conversion is keyed on the one file it reads, by name and size,
-            # so a re-extracted or truncated archive member is converted again.
-            conversion_fp = fingerprint(self.settings, self.image,
-                {'stage': 'downsample', 'fscrunch': 4, 'tscrunch': 16,
-                 'source': raw.name, 'source_bytes': raw.stat().st_size},
-                [REPO/'preproc/downsample_psrfits2fil_32bit.py', REPO/'lotaas_reprocessing/filterbank.py', REPO/'lotaas_reprocessing/sigproc.py'])
-            jobs.append((item, 'downsample', command, [output], None, conversion_fp))
-            grouped.setdefault(directory.parent, []).append(output)
+        delete_raw = getattr(self.args, 'delete_raw', False)
         with futures.ThreadPoolExecutor(max_workers=self.args.preprocess_workers) as pool:
-            for result in pool.map(lambda job: self.step(*job), jobs):
-                pass
+            saps = set(sap for sap, _ in pool.map(lambda raw: self.convert(raw, delete_raw), files))
         if self.args.convert_only:
             return []
-        for sap, paths in grouped.items():
-            arguments = [sap] + (['--allow-partial'] if self.args.pilot else [])
-            self.step(sap.parent.name+'_'+sap.name, 'flatfield',
-                      self.command('preproc/flatfield_fil.py', arguments),
-                      [p.with_name(p.stem+'_ff.fil') for p in paths])
-        return [p.with_name(p.stem+'_ff.fil') for paths in grouped.values() for p in paths]
+        # Beams converted by earlier --convert-only runs have no FITS left when
+        # raw data is deleted, so the SAP directory, not this batch, is the set.
+        return [path for sap in sorted(saps) for path in self.flatfield(sap)]
 
     def analyze(self, item, output):
         """Separate checkpoints: a periodicity retry does not rerun FETCH."""
@@ -206,13 +233,22 @@ class Runner:
                   self.command('pipeline/pipeline_cpu.py', [output, '--search', 'finalize']), final_outputs)
 
     def process(self, files):
+        from euroflash.beams import excluded
         tasks = queue.Queue()
         for path in files:
+            if excluded(path, self.excluded_beams):
+                print('Excluded (incoherent beam):', path.name, flush=True)
+                continue
             tasks.put(path)
         devices = self.args.gpus.split(',') if self.args.backend == 'gpu' else [None]
         if len(set(devices)) != len(devices):
             raise ValueError('GPU devices must be unique')
-        inflight = threading.BoundedSemaphore(self.args.cpu_workers * 2 + len(devices))
+        # One worker leaves the card idle ~70% of its slot while the same process
+        # masks, detrends, plots and writes on the CPU. Three workers sharing a
+        # GPU measured 26.8 s per beam against 47.4 s for one (~13 GB each).
+        per_gpu = getattr(self.args, 'workers_per_gpu', 1) if self.args.backend == 'gpu' else 1
+        workers = [device for device in devices for _ in range(per_gpu)]
+        inflight = threading.BoundedSemaphore(self.args.cpu_workers * 2 + len(workers))
         cpu_futures = []
         errors = []
         with futures.ThreadPoolExecutor(max_workers=self.args.cpu_workers) as cpu_pool:
@@ -247,8 +283,8 @@ class Runner:
                     except Exception as e:
                         inflight.release()
                         errors.append(str(e))
-            with futures.ThreadPoolExecutor(max_workers=len(devices)) as gpu_pool:
-                list(gpu_pool.map(worker, devices))
+            with futures.ThreadPoolExecutor(max_workers=len(workers)) as gpu_pool:
+                list(gpu_pool.map(worker, workers))
             for future in cpu_futures:
                 try:
                     future.result()
@@ -289,18 +325,24 @@ def main():
     p.add_argument('--settings', type=Path, default=REPO/'settings.yaml')
     p.add_argument('--prepared', action='store_true', help='Input contains filterbanks already flatfielded together on the head node')
     p.add_argument('--backend', choices=['cpu','gpu'], default='gpu')
-    p.add_argument('--gpus', default='0', help='Comma-separated visible GPU indices/UUIDs; one worker each')
+    p.add_argument('--gpus', default='0', help='Comma-separated visible GPU indices/UUIDs')
+    p.add_argument('--workers-per-gpu', type=int, default=1,
+                   help='Dedispersion workers sharing each GPU; 3 measured 1.77x the throughput of 1')
     p.add_argument('--cpu-workers', type=int, default=4)
     p.add_argument('--preprocess-workers', type=int, default=4)
     p.add_argument('--prepare-only', action='store_true', help='Convert and flatfield, without running the search')
     p.add_argument('--convert-only', action='store_true', help='Convert downloaded beams; defer flatfielding until the full SAP is present')
+    p.add_argument('--delete-raw', action='store_true',
+                   help='Delete each PSRFITS and its archive tar once converted; receipts are kept')
     p.add_argument('--pilot', action='store_true', help='Permit an incomplete central-beam set')
     p.add_argument('--max-samples', type=int, help='Pilot only: process a prefix')
+    p.add_argument('--exclude-beams', type=int, nargs='+', default=[12],
+                   help='Beams never converted or searched (default: 12, the incoherent beam)')
     a = p.parse_args()
     if a.max_samples and not a.pilot:
         p.error('--max-samples requires --pilot')
-    if a.cpu_workers < 1 or a.preprocess_workers < 1:
-        p.error('--cpu-workers must be positive')
+    if a.cpu_workers < 1 or a.preprocess_workers < 1 or a.workers_per_gpu < 1:
+        p.error('--cpu-workers, --preprocess-workers and --workers-per-gpu must be positive')
     a.input = a.input.resolve(); a.ledger = a.ledger.resolve()
     Runner(a).run()
 

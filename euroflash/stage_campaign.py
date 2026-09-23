@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from staging.client import StageIT, private_json, tokens_for_url
 from euroflash.download import download, extract
 from euroflash.ledger import Ledger
+from euroflash.rawdata import delete_archive, raw_deleted
 
 
 def main():
@@ -18,6 +19,8 @@ def main():
     p.add_argument('--workers',type=int,default=2)
     p.add_argument('--poll-seconds',type=float,default=60)
     p.add_argument('--once',action='store_true')
+    p.add_argument('--delete-archive',action='store_true',
+                   help='Delete each tar once its FITS are extracted; the SHA256 receipt is kept')
     a=p.parse_args()
     state=json.loads((a.request_directory/'request.json').read_text())
     api=StageIT();ledger=Ledger(a.ledger)
@@ -27,6 +30,9 @@ def main():
         item=target.stem
         marker=target.with_suffix('.extracted.json')
         if ledger.completed(item,'retrieve','http-tar-v1'):
+            return
+        # Converted beams have their FITS deleted on purpose; do not fetch them again.
+        if marker.is_file() and raw_deleted(marker):
             return
         attempt=ledger.start(item,'retrieve','http-tar-v1',target.with_suffix('.receipt.json'),['StageIT',str(state['request_id']),url])
         try:
@@ -38,6 +44,8 @@ def main():
                 raise ValueError('Ambiguous archive URL: cannot record retrieval provenance')
             ledger.record_archive(matching[0],state['request_id'],receipt,fits,marker)
             ledger.finish(attempt,[marker,*fits])
+            if a.delete_archive:
+                delete_archive(target)
             print('Retrieved:',target.name,flush=True)
         except Exception as error:
             ledger.finish(attempt,error=str(error));print('Retrieve failed:',target.name,str(error),flush=True)
