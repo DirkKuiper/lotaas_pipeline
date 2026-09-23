@@ -77,6 +77,63 @@ def robust_scale(values, rng=None):
     return centre, float(np.mean(non_zero)) * MAD_TO_SIGMA
 
 
+def running_baseline(series, window, start=0, stop=None):
+    """The slow baseline of a dedispersed series, for samples start..stop.
+
+    Medians of consecutive blocks of window/2 samples, counted from sample 0,
+    linearly interpolated between block centres and held flat beyond the
+    outermost ones. A block median ignores a pulse filling less than half of
+    it, so a boxcar of width w keeps its signal when the window is >= 64 w.
+    Blocks are aligned to sample 0 whatever stretch is requested, so a local
+    stretch gets exactly the values the whole series gets there.
+    """
+    n = len(series)
+    stop = n if stop is None else min(int(stop), n)
+    start = max(0, int(start))
+    block = max(1, int(window) // 2)
+    blocks = n // block
+    if blocks < 2:
+        return np.full(stop - start, np.median(np.asarray(series)), dtype=np.float32)
+    first = max(0, start // block - 1)
+    last = min(blocks, (stop - 1) // block + 2)
+    medians = np.median(np.asarray(series[first * block:last * block], dtype=np.float32)
+                        .reshape(last - first, block), axis=1)
+    centres = (np.arange(first, last) + 0.5) * block
+    return np.interp(np.arange(start, stop), centres, medians).astype(np.float32)
+
+
+def baseline_window(width, tsamp, downsample, baseline_seconds, baseline_widths=64):
+    """Samples of running baseline removed before a boxcar of `width` trial samples."""
+    return max(int(round(baseline_seconds / (tsamp * downsample))), int(baseline_widths) * int(width))
+
+
+def merge_events(centres, strengths, widths, gap=1.0):
+    """Indices of one crossing per event in one trial.
+
+    Crossings of any width whose windows overlap, or lie within `gap` samples
+    of each other, are one event; the strongest represents it. Clustering
+    across trials needs one point per event per trial, while each event
+    otherwise contributes a crossing per sample and per width: tens to
+    hundreds of rows for one pulse, millions for one RFI episode.
+    """
+    centres = np.asarray(centres, dtype=float)
+    if centres.size == 0:
+        return np.array([], dtype=int)
+    half = np.asarray(widths, dtype=float) / 2.0
+    lo, hi = centres - half, centres + half
+    order = np.argsort(lo, kind='stable')
+    reach = np.maximum.accumulate(hi[order])
+    new = np.empty(order.size, dtype=bool)
+    new[0] = True
+    new[1:] = lo[order][1:] > reach[:-1] + gap
+    group = np.cumsum(new) - 1
+    strength = np.asarray(strengths, dtype=float)[order]
+    best = np.lexsort((-strength, group))  # by group, strongest first
+    first = np.ones(best.size, dtype=bool)
+    first[1:] = group[best][1:] != group[best][:-1]
+    return np.sort(order[best[first]])
+
+
 def boxcar_statistic(cumulative, width, rng=None):
     """Signal-to-noise for every width-w window lying wholly inside the data."""
     total = cumulative[width:] - cumulative[:-width]
@@ -164,7 +221,17 @@ def wrap_contaminated_samples(dm, nu_min, nu_max, tsamp, downsample=1):
 
 
 def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5,
-                          seed=0, valid_samples=None, max_duration=600):
+                          seed=0, valid_samples=None, max_duration=600,
+                          baseline_seconds=None, baseline_widths=64, merge=False):
+    """Crossings of every boxcar width in one DM trial.
+
+    With `baseline_seconds`, each width is searched after removing a running
+    baseline of max(baseline_seconds, baseline_widths x w) (running_baseline).
+    Dedispersed LOTAAS trials are red: the slow baseline holds about half of
+    the per-sample variance, and against its scatter a pulse loses ~1.4x S/N
+    (search audit, 23 September 2026). With `merge`, one crossing per event
+    is returned (merge_events) instead of one per sample and width.
+    """
     signal_data = np.fromfile(data_file, dtype="float32")
     if valid_samples is not None:
         # Drop the polluted tail before anything else, so it cannot raise a
@@ -182,16 +249,27 @@ def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshol
     # Seeded per call, so re-searching one trial reproduces its candidates.
     rng = np.random.default_rng(seed)
     widths = filter_widths_for(nsamp, tsamp, downsample, max_duration)
-    # One pass in float64: partial sums of float32 drift over millions of samples.
-    cumulative = np.empty(nsamp + 1, dtype=np.float64)
-    cumulative[0] = 0.0
-    np.cumsum(signal_data, dtype=np.float64, out=cumulative[1:])
+    def cumulative_sum(series):
+        # One pass in float64: partial sums of float32 drift over millions of samples.
+        out = np.empty(nsamp + 1, dtype=np.float64)
+        out[0] = 0.0
+        np.cumsum(series, dtype=np.float64, out=out[1:])
+        return out
+
+    sums = {None: cumulative_sum(signal_data)}
     starts, strengths, detected_widths = [], [], []
     for width in widths:
         width = int(width)
         if width > nsamp:
             continue
-        statistic = boxcar_statistic(cumulative, width, rng)
+        window = None
+        if baseline_seconds:
+            window = baseline_window(width, tsamp, downsample, baseline_seconds, baseline_widths)
+            if window >= nsamp // 2:
+                window = None  # too long to estimate; search this width unwhitened
+        if window not in sums:
+            sums[window] = cumulative_sum(signal_data - running_baseline(signal_data, window))
+        statistic = boxcar_statistic(sums[window], width, rng)
         if statistic is None:
             continue
         selected = np.flatnonzero(statistic >= detection_threshold)
@@ -205,8 +283,11 @@ def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshol
         return _no_detections()
     samples = np.concatenate(starts)
     strengths = np.concatenate(strengths)
-    return (samples * tsamp * downsample, np.full(samples.size, dm), strengths,
-            np.concatenate(detected_widths))
+    detected_widths = np.concatenate(detected_widths)
+    if merge:
+        keep = merge_events(samples, strengths, detected_widths)
+        samples, strengths, detected_widths = samples[keep], strengths[keep], detected_widths[keep]
+    return (samples * tsamp * downsample, np.full(samples.size, dm), strengths, detected_widths)
 
 
 def _dm_axis(axis, dms, which="x"):
@@ -235,7 +316,8 @@ def _dm_axis(axis, dms, which="x"):
 
 def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info,
                               dedispersion_plan, detection_threshold=5,
-                              nu_min=None, nu_max=None, trim_wrap=True, max_duration=600):
+                              nu_min=None, nu_max=None, trim_wrap=True, max_duration=600,
+                              baseline_seconds=None, baseline_widths=64, merge=False):
     """Runs CPU-based matched filtering across all DM trials.
 
     With the band limits available, the tail that circular dedispersion has
@@ -279,7 +361,8 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
                         f"Shorten the DM plan for this observation length.")
             detection_times, detection_dms, detection_strengths, detection_widths_samples = run_matched_filtering(
             dm_filepath, tsamp, dm, downsample, detection_threshold, valid_samples=valid,
-            max_duration=max_duration
+            max_duration=max_duration, baseline_seconds=baseline_seconds,
+            baseline_widths=baseline_widths, merge=merge
             )
 
             # Calculate sample indices
@@ -374,6 +457,6 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
 
     # Save the figure
     overview_path = os.path.join(output_dir, "all_matched_filter_overview.png")
-    plt.savefig(overview_path, bbox_inches='tight', dpi=300)
+    plt.savefig(overview_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
     print(f"Overview plot saved as {overview_path}")

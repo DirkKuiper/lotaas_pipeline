@@ -68,7 +68,9 @@ def measure_clusters(output, metadata):
     """Run before the DM trials leave the GPU node; return portable evidence."""
     from pathlib import Path
     from .dm_plan import dm_label
-    from .matched_filter import wrap_contaminated_samples
+    from .matched_filter import baseline_window, running_baseline, wrap_contaminated_samples
+    sp = metadata.get('single_pulse') or {}
+    baseline_seconds = sp.get('baseline_seconds')
     output = Path(output)
     rows = np.loadtxt(output / 'clustered_candidates.txt', skiprows=1, ndmin=2, usecols=range(5))
     evidence = {}
@@ -81,7 +83,22 @@ def measure_clusters(output, metadata):
         trim = wrap_contaminated_samples(dm, metadata.get('nu_min'), metadata.get('nu_max'),
                                          metadata['tsamp'], ds)
         valid = series[:len(series) - trim] if trim else series
-        record = local_boxcar_snr(valid, time / dt, round(width / ds), radius=round(10 / dt))
+        w = max(1, round(width / ds))
+        radius = round(10 / dt)
+        record = local_boxcar_snr(valid, time / dt, w, radius=radius)
+        if baseline_seconds:
+            # A whitened search is judged on the series it thresholded, and
+            # keeps the unwhitened statistic beside it: broadband RFI episodes
+            # look pulse-like once a 2 s baseline is gone, but their +-10 s raw
+            # neighbourhood is noisy (search audit, 23 September 2026).
+            raw = record['local_snr']
+            window = baseline_window(w, metadata['tsamp'], ds, baseline_seconds, sp.get('baseline_widths', 64))
+            if window < len(valid) // 2:
+                lo = max(0, int(time / dt) - max(64 * w, radius) - 2 * w - 2)
+                hi = min(len(valid), int(time / dt) + max(64 * w, radius) + 3 * w + 2)
+                local = np.asarray(valid[lo:hi], dtype=np.float32) - running_baseline(valid, window, lo, hi)
+                record = local_boxcar_snr(local, time / dt - lo, w, radius=radius)
+            record['raw_local_snr'] = raw
         evidence[candidate_key(dm, time, width)] = dict(record, dm=float(dm), time=float(time),
             width_seconds=float(width * metadata['tsamp']), search_snr=float(snr))
     return evidence
@@ -92,6 +109,11 @@ def review_route(width_seconds, evidence, limits, fetch_count):
     minimum = limits.get('min_local_snr')
     local = evidence.get('local_snr')
     if minimum is not None and local is not None and local < minimum:
+        return 'unconfirmed'
+    # Only a whitened search records the unwhitened statistic beside it.
+    raw_minimum = limits.get('min_raw_local_snr')
+    raw = evidence.get('raw_local_snr')
+    if raw_minimum is not None and raw is not None and raw < raw_minimum:
         return 'unconfirmed'
     maximum = limits.get('max_width_seconds')
     if maximum is not None and width_seconds is not None and width_seconds > maximum:

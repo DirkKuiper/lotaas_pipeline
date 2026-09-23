@@ -32,10 +32,13 @@ def single_pulse(output, metadata):
         (output/name).unlink(missing_ok=True)
     trials = output/'DM_trials'
     validate_trials(metadata, trials)
-    max_duration = (metadata.get('single_pulse') or {}).get('max_width_seconds', 1.0)
+    sp = metadata.get('single_pulse') or {}
+    max_duration = sp.get('max_width_seconds', 1.0)
     matched_filter.run_all_matched_filtering(str(trials), metadata['tsamp'], str(output),
         metadata['observation_info'], metadata['dedispersion_plan'],
-        nu_min=metadata.get('nu_min'), nu_max=metadata.get('nu_max'), max_duration=max_duration)
+        nu_min=metadata.get('nu_min'), nu_max=metadata.get('nu_max'), max_duration=max_duration,
+        baseline_seconds=sp.get('baseline_seconds'), baseline_widths=sp.get('baseline_widths', 64),
+        merge=bool(sp.get('merge_events', False)))
     raw = output/'all_detected_candidates.cands'; clustered = output/'clustered_candidates.txt'
     cluster.cluster_candidates(str(raw), str(clustered), plan=metadata['dedispersion_plan'])
     from lotaas_reprocessing.single_pulse_quality import measure_clusters
@@ -43,7 +46,8 @@ def single_pulse(output, metadata):
     atomic_json(evidence, measure_clusters(output, metadata))
     summarise(output, 'single_pulse_summary.json', started,
               [raw, clustered, evidence, output/'all_matched_filter_overview.png', output/'dm_vs_time_clusters.png'],
-              max_width_seconds=max_duration)
+              max_width_seconds=max_duration, baseline_seconds=sp.get('baseline_seconds'),
+              merge_events=bool(sp.get('merge_events', False)))
 
 
 def sp_classify(output, metadata):

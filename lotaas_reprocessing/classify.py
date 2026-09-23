@@ -32,7 +32,7 @@ VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 # Which clusters reach FETCH; settings.yaml `classification` overrides these.
 # Without a width cap or budget every cluster above the floors is classified.
 DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
-                  "max_fetch_candidates": None, "min_local_snr": None}
+                  "max_fetch_candidates": None, "min_local_snr": None, "min_raw_local_snr": None}
 
 
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):

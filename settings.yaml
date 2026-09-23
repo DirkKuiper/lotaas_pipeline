@@ -8,6 +8,10 @@ persistent_channel_threshold: 4.0
 single_pulse:
   # Search templates stop here, before clustering and FETCH.
   max_width_seconds: 1.0
+  # One crossing per event per trial (strongest width and sample) instead of
+  # one per sample and width: identical clusters, 40-180x fewer rows, and RFI
+  # beams no longer stop at the 25 million-crossing guard.
+  merge_events: true
 # Broad FRB coverage; high DM alone is neither evidence nor an RFI veto.
 dedispersion_plan:
   - low_dm: 0.000
