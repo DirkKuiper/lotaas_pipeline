@@ -606,6 +606,8 @@ def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, mo
     folds(30, [{'rfi_like': False, 'catalogue_matches': []}])
     folds(31, [{'rfi_like': True, 'catalogue_matches': []}])
     folds(32, [{'rfi_like': False, 'catalogue_matches': [{'name': 'J0323+3944'}]}])
+    folds(33, [{'rfi_like': False, 'catalogue_matches': [], 'multibeam_rfi': True}])
+    folds(34, [{'rfi_like': False, 'catalogue_matches': [], 'dm': 0.4}])
     campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
     remaining = sorted(b for b, p in beams.items() if p.exists())
     assert remaining == [20, 30]

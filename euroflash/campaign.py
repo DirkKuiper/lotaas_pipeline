@@ -73,6 +73,18 @@ def sap_key(archive_obs, sap):
     return f'L{archive_obs}_SAP{int(sap):03d}'
 
 
+
+def keeps_filterbank(fold):
+    """Whether a periodic fold keeps its beam's 1.2 GB filterbank for review.
+
+    Only an unflagged, uncatalogued fold of a dispersed signal does. The
+    cross-beam veto's flag counts as a flag, and a fold below DM 2 is
+    terrestrial. Under the old rule 39% of the beams searched on 23 September
+    kept their filterbank, on course to fill the shared pool within weeks.
+    """
+    return (not fold.get('rfi_like') and not fold.get('catalogue_matches')
+            and not fold.get('multibeam_rfi') and float(fold.get('dm', 2.0)) >= 2.0)
+
 class State:
     """Durable campaign state. One writer at a time; every call is a short transaction."""
 
@@ -669,8 +681,7 @@ class Campaign:
                 db.close()
         for folds in results.glob('*/processed/*/*/periodicity_folded_candidates.jsonl'):
             for line in folds.read_text().splitlines():
-                row = json.loads(line)
-                if not row.get('rfi_like') and not row.get('catalogue_matches'):
+                if keeps_filterbank(json.loads(line)):
                     found.add(folds.parent.parent.name)
                     break
         return found
