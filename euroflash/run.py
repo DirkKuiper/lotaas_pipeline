@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import signal
 import subprocess
 import sys
 import time
@@ -20,6 +21,31 @@ REPO = Path(__file__).resolve().parents[1]
 # recursively: a non-recursive glob left subpackages, and postproc entirely,
 # outside the identity of a run.
 CODE_FOLDERS = ['pipeline', 'preproc', 'lotaas_reprocessing', 'db', 'euroflash', 'postproc']
+
+# Stage wall-clock limits in seconds. A stage past its limit is killed and the
+# beam fails, so one pathological beam cannot hold a batch for hours: two
+# single-pulse stages (FETCH over 600 s-wide clusters) held one for five.
+TIMEOUTS = {'dedisperse': 1800, 'single_pulse': 3600, 'sp_classify': 2700, 'periodicity': 3600,
+            'periodicity_fold': 1800, 'classify': 900}
+
+# Which stages each mode runs. 'gpu' stops after the single-pulse search and
+# leaves clusters and periodic trials for a CPU node; 'cpu' takes them from
+# there. 'all' is both on one node.
+MODES = ('all', 'gpu', 'cpu')
+
+
+class StageTimeout(RuntimeError):
+    """A stage ran past its limit and was killed."""
+
+
+def parse_timeouts(values):
+    timeouts = dict(TIMEOUTS)
+    for value in values or ():
+        stage, _, seconds = value.partition('=')
+        if stage not in TIMEOUTS or not seconds:
+            raise ValueError(f'--stage-timeout needs STAGE=SECONDS with STAGE among {", ".join(TIMEOUTS)}')
+        timeouts[stage] = float(seconds)
+    return timeouts
 
 
 def image_digest(image):
@@ -89,6 +115,11 @@ class Runner:
         from euroflash.beams import INCOHERENT_BEAMS
         self.excluded_beams = tuple(getattr(args, 'exclude_beams', None) or INCOHERENT_BEAMS)
         self.fp = ''
+        self.mode = getattr(args, 'stages', None) or 'all'
+        self.timeouts = getattr(args, 'timeouts', None) or dict(TIMEOUTS)
+        # Stage process groups, so a runner that is stopped takes its children with it.
+        self.children = set()
+        self.children_lock = threading.Lock()
 
     def command(self, script, arguments, gpu=None):
         paths = {REPO, self.root, self.args.input.resolve(), self.args.ledger.resolve().parent, self.settings.parent}
@@ -97,12 +128,47 @@ class Runner:
             command += ['--nv', '--env', 'CUDA_VISIBLE_DEVICES='+gpu]
         for path in sorted(paths):
             command += ['--bind', f'{path}:{path}']
+        threads = getattr(self.args, 'threads_per_stage', 0)
+        if threads and gpu is None:
+            for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                         'TF_NUM_INTRAOP_THREADS', 'TF_NUM_INTEROP_THREADS'):
+                command += ['--env', f'{name}={threads}']
         command += ['--env', 'PYTHONPATH='+str(REPO), '--env', 'LOTAAS_DB_PATH='+str(self.args.ledger.resolve()),
                     '--env', 'LOTAAS_RUN_FINGERPRINT='+self.fp,
                     str(self.image), 'python', str(REPO/script)]
         return command + [str(a) for a in arguments]
 
-    def step(self, item, stage, command, expected, gpu=None, fingerprint_override=None, validator=None):
+    def run_stage(self, command, log, timeout):
+        """Run one stage in its own process group; kill the group if it overruns."""
+        with log.open('w') as stream:
+            process = subprocess.Popen(command, cwd=REPO, stdout=stream, stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+            with self.children_lock:
+                self.children.add(process.pid)
+            try:
+                try:
+                    code = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    stop_group(process)
+                    raise StageTimeout(f'timed out after {timeout:.0f} s') from None
+            finally:
+                with self.children_lock:
+                    self.children.discard(process.pid)
+        if code:
+            raise subprocess.CalledProcessError(code, command)
+
+    def stop_children(self, *_):
+        with self.children_lock:
+            pids = list(self.children)
+        for pid in pids:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        raise SystemExit(143)
+
+    def step(self, item, stage, command, expected, gpu=None, fingerprint_override=None, validator=None,
+             timeout=None):
         fp = fingerprint_override or self.fp
         if self.ledger.completed(item, stage, fp):
             valid = True
@@ -118,8 +184,7 @@ class Runner:
         attempt = self.ledger.start(item, stage, fp, log, command, gpu)
         print('Start:', stage, item, 'device:', gpu, flush=True)
         try:
-            with log.open('w') as stream:
-                subprocess.run(command, cwd=REPO, stdout=stream, stderr=subprocess.STDOUT, check=True)
+            self.run_stage(command, log, timeout if timeout is not None else self.timeouts.get(stage))
             if validator is not None:
                 validator()
             outputs = expected() if callable(expected) else expected
@@ -129,7 +194,8 @@ class Runner:
             print('Success:', stage, item, flush=True)
         except Exception as error:
             self.ledger.finish(attempt, error=str(error))
-            raise RuntimeError(f'{stage} failed for {item}; log: {log}') from error
+            reason = f' ({error})' if isinstance(error, StageTimeout) else ''
+            raise RuntimeError(f'{stage} failed for {item}{reason}; log: {log}') from error
 
     def conversion_job(self, raw):
         """The ledger step converting one PSRFITS into its SAP directory."""
@@ -199,38 +265,122 @@ class Runner:
         # raw data is deleted, so the SAP directory, not this batch, is the set.
         return [path for sap in sorted(saps) for path in self.flatfield(sap)]
 
-    def analyze(self, item, output):
-        """Separate checkpoints: a periodicity retry does not rerun FETCH."""
+    def cpu_stage(self, item, output, stage, search, summary):
         from lotaas_reprocessing.trials import product_outputs
+        self.step(item, stage, self.command('pipeline/pipeline_cpu.py', [output, '--search', search]),
+                  lambda: product_outputs(output, summary))
+
+    @staticmethod
+    def periodic(output):
+        return json.loads((output/'metadata.json').read_text()).get('periodicity_enabled', False)
+
+    def search(self, item, output):
+        """First pass over one beam: the stages that need no other beam. Returns errors.
+
+        The single-pulse branch and the periodic search are attempted even if
+        the other fails. Folding waits for the cross-beam veto (fold_and_finish).
+        """
         errors = []
         try:
-            self.step(item, 'single_pulse',
-                      self.command('pipeline/pipeline_cpu.py', [output, '--search', 'single-pulse']),
-                      lambda: product_outputs(output, 'single_pulse_summary.json'))
+            if self.mode in ('all', 'gpu'):
+                self.cpu_stage(item, output, 'single_pulse', 'single-pulse', 'single_pulse_summary.json')
+            if self.mode in ('all', 'cpu'):
+                self.cpu_stage(item, output, 'sp_classify', 'sp-classify', 'sp_classify_summary.json')
         except Exception as error:
             errors.append(str(error))
-        metadata = json.loads((output/'metadata.json').read_text())
-        enabled = metadata.get('periodicity_enabled', False)
-        if enabled:
+        if self.mode in ('all', 'cpu') and self.periodic(output):
             try:
-                self.step(item, 'periodicity',
-                          self.command('pipeline/pipeline_cpu.py', [output, '--search', 'periodicity']),
-                          lambda: product_outputs(output, 'periodicity_summary.json'))
+                self.cpu_stage(item, output, 'periodicity', 'periodicity', 'periodicity_search_summary.json')
+            except Exception as error:
+                errors.append(str(error))
+        if self.mode == 'gpu':
+            if errors:
+                self.fail(item, errors)
+            else:
+                # Periodic trials that are hard links survive; the CPU node needs only those.
+                import shutil
+                shutil.rmtree(output/'DM_trials', ignore_errors=True)
+                self.mark_ready(item, output)
+        return errors
+
+    def handoff(self):
+        path = self.root/'handoff'
+        path.mkdir(exist_ok=True)
+        return path
+
+    def mark_ready(self, item, output):
+        """Tell the head this beam can go to a CPU node (euroflash.cluster relays it)."""
+        from lotaas_reprocessing.periodicity import atomic_json
+        metadata = json.loads((output/'metadata.json').read_text())
+        atomic_json(self.handoff()/f'{item}.ready', {
+            'item': item, 'fingerprint': self.fp, 'output': str(output.relative_to(self.root)),
+            'input': metadata['filename']})
+
+    def fail(self, item, errors):
+        # An aggregate failure, for coverage and the reclaim policy.
+        attempt = self.ledger.start(item, 'classify', self.fp, self.root/'logs'/f'{item}-searches.log',
+                                    ['single_pulse', 'sp_classify', 'periodicity', 'periodicity_fold'])
+        self.ledger.finish(attempt, error='\n'.join(errors))
+
+    def veto(self, outputs):
+        """Compare the sifted peaks of every searched beam in this batch before any is folded."""
+        from lotaas_reprocessing.periodicity_veto import apply
+        searched = []
+        for item, output in outputs:
+            if not self.periodic(output) or not (output/'periodicity_search_summary.json').is_file():
+                continue
+            searched.append((item, output))
+        if not searched:
+            return {}
+        config = json.loads((searched[0][1]/'metadata.json').read_text()).get('periodicity') or {}
+        if not config.get('multibeam_veto', False):
+            return {}
+        pending = [output for item, output in searched if not self.ledger.completed(item, 'periodicity_fold', self.fp)]
+        written = apply([output for _, output in searched], config.get('veto_bins', 1.1),
+                        config.get('veto_beams', 4), write=pending)
+        print(f'Cross-beam veto over {len(searched)} beams: {sum(written.values())} sifted peaks vetoed',
+              flush=True)
+        return written
+
+    def fold_and_finish(self, item, output, errors):
+        """Second pass: fold what the veto left, then check every product and remove the trials."""
+        from lotaas_reprocessing.trials import product_outputs
+        enabled = self.periodic(output)
+        try:
+            searched = enabled and bool(product_outputs(output, 'periodicity_search_summary.json'))
+        except (OSError, ValueError):
+            searched = False
+        if searched:
+            try:
+                self.cpu_stage(item, output, 'periodicity_fold', 'periodicity-fold', 'periodicity_summary.json')
             except Exception as error:
                 errors.append(str(error))
         if errors:
-            # Keep an aggregate failure for coverage and the existing reclaim policy.
-            attempt = self.ledger.start(item, 'classify', self.fp, self.root/'logs'/f'{item}-searches.log',
-                                        ['single_pulse', 'periodicity'])
-            self.ledger.finish(attempt, error='\n'.join(errors))
+            self.fail(item, errors)
             raise RuntimeError('\n'.join(errors))
         def final_outputs():
             files = [output/'metadata.yaml', output/'metadata.json'] + product_outputs(output, 'single_pulse_summary.json')
+            files += product_outputs(output, 'sp_classify_summary.json')
             if enabled:
                 files += product_outputs(output, 'periodicity_summary.json')
             return files
         self.step(item, 'classify',
                   self.command('pipeline/pipeline_cpu.py', [output, '--search', 'finalize']), final_outputs)
+
+    def finish_batch(self, searched, cpu_pool):
+        """After every first pass: the veto, then folds and finalisation in parallel."""
+        errors = []
+        if self.mode == 'gpu':
+            return [e for _, _, found in searched for e in found]
+        self.veto([(item, output) for item, output, _ in searched])
+        futures_ = [cpu_pool.submit(self.fold_and_finish, item, output, list(found))
+                    for item, output, found in searched]
+        for future in futures_:
+            try:
+                future.result()
+            except Exception as error:
+                errors.append(str(error))
+        return errors
 
     def process(self, files):
         from euroflash.beams import excluded
@@ -277,7 +427,7 @@ class Runner:
                                   + list((output/'DM_trials').glob('*.dat'))
                                   + list((output/'Periodic_DM_trials').glob('*.dat')), gpu,
                                   validator=lambda output=output: validate_products(output))
-                        future = cpu_pool.submit(self.analyze, item, output)
+                        future = cpu_pool.submit(lambda item=item, output=output: (item, output, self.search(item, output)))
                         future.add_done_callback(lambda _: inflight.release())
                         cpu_futures.append(future)
                     except Exception as e:
@@ -285,11 +435,64 @@ class Runner:
                         errors.append(str(e))
             with futures.ThreadPoolExecutor(max_workers=len(workers)) as gpu_pool:
                 list(gpu_pool.map(worker, workers))
+            searched = []
             for future in cpu_futures:
                 try:
-                    future.result()
+                    searched.append(future.result())
                 except Exception as e:
                     errors.append(str(e))
+            errors += self.finish_batch(searched, cpu_pool)
+        self.write_done(searched, errors)
+        if errors:
+            raise RuntimeError('\n'.join(errors))
+
+    def write_done(self, searched, errors):
+        """GPU mode: no more beams will be marked ready in this run."""
+        if self.mode != 'gpu':
+            return
+        from lotaas_reprocessing.periodicity import atomic_json
+        atomic_json(self.handoff()/'.done', {'fingerprint': self.fp,
+                                             'failed': sorted(item for item, _, found in searched if found),
+                                             'errors': len(errors)})
+
+    def process_stream(self, poll=10.0):
+        """CPU mode: search beams as the head relays them, then veto, fold and finish.
+
+        The head writes <item>.ready once a beam's files are complete here and
+        .done when no more will come. Each beam gets <item>.searched when its
+        first pass is over; its periodic trials are pruned by then, which is
+        what the head's relay backlog waits for.
+        """
+        handoff = self.handoff()
+        errors, submitted, pending = [], set(), []
+        with futures.ThreadPoolExecutor(max_workers=self.args.cpu_workers) as cpu_pool:
+            def first_pass(item, output):
+                found = self.search(item, output)
+                (handoff/f'{item}.searched').write_text(json.dumps({'errors': found}))
+                return item, output, found
+            while True:
+                done = (handoff/'.done').is_file()   # read before listing, so no beam is missed
+                for marker in sorted(handoff.glob('*.ready')):
+                    entry = json.loads(marker.read_text())
+                    if entry['item'] in submitted:
+                        continue
+                    if entry['fingerprint'] != self.fp:
+                        raise ValueError(f'{entry["item"]} was prepared as {entry["fingerprint"][:16]}, but this '
+                                         f'node computes {self.fp[:16]}: the source, settings or image differ')
+                    submitted.add(entry['item'])
+                    if self.ledger.completed(entry['item'], 'classify', self.fp):
+                        continue
+                    pending.append(cpu_pool.submit(first_pass, entry['item'], self.root/entry['output']))
+                if done:
+                    break
+                time.sleep(poll)
+            searched = []
+            for future in pending:
+                try:
+                    searched.append(future.result())
+                except Exception as e:
+                    errors.append(str(e))
+            errors += self.finish_batch(searched, cpu_pool)
         if errors:
             raise RuntimeError('\n'.join(errors))
 
@@ -298,9 +501,10 @@ class Runner:
         with (self.root/'.run.lock').open('w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             inputs = list(self.args.input.rglob('*_ff.fil' if self.args.prepared else '*.fits'))
-            if not inputs:
+            if not inputs and self.mode != 'cpu':   # a CPU node receives its beams as it runs
                 raise ValueError('No matching inputs found')
-            if not (self.args.prepare_only or self.args.convert_only) and self.args.backend == 'gpu':
+            if (not (self.args.prepare_only or self.args.convert_only) and self.args.backend == 'gpu'
+                    and self.mode != 'cpu'):
                 subprocess.run(self.command('euroflash/preflight.py', [], self.args.gpus), check=True, cwd=REPO)
             self.fp = fingerprint(self.settings, self.image,
                                   {'pilot': self.args.pilot, 'max_samples': self.args.max_samples,
@@ -310,10 +514,29 @@ class Runner:
                 'backend': self.args.backend, 'input_files': [str(p) for p in inputs]}
             (self.root/'run.json').write_text(json.dumps(run_metadata, indent=2))
             self.ledger.register_run(self.fp, run_metadata)
-            prepared = inputs if self.args.prepared else self.prepare()
-            if not (self.args.prepare_only or self.args.convert_only):
-                self.process(prepared)
+            signal.signal(signal.SIGTERM, self.stop_children)
+            signal.signal(signal.SIGHUP, self.stop_children)
+            if self.mode == 'cpu':
+                self.process_stream()
+            else:
+                prepared = inputs if self.args.prepared else self.prepare()
+                if not (self.args.prepare_only or self.args.convert_only):
+                    self.process(prepared)
             (self.root/'summary.json').write_text(json.dumps(self.ledger.summary(), indent=2))
+
+
+def stop_group(process, grace=30):
+    """SIGTERM a stage's process group, then SIGKILL what is left after `grace` seconds."""
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, None)):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def main():
@@ -338,7 +561,20 @@ def main():
     p.add_argument('--max-samples', type=int, help='Pilot only: process a prefix')
     p.add_argument('--exclude-beams', type=int, nargs='+', default=[12],
                    help='Beams never converted or searched (default: 12, the incoherent beam)')
+    p.add_argument('--stages', choices=MODES, default='all',
+                   help="'gpu': dedispersion and single-pulse search, leaving handoff.json; "
+                        "'cpu': classification and periodicity of a handed-over batch; 'all': both")
+    p.add_argument('--threads-per-stage', type=int, default=0,
+                   help='Cap the thread pools of each CPU stage (0: leave the libraries to decide)')
+    p.add_argument('--stage-timeout', action='append', metavar='STAGE=SECONDS',
+                   help='Override a stage limit; defaults: ' + ', '.join(f'{k}={v:.0f}' for k, v in TIMEOUTS.items()))
     a = p.parse_args()
+    try:
+        a.timeouts = parse_timeouts(a.stage_timeout)
+    except ValueError as error:
+        p.error(str(error))
+    if a.stages != 'all' and not a.prepared:
+        p.error('--stages gpu|cpu applies to --prepared runs')
     if a.max_samples and not a.pilot:
         p.error('--max-samples requires --pilot')
     if a.cpu_workers < 1 or a.preprocess_workers < 1 or a.workers_per_gpu < 1:

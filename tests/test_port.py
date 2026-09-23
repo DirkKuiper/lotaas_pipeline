@@ -403,7 +403,8 @@ def test_concurrent_prepared_beams_have_separate_outputs(tmp_path):
             idx=command.index(str(Path(__file__).resolve().parents[1]/'pipeline/pipeline_gpu.py'))
             outputs[item]=command[idx+2]
     runner.step=step
-    runner.analyze=lambda item,output: None
+    runner.search=lambda item,output: []
+    runner.finish_batch=lambda searched,pool: []
     runner.process(beams)
     assert len(outputs)==2
     assert len(set(outputs.values()))==2
