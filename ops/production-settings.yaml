@@ -7,6 +7,10 @@ rfi_averaging_factor: 128
 persistent_channel_threshold: 4.0
 single_pulse:
   max_width_seconds: 1.0
+  # One crossing per event per trial (strongest width and sample) instead of
+  # one per sample and width: identical clusters, 40-180x fewer rows, and RFI
+  # beams no longer stop at the 25 million-crossing guard.
+  merge_events: true
 dedispersion_plan:
   - low_dm: 0.000
     high_dm: 150.600
@@ -58,20 +62,30 @@ periodicity:
   fft_fast_lengths: true
   # Periodicity uses a dedicated grid.  The transient plan becomes too coarse
   # at high DM for narrow pulses once its downsampling is included.
+  # It stops at DM 1000. At 135 MHz the median scatter broadening (Bhat et al.
+  # 2004) is ~0.8 s at DM 200, ~7 s at DM 300 and minutes by DM 500, and ATNF
+  # lists no LOTAAS detection above DM 217. Under the uncapped grid 735 of the
+  # 814 unflagged folds of the first 371 beams of 23 September lay above DM 1000,
+  # and they alone made 80 beams keep their 1.2 GB filterbank.
   dm_plan:
     - {low_dm: 0.000, high_dm: 150.600, ddm: 0.10, downsample: 1}
     - {low_dm: 150.600, high_dm: 300.000, ddm: 0.20, downsample: 2}
     - {low_dm: 300.000, high_dm: 600.000, ddm: 0.40, downsample: 4}
-    - {low_dm: 600.000, high_dm: 1200.000, ddm: 0.50, downsample: 8}
-    - {low_dm: 1200.000, high_dm: 2400.000, ddm: 1.00, downsample: 16}
-    - {low_dm: 2400.000, high_dm: 4800.000, ddm: 2.00, downsample: 32}
-    - {low_dm: 4800.000, high_dm: 9600.000, ddm: 4.00, downsample: 64}
-    - {low_dm: 9600.000, high_dm: 10019.800, ddm: 8.00, downsample: 128}
+    - {low_dm: 600.000, high_dm: 1000.000, ddm: 0.50, downsample: 8}
+  # A period found in several beams of one observation is RFI: a pulsar lies
+  # in one beam or a few neighbours, at one DM. Sifted peaks of a batch are
+  # compared across beams before folding, so RFI cannot take the fold slots.
+  multibeam_veto: true
+  veto_bins: 1.1
+  veto_beams: 4
 
 # Single-pulse review: one-second templates, local noise check, then FETCH.
 classification:
-  min_dm: 10.0
+  # B0950+08 (DM 2.97) and 17 other LOTAAS pulsars sit below DM 10; from DM 2
+  # they are recorded as redetections, the pipeline's own sensitivity check.
+  min_dm: 2.0
   min_snr: 7.0
   max_width_seconds: 1.0
   min_local_snr: 5.0
-  max_fetch_candidates: null
+  # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
+  max_fetch_candidates: 200
