@@ -70,8 +70,15 @@ extraction, conversion to a 32-bit filterbank. It then deletes the tar and
 PSRFITS. A SAP is flatfielded once every beam is converted, in the background
 so retrieval continues. Its unflattened filterbanks are then removed, and with
 `--dispatch-nodes` it is searched on the GPU nodes with `euroflash.cluster`.
-Flatfielded beams are removed once searched; failed beams keep theirs for a
-retry.
+
+Once searched, a beam's flatfielded filterbank is removed unless something
+was found in it: a candidate FETCH accepted, or a periodic fold that is
+neither RFI-flagged nor a catalogued pulsar. Those beams are marked `kept`
+for review, and `status.json` reports how many and how many terabytes. In the
+first 136 coherent beams searched this was about 5%. Beams whose search
+failed keep theirs for a retry. `--keep-prepared` keeps every searched beam.
+Search products stay under `results/`: candidate plots, periodic folds, and
+the node ledger.
 
 ```bash
 python3 -m euroflash.campaign run --root RESULTS_ROOT/campaign \

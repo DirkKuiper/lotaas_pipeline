@@ -562,3 +562,38 @@ def test_raw_reclaim_removes_only_archives_with_evidence(tmp_path):
             db.execute("UPDATE attempts SET status='success',outputs=? WHERE id=?", (json.dumps({str(path): 3}), attempt))
     found = {marker.name.split('.')[0]: reason for fits, tar, size, reason, marker in survey_raw(data, tmp_path/'ledger.sqlite')}
     assert found == {converted_stem: 'converted', incoherent_stem: 'excluded beam'}
+
+
+def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    beams = {int(p.parent.name[1:]): p for p in Path(sap['sap_dir']).glob('B*/*_ff.fil')}
+    run_name = 'campaign-findings'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    node = tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'
+    snapshot(node/'ledger-snapshot.sqlite', {p.stem: 'success' for p in beams.values()})
+    from db.initialize_db import initialize_database
+    initialize_database(str(node/'ledger-snapshot.sqlite'))
+    with sqlite3.connect(node/'ledger-snapshot.sqlite') as db:
+        db.execute("INSERT INTO detections(beam_id,detection_type) VALUES (?,?)", (beams[20].name, 'candidate'))
+        db.execute("INSERT INTO detections(beam_id,detection_type) VALUES (?,?)", (beams[21].name, 'rejected'))
+
+    def folds(beam, rows):
+        path = node/'processed'/beams[beam].stem/'abc'/'periodicity_folded_candidates.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    folds(30, [{'rfi_like': False, 'catalogue_matches': []}])
+    folds(31, [{'rfi_like': True, 'catalogue_matches': []}])
+    folds(32, [{'rfi_like': False, 'catalogue_matches': [{'name': 'J0323+3944'}]}])
+    campaign.dispatch_process = Namespace(run_name=run_name, returncode=0)
+    campaign.finish_dispatch()
+    remaining = sorted(b for b, p in beams.items() if p.exists())
+    assert remaining == [20, 30]
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'searched'
+    assert campaign.kept_summary()['beams'] == 2
+    assert campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='searched'")[0]['n'] == 71
+    assert not campaign.unsearched(sap['key'])

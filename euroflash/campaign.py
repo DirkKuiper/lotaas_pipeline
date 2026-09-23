@@ -6,14 +6,16 @@ rolling window of SAP-sized StageIT requests in flight and processes every
 file the moment dCache holds it on disk:
 
     pending -> staging -> prepared -> dispatched -> searched     (per SAP)
-    pending -> requested -> online -> working -> converted        (per file)
+    pending -> requested -> online -> working -> converted -> searched | kept   (per file)
 
 Each file is downloaded, extracted, converted to a 32-bit filterbank and its
 tar and PSRFITS deleted before the next is taken; the download receipt and
 extraction marker keep its provenance. A SAP is flatfielded once all its
 beams are converted, its unflattened filterbanks removed, and it is optionally
-dispatched to the GPU nodes with `euroflash.cluster`. Its flatfielded
-filterbanks are removed once searched.
+dispatched to the GPU nodes with `euroflash.cluster`. Once searched, a beam's
+flatfielded filterbank is removed unless something was found in it: a
+candidate FETCH accepted, or a periodic fold that is neither RFI-flagged nor a
+catalogued pulsar. Those are kept for review.
 
 StageIT's "online" is only a hint: request 991619 was reported online while
 dCache held every file on tape. A file is fetched only when dCache itself
@@ -185,6 +187,12 @@ def running_dispatch(run_name):
             if i + 1 < len(argv) and argv[i + 1].decode(errors='replace') == run_name:
                 return AdoptedProcess(int(proc.name), run_name)
     return None
+
+
+def flattened(path):
+    """The flatfielded filterbank beside a converted one."""
+    path = Path(path)
+    return path.with_name(path.stem + '_ff.fil')
 
 
 def missing_central_beams(files):
@@ -504,7 +512,7 @@ class Campaign:
         batch.mkdir(parents=True)
         from euroflash.beams import excluded
         for sap in ready:
-            for path in Path(sap['sap_dir']).glob('B*/*_ff.fil'):
+            for path in self.unsearched(sap['key']):
                 if not excluded(path, self.o.exclude_beams):
                     os.link(path, batch/path.name)   # hard link: no copy, originals survive cleanup
         command = [sys.executable, '-m', 'euroflash.cluster', '--input', str(batch),
@@ -551,19 +559,55 @@ class Campaign:
             self.state.event('dispatch_failed', run_name, f'exit {process.returncode}; see logs/{run_name}.log')
         else:
             self.dispatch_failures = 0
-            from euroflash.beams import excluded
+            found = self.findings(run_name)
             for sap in saps:
-                beams = sorted(b for b in Path(sap['sap_dir']).glob('B*/*_ff.fil')
-                               if not excluded(b, self.o.exclude_beams))
-                done = [b for b in beams if b.stem in succeeded]
-                if not self.o.keep_prepared:
-                    for path in done:
-                        path.unlink()
-                failed = len(beams) - len(done)
+                done = kept = failed = 0
+                for f in self.state.rows("SELECT * FROM files WHERE sap_key=? AND state='converted'", sap['key']):
+                    beams = [flattened(p) for p in json.loads(f['fil'] or '[]')]
+                    if not beams or any(b.stem not in succeeded for b in beams):
+                        failed += 1
+                        continue
+                    done += 1
+                    if self.o.keep_prepared or any(b.stem in found for b in beams):
+                        kept += 1
+                        self.state.set_file(f['surl'], state='kept', detail=f'searched in {run_name}; kept for review')
+                    else:
+                        for path in beams:
+                            path.unlink(missing_ok=True)
+                        self.state.set_file(f['surl'], state='searched', detail=f'searched in {run_name}')
                 self.state.set_sap(sap['key'], state='searched' if not failed else 'attention',
                                    detail=None if not failed else f'{failed} beams not searched in {run_name}')
-                self.state.event('searched', sap['key'], f'{len(done)}/{len(beams)} beams in {run_name}')
+                self.state.event('searched', sap['key'], f'{done}/{done + failed} beams in {run_name}; '
+                                                         f'{kept} kept for review')
         shutil.rmtree(self.root/'dispatch'/run_name, ignore_errors=True)
+
+    def findings(self, run_name):
+        """Beams with a FETCH-accepted candidate, or an unflagged, uncatalogued periodic fold."""
+        found = set()
+        results = self.root/'results'/run_name
+        for snapshot in results.glob('*/ledger-snapshot.sqlite'):
+            db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
+            try:
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if 'detections' in tables:
+                    found |= {Path(beam).stem for (beam,) in db.execute(
+                        "SELECT DISTINCT beam_id FROM detections WHERE detection_type='candidate'")}
+            finally:
+                db.close()
+        for folds in results.glob('*/processed/*/*/periodicity_folded_candidates.jsonl'):
+            for line in folds.read_text().splitlines():
+                row = json.loads(line)
+                if not row.get('rfi_like') and not row.get('catalogue_matches'):
+                    found.add(folds.parent.parent.name)
+                    break
+        return found
+
+    def unsearched(self, key):
+        """Flatfielded beams of a SAP that still need a search."""
+        paths = []
+        for f in self.state.rows("SELECT fil FROM files WHERE sap_key=? AND state='converted'", key):
+            paths += [p for p in map(flattened, json.loads(f['fil'] or '[]')) if p.is_file()]
+        return sorted(paths)
 
     # --------------------------------------------------------------- loop
     def status(self):
@@ -577,6 +621,7 @@ class Campaign:
                         SUM(f.state='requested') AS waiting FROM requests r JOIN files f ON f.request_id=r.id
                         GROUP BY r.id HAVING waiting>0 ORDER BY r.submitted'''),
                   'attention': self.state.rows("SELECT key,detail FROM saps WHERE state='attention'"),
+                  'kept_for_review': self.kept_summary(),
                   'dispatch_running': getattr(self.dispatch_process, 'run_name', None),
                   'recent_events': self.state.rows('SELECT * FROM events ORDER BY time DESC LIMIT 20')}
         partial = self.root/'status.json.partial'
@@ -589,6 +634,12 @@ class Campaign:
         with self.state.db() as db:
             db.execute("UPDATE files SET state='online' WHERE state='working'")
             db.execute("UPDATE saps SET state='staging' WHERE state='flatfielding'")
+        # Searched before per-beam states existed: both filterbanks deleted.
+        for f in self.state.rows("""SELECT f.surl,f.fil FROM files f JOIN saps s ON s.key=f.sap_key
+                                    WHERE f.state='converted' AND s.state NOT IN ('staging','flatfielding')"""):
+            paths = [Path(p) for p in json.loads(f['fil'] or '[]')]
+            if paths and not any(p.is_file() or flattened(p).is_file() for p in paths):
+                self.state.set_file(f['surl'], state='searched', detail='searched before per-beam states')
         self.apply_exclusions()
         for sap in self.state.rows("SELECT * FROM saps WHERE state='dispatched'"):
             running = running_dispatch(sap['run_name'])
@@ -627,9 +678,15 @@ class Campaign:
                 if excluded(path, beams):
                     path.unlink()
             if sap['state'] == 'attention' and (sap['detail'] or '').endswith(' beams not searched in ' + str(sap['run_name'])):
-                if not any(sap_dir.glob('B*/*_ff.fil')):
+                if not self.unsearched(sap['key']):
                     self.state.set_sap(sap['key'], state='searched', detail='only excluded beams were unsearched')
                     self.state.event('searched', sap['key'], 'released: only the excluded beam had failed')
+
+    def kept_summary(self):
+        paths = [flattened(p) for f in self.state.rows("SELECT fil FROM files WHERE state='kept'")
+                 for p in json.loads(f['fil'] or '[]')]
+        present = [p for p in paths if p.is_file()]
+        return {'beams': len(present), 'tb': round(sum(p.stat().st_size for p in present) / 1e12, 3)}
 
     def tick(self):
         self.refresh()
@@ -698,7 +755,8 @@ def parser():
     run.add_argument('--exclude-beams', type=int, nargs='+', default=[12],
                      help='Beams never staged, converted or searched (default: 12, the incoherent beam)')
     run.add_argument('--keep-unflattened', action='store_true')
-    run.add_argument('--keep-prepared', action='store_true', help='Keep flatfielded beams after a successful search')
+    run.add_argument('--keep-prepared', action='store_true',
+                     help='Keep every flatfielded beam after its search, not only those with findings')
     run.add_argument('--dispatch-nodes', nargs='+', help='Search prepared SAPs on these GPU nodes')
     run.add_argument('--dispatch-saps', type=int, default=2, help='SAPs per cluster run')
     run.add_argument('--gpus', default='0,1')
@@ -721,7 +779,9 @@ def retry_saps(root, keys=()):
     for sap in state.rows("SELECT * FROM saps WHERE state='attention' AND sap_dir IS NOT NULL"):
         if keys and sap['key'] not in keys:
             continue
-        if any(Path(sap['sap_dir']).glob('B*/*_ff.fil')):
+        if any(flattened(p).is_file() for f in state.rows(
+                "SELECT fil FROM files WHERE sap_key=? AND state='converted'", sap['key'])
+               for p in json.loads(f['fil'] or '[]')):
             state.set_sap(sap['key'], state='prepared', run_name=None, detail='retry requested: ' + (sap['detail'] or ''))
             state.event('retry', sap['key'], sap['detail'])
             queued.append(sap['key'])
