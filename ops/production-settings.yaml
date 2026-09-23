@@ -11,6 +11,13 @@ single_pulse:
   # one per sample and width: identical clusters, 40-180x fewer rows, and RFI
   # beams no longer stop at the 25 million-crossing guard.
   merge_events: true
+  # Remove a running baseline, the median of window/2-sample blocks with
+  # window max(2 s, 64 w), before each boxcar. On 187 pulses injected into four
+  # real beams the median recovered S/N rose 1.43x; after FETCH, real pulses
+  # kept end to end rose from 129 to 268 in five beams, and FETCH accepted none
+  # of the 315 extra false candidates (search audit, 23 September 2026).
+  baseline_seconds: 2.0
+  baseline_widths: 64
 dedispersion_plan:
   - low_dm: 0.000
     high_dm: 150.600
@@ -87,5 +94,10 @@ classification:
   min_snr: 7.0
   max_width_seconds: 1.0
   min_local_snr: 5.0
-  # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
-  max_fetch_candidates: 200
+  # With whitening the local check runs on the whitened series; broadband RFI
+  # episodes also need S/N 4 in +-10 s of unwhitened data (63 false per beam
+  # instead of 312, 90% of real events kept).
+  min_raw_local_snr: 4.0
+  # Bounds FETCH time on an RFI-rich beam under the 1800 s stage timeout
+  # (~10 s per candidate above DM 1000); the rest are kept as 'unclassified'.
+  max_fetch_candidates: 100
