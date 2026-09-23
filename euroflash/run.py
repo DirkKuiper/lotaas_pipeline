@@ -100,17 +100,26 @@ class Runner:
                     str(self.image), 'python', str(REPO/script)]
         return command + [str(a) for a in arguments]
 
-    def step(self, item, stage, command, expected, gpu=None, fingerprint_override=None):
+    def step(self, item, stage, command, expected, gpu=None, fingerprint_override=None, validator=None):
         fp = fingerprint_override or self.fp
         if self.ledger.completed(item, stage, fp):
-            print('Resume:', stage, item, flush=True)
-            return
+            valid = True
+            if validator is not None:
+                try:
+                    validator()
+                except (OSError, ValueError, KeyError):
+                    valid = False
+            if valid:
+                print('Resume:', stage, item, flush=True)
+                return
         log = self.root/'logs'/f'{item}-{stage}-{time.time_ns()}.log'
         attempt = self.ledger.start(item, stage, fp, log, command, gpu)
         print('Start:', stage, item, 'device:', gpu, flush=True)
         try:
             with log.open('w') as stream:
                 subprocess.run(command, cwd=REPO, stdout=stream, stderr=subprocess.STDOUT, check=True)
+            if validator is not None:
+                validator()
             outputs = expected() if callable(expected) else expected
             if not outputs or any(not Path(p).is_file() for p in outputs):
                 raise RuntimeError('Stage exited without expected outputs')
@@ -163,6 +172,39 @@ class Runner:
                       [p.with_name(p.stem+'_ff.fil') for p in paths])
         return [p.with_name(p.stem+'_ff.fil') for paths in grouped.values() for p in paths]
 
+    def analyze(self, item, output):
+        """Separate checkpoints: a periodicity retry does not rerun FETCH."""
+        from lotaas_reprocessing.trials import product_outputs
+        errors = []
+        try:
+            self.step(item, 'single_pulse',
+                      self.command('pipeline/pipeline_cpu.py', [output, '--search', 'single-pulse']),
+                      lambda: product_outputs(output, 'single_pulse_summary.json'))
+        except Exception as error:
+            errors.append(str(error))
+        metadata = json.loads((output/'metadata.json').read_text())
+        enabled = metadata.get('periodicity_enabled', False)
+        if enabled:
+            try:
+                self.step(item, 'periodicity',
+                          self.command('pipeline/pipeline_cpu.py', [output, '--search', 'periodicity']),
+                          lambda: product_outputs(output, 'periodicity_summary.json'))
+            except Exception as error:
+                errors.append(str(error))
+        if errors:
+            # Keep an aggregate failure for coverage and the existing reclaim policy.
+            attempt = self.ledger.start(item, 'classify', self.fp, self.root/'logs'/f'{item}-searches.log',
+                                        ['single_pulse', 'periodicity'])
+            self.ledger.finish(attempt, error='\n'.join(errors))
+            raise RuntimeError('\n'.join(errors))
+        def final_outputs():
+            files = [output/'metadata.yaml', output/'metadata.json'] + product_outputs(output, 'single_pulse_summary.json')
+            if enabled:
+                files += product_outputs(output, 'periodicity_summary.json')
+            return files
+        self.step(item, 'classify',
+                  self.command('pipeline/pipeline_cpu.py', [output, '--search', 'finalize']), final_outputs)
+
     def process(self, files):
         tasks = queue.Queue()
         for path in files:
@@ -193,11 +235,13 @@ class Runner:
                         args += ['--max-samples', self.args.max_samples]
                     inflight.acquire()
                     try:
+                        from lotaas_reprocessing.trials import validate_products
                         self.step(item, 'dedisperse', self.command('pipeline/pipeline_gpu.py', args, gpu),
-                                  lambda: [output/'metadata.yaml']+list((output/'DM_trials').glob('*.dat')), gpu)
-                        future = cpu_pool.submit(self.step, item, 'classify',
-                                      self.command('pipeline/pipeline_cpu.py', [output]),
-                                      [output/'all_detected_candidates.cands', output/'clustered_candidates.txt', output/'metadata.yaml'])
+                                  lambda output=output: [output/'metadata.yaml', output/'metadata.json', output/'trial_manifest.json']
+                                  + list((output/'DM_trials').glob('*.dat'))
+                                  + list((output/'Periodic_DM_trials').glob('*.dat')), gpu,
+                                  validator=lambda output=output: validate_products(output))
+                        future = cpu_pool.submit(self.analyze, item, output)
                         future.add_done_callback(lambda _: inflight.release())
                         cpu_futures.append(future)
                     except Exception as e:

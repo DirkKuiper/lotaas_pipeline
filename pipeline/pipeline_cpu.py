@@ -1,89 +1,75 @@
-import os
-import sys
-import numpy as np
-import yaml
-from lotaas_reprocessing import matched_filter, cluster
-import shutil
+"""Independently resumable single-pulse and periodicity CPU searches."""
+import argparse
 from pathlib import Path
-from lotaas_reprocessing.dm_plan import dm_values, dm_label
+import shutil
+import time
+import yaml
+from lotaas_reprocessing.trials import validate_trials, product_outputs
+from lotaas_reprocessing.periodicity import atomic_json
 
 
-def validate_trials(metadata, directory):
-    base = Path(metadata["filename"]).stem
-    samples = metadata["samples_processed"]
-    expected = {}
-    for plan in metadata["dedispersion_plan"]:
-        for dm in dm_values(plan):
-            name = f"{base}_DM{dm_label(dm)}.dat"
-            if name in expected:
-                raise ValueError("DM plan produces colliding filenames")
-            expected[name] = (samples // plan["downsample"]) * 4
-    actual = {p.name: p.stat().st_size for p in Path(directory).glob("*.dat")}
-    if actual != expected:
-        raise ValueError("DM trials are incomplete, mixed between beams, or have incorrect sample counts")
+def single_pulse(output,metadata):
+    from lotaas_reprocessing import matched_filter,cluster
+    from lotaas_reprocessing import classify
+    started=time.perf_counter()
+    summary=output/'single_pulse_summary.json';summary.unlink(missing_ok=True)
+    trials=output/'DM_trials'
+    validate_trials(metadata,trials)
+    matched_filter.run_all_matched_filtering(str(trials),metadata['tsamp'],str(output),
+        metadata['observation_info'],metadata['dedispersion_plan'],
+        nu_min=metadata.get('nu_min'),nu_max=metadata.get('nu_max'))
+    raw=output/'all_detected_candidates.cands';clustered=output/'clustered_candidates.txt'
+    cluster.cluster_candidates(str(raw),str(clustered),plan=metadata['dedispersion_plan'])
+    plots=output/'candidate_plots';plots.mkdir(exist_ok=True)
+    classify.classify_candidates(metadata['filename'],str(clustered),str(plots),metadata['observation_info'])
+    files=[raw,clustered]+list(plots.glob('*.png'))
+    atomic_json(summary,{'complete':True,'elapsed_seconds':time.perf_counter()-started,
+        'outputs':{str(p.relative_to(output)):p.stat().st_size for p in files}})
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 pipeline_cpu.py <output_directory>")
-        sys.exit(1)
+def periodicity(output,metadata):
+    from lotaas_reprocessing.periodicity import dm_grid_assessment,run_periodicity_search
+    plan=metadata.get('periodicity_dm_plan') or metadata['dedispersion_plan']
+    config=dict(metadata.get('periodicity') or {})
+    config['dm_grid_assessment']=dm_grid_assessment(plan,metadata['tsamp'],metadata['nu_min'],metadata['nu_max'])
+    run_periodicity_search(output/'Periodic_DM_trials',output,metadata,config)
 
-    output_dir = sys.argv[1]
 
-    # Load metadata from GPU stage
-    metadata_path = os.path.join(output_dir, "metadata.yaml")
-    if not os.path.exists(metadata_path):
-        print(f"Metadata file {metadata_path} not found. Exiting.")
-        sys.exit(1)
+def finalize(output,metadata):
+    product_outputs(output,'single_pulse_summary.json')
+    if metadata.get('periodicity_enabled',False):
+        product_outputs(output,'periodicity_summary.json')
+    # Both manifests and all their products are complete before any cleanup.
+    shutil.rmtree(output/'DM_trials',ignore_errors=True)
+    if metadata.get('periodicity_enabled',False):
+        shutil.rmtree(output/'Periodic_DM_trials',ignore_errors=True)
 
-    with open(metadata_path, "r") as fp:
-        metadata = yaml.load(fp, Loader=yaml.FullLoader)
 
-    tsamp = metadata["tsamp"]
-    dedispersion_plan = metadata["dedispersion_plan"]
-    observation_info = metadata["observation_info"]
-    fname = metadata["filename"]
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('output_directory',type=Path)
+    parser.add_argument('--search',choices=['both','single-pulse','periodicity','finalize'],default='both')
+    args=parser.parse_args();output=args.output_directory
+    metadata=yaml.safe_load((output/'metadata.yaml').read_text())
+    errors = []
+    if args.search in ('both','single-pulse'):
+        try:
+            single_pulse(output,metadata)
+        except Exception as error:
+            if args.search != 'both':
+                raise
+            errors.append(f"single-pulse: {error}")
+    if args.search in ('both','periodicity') and metadata.get('periodicity_enabled',False):
+        try:
+            periodicity(output,metadata)
+        except Exception as error:
+            if args.search != 'both':
+                raise
+            errors.append(f"periodicity: {error}")
+    if errors:
+        raise RuntimeError('\n'.join(errors))
+    if args.search in ('both','finalize'):
+        finalize(output,metadata)
 
-    dm_trials_dir = os.path.join(output_dir, "DM_trials")
 
-    try:
-        validate_trials(metadata, dm_trials_dir)
-        # Run matched filtering
-        matched_filter.run_all_matched_filtering(
-            dm_trials_dir, tsamp, output_dir, observation_info, dedispersion_plan,
-            nu_min=metadata.get("nu_min"), nu_max=metadata.get("nu_max")
-        )
-
-        # Define file paths
-        all_candidates_file = os.path.join(output_dir, "all_detected_candidates.cands")
-        clustered_output_file = os.path.join(output_dir, "clustered_candidates.txt")
-
-        # Run clustering
-        print("Running clustering on detected candidates...")
-        cluster.cluster_candidates(all_candidates_file, clustered_output_file,
-                                   plan=dedispersion_plan)
-        print("Clustering completed.")
-
-        # Run classification
-        classified_output_dir = os.path.join(output_dir, "candidate_plots")
-        os.makedirs(classified_output_dir, exist_ok=True)
-
-        print("Running classification on clustered candidates...")
-        from lotaas_reprocessing import classify
-        classify.classify_candidates(fname, clustered_output_file, classified_output_dir, observation_info)
-        print("Classification completed.")
-
-        # Only clean up if everything above succeeded
-        print(f"Removing temporary DM trials directory: {dm_trials_dir}")
-        shutil.rmtree(dm_trials_dir, ignore_errors=True)
-        print("DM trials directory removed.")
-
-        print(f"Keeping provenance metadata: {metadata_path}")
-
-    except Exception as e:
-        # Handle pipeline errors
-        print(f"Pipeline encountered an error: {e}")
-        raise
-
-    finally:
-        print("CPU pipeline exited; see status above.")
+if __name__=='__main__':main()

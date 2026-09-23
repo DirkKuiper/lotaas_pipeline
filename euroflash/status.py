@@ -24,6 +24,11 @@ def main():
             WHERE id IN (SELECT MAX(id) FROM attempts GROUP BY item,stage,fingerprint)
             GROUP BY stage,status''')]
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        result['periodicity_beams_by_scope']=[dict(r) for r in db.execute("""
+            SELECT CASE r.pilot WHEN 0 THEN 'production' WHEN 1 THEN 'pilot'
+                   ELSE 'unclassified_legacy' END AS scope,COUNT(DISTINCT a.item) AS beams
+            FROM attempts a LEFT JOIN runs r USING(fingerprint)
+            WHERE a.stage='periodicity' AND a.status='success' GROUP BY scope""")]
         result['detections']=[dict(r) for r in db.execute('SELECT detection_type,COUNT(*) AS count FROM detections GROUP BY detection_type')] if 'detections' in tables else []
     print(json.dumps(result,indent=2))
 

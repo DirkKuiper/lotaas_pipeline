@@ -1,7 +1,7 @@
 """Reclaim DM trial directories that can no longer be retried.
 
 The CPU stage removes its trials once it succeeds, so a beam that fails keeps
-roughly 3.6 GB in 8814 files. That is deliberate: it lets the search be
+roughly 4.88 GB of unique payload with periodicity enabled. That is deliberate: it lets the search be
 repeated without redoing dedispersion. It was not bounded, so a burst of
 failures fills a node disk and every beam running beside them then fails on
 a truncated trial.
@@ -19,12 +19,30 @@ import sqlite3
 import time
 
 
-def directory_bytes(path):
-    return sum(entry.stat().st_size for entry in path.rglob('*') if entry.is_file())
+def directory_bytes(path, seen=None):
+    seen = set() if seen is None else seen
+    total = 0
+    for entry in path.rglob('*'):
+        if not entry.is_file():
+            continue
+        stat = entry.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity not in seen:
+            total += stat.st_size
+            seen.add(identity)
+    return total
 
 
 def classify(db, item, fingerprint, retention_seconds, now):
     """Why this trial directory may go, or None if it must stay."""
+    # A retry now runs independently checkpointed branches before finalization.
+    # An old aggregate failure must not permit deleting their live inputs.
+    active = db.execute(
+        "SELECT 1 FROM attempts WHERE item=? AND fingerprint=? AND status='running' "
+        "AND id IN (SELECT MAX(id) FROM attempts WHERE item=? AND fingerprint=? GROUP BY stage)",
+        (item, fingerprint, item, fingerprint)).fetchone()
+    if active:
+        return None
     row = db.execute(
         'SELECT status,finished FROM attempts WHERE item=? AND stage=? AND fingerprint=?'
         ' ORDER BY id DESC LIMIT 1', (item, 'classify', fingerprint)).fetchone()
@@ -42,11 +60,14 @@ def classify(db, item, fingerprint, retention_seconds, now):
 def survey(work, ledger, retention_seconds, now=None):
     now = time.time() if now is None else now
     found = []
+    seen_inodes = set()
     with sqlite3.connect(f'file:{ledger}?mode=ro', uri=True) as db:
         # A node writes work/processed/...; the head collects it under a
         # directory named for the node it came from.
         candidates = set(Path(work).glob('processed/*/*/DM_trials'))
         candidates |= set(Path(work).glob('*/processed/*/*/DM_trials'))
+        candidates |= set(Path(work).glob('processed/*/*/Periodic_DM_trials'))
+        candidates |= set(Path(work).glob('*/processed/*/*/Periodic_DM_trials'))
         for trials in sorted(candidates):
             if not trials.is_dir():
                 continue
@@ -59,7 +80,7 @@ def survey(work, ledger, retention_seconds, now=None):
                 continue
             reason = classify(db, item, row[0], retention_seconds, now)
             if reason:
-                found.append((trials, directory_bytes(trials), reason))
+                found.append((trials, directory_bytes(trials, seen_inodes), reason))
     return found
 
 
@@ -79,7 +100,8 @@ def main():
         if a.apply:
             shutil.rmtree(trials, ignore_errors=True)
     verb = 'Reclaimed' if a.apply else 'Reclaimable'
-    print(f'{verb}: {total/1e9:.2f} GB across {len(found)} beams')
+    beams = len({trials.parent for trials, _, _ in found})
+    print(f'{verb}: {total/1e9:.2f} GB across {beams} beams')
     if found and not a.apply:
         print('Re-run with --apply to delete.')
 

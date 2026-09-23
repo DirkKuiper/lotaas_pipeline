@@ -398,11 +398,12 @@ def test_concurrent_prepared_beams_have_separate_outputs(tmp_path):
                      pilot=True, max_samples=None)
     runner=Runner(args);runner.fp='abc'
     outputs={}
-    def step(item,stage,command,expected,gpu=None):
+    def step(item,stage,command,expected,gpu=None,**kwargs):
         if stage=='dedisperse':
             idx=command.index(str(Path(__file__).resolve().parents[1]/'pipeline/pipeline_gpu.py'))
             outputs[item]=command[idx+2]
     runner.step=step
+    runner.analyze=lambda item,output: None
     runner.process(beams)
     assert len(outputs)==2
     assert len(set(outputs.values()))==2
