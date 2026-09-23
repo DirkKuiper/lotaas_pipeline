@@ -4,6 +4,9 @@ bad_channels:
   - 138
 rfi_block_size: 1000
 rfi_averaging_factor: 128
+persistent_channel_threshold: 4.0
+single_pulse:
+  max_width_seconds: 1.0
 dedispersion_plan:
   - low_dm: 0.000
     high_dm: 150.600
@@ -26,17 +29,9 @@ dedispersion_plan:
     ddm: 2.00
     downsample: 16
   - low_dm: 2014.800
-    high_dm: 4469.800
+    high_dm: 3020.000
     ddm: 5.00
     downsample: 32
-  - low_dm: 4469.800
-    high_dm: 8939.800
-    ddm: 10.00
-    downsample: 64
-  - low_dm: 8939.800
-    high_dm: 10019.800
-    ddm: 20.00
-    downsample: 128
 periodicity:
   enabled: true
   period_min_seconds: 0.016
@@ -73,9 +68,10 @@ periodicity:
     - {low_dm: 4800.000, high_dm: 9600.000, ddm: 4.00, downsample: 64}
     - {low_dm: 9600.000, high_dm: 10019.800, ddm: 8.00, downsample: 128}
 
-# Preserve the live campaign science settings during the scheduler migration.
+# Single-pulse review: one-second templates, local noise check, then FETCH.
 classification:
   min_dm: 10.0
   min_snr: 7.0
-  max_width_seconds: null
+  max_width_seconds: 1.0
+  min_local_snr: 5.0
   max_fetch_candidates: null

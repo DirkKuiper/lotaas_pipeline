@@ -20,13 +20,13 @@ define each SAP's flatfield.
    kurtosis, plus the always-masked channels in `settings.yaml`. Masked samples
    are replaced with noise, then each channel is detrended with a degree-2
    polynomial.
-4. **Dedisperse.** Fourier-domain dedispersion over the eight-range plan,
-   4,407 trials, on GPU. Time samples are averaged before the FFT; frequency
+4. **Dedisperse.** Fourier-domain dedispersion over the six-range single-pulse plan,
+   3,617 trials through DM 3019.8, on GPU. Time samples are averaged before the FFT; frequency
    bins are never subsampled. DM grids are generated with decimal arithmetic so
    adjacent plan ranges cannot overwrite a boundary trial through floating-point
    rounding.
-5. **Search.** A boxcar matched filter over 16 widths, as rolling sums against
-   a median-absolute-deviation noise scale.
+5. **Search.** A boxcar matched filter over up to 16 widths, capped at one second
+   before clustering, as rolling sums against a median-absolute-deviation noise scale.
 6. **Cluster.** Threshold crossings grouped into events on the trial grid.
 7. **Classify.** Survivors above DM 10 and S/N 7, vetted against ATNF, scored
    by six FETCH models, plotted and recorded.
@@ -204,6 +204,34 @@ candidate was indistinguishable from one never found.
 
 ## Known limitations
 
+**Single-pulse policy, 23 September.** The search uses a one-second maximum
+boxcar, configured by `single_pulse.max_width_seconds`, and DM <3020.
+An intrinsically wider event can still trigger a shorter template, with lost
+sensitivity; this is a template limit, not a width-based proof of interference.
+The historical search reached DM 10019.8 and used widths up to 600 seconds.
+
+Before dedispersion, a channel whose temporal MAD exceeds four times the local
+33-channel median is masked. Constant/nonfinite channels are also masked.
+The statistic uses at most 8192 reproducibly sampled time points. Configured,
+automatic and persisted channel indices use filterbank order; the pipeline's
+internal reversed frequency axis is translated explicitly. FETCH now honours
+the persisted channel mask instead of reading those bad channels back in.
+
+Each clustered event gets an additional S/N estimate at its reported time and
+width, using non-overlapping same-width reference windows nearby, outside a
+two-width guard. Fewer than 32 usable windows gives unknown. The production
+threshold is five: weaker checks are retained as `unconfirmed`, with the
+original search score and evidence in `single_pulse_evidence.json`, and are
+not sent to FETCH. Unknown checks still proceed. In-range survivors continue
+through FETCH; there is no separate classifier-free queue for broad events.
+These local scores are not calibrated false-alarm probabilities, and the
+threshold is a starting policy rather than a measured survey optimum.
+
+Synthetic tests cover scattered high-DM and band-limited injections, persistent
+channel interference, a local noise increase, width-cap propagation through
+the CPU stage, and incomplete reference data. They do not establish survey
+completeness or the full false-positive reduction on the archive.
+
 **Dedispersion still wraps.** It is circular Fourier dedispersion. A pulse in
 the last samples of a beam is still recovered at the right time, with less
 bandwidth as its sweep runs past the end — that was checked. The defect is
@@ -221,13 +249,13 @@ was rejected at width 20, and 0.926 at width 9 — the same event, the same
 beam. Three fainter injections in that beam scored 0.975 to 0.999. Rejections
 are now recorded so this is auditable, but the sensitivity itself is not fixed.
 
-**Channel weighting is uniform.** Six to seven channels run 1.8–9.4× the
+**Channel weighting is uniform among usable channels.** Previously, six to seven channels ran 1.8–9.4× the
 typical noise. The RFI mask keys on block-normalised statistics, which removes
 the per-channel signature that marks a *persistently* bad channel: the worst
 channel in the band is caught only 14% of the time, and is masked in practice
 only because it is listed in `bad_channels`. Uniform channel summing costs
-about 7% S/N against the inverse-variance optimum. Extending `bad_channels`, or
-an automatic per-channel noise cut, would recover most of it.
+about 7% S/N against the inverse-variance optimum. The persistent-noise cut
+above addresses the worst channels; remaining channel weights are still uniform.
 
 **The detection floor has been probed, not characterised.** A ladder of
 injections at nominal S/N 6, 7, 8, 10 and 14 into a real beam recovered four of

@@ -517,7 +517,8 @@ def test_survey_dm_grid_has_exclusive_endpoints():
         assert dms[0]==plan['low_dm']
         assert all(plan['low_dm']<=dm<plan['high_dm'] for dm in dms)
         labels.extend(map(dm_label,dms))
-    assert len(labels)==len(set(labels))==4407
+    assert len(labels)==len(set(labels))==3617
+    assert max(map(float, labels)) == 3019.8
     assert dm_values(dict(low_dm=.1,high_dm=.4,ddm=.1))==[.1,.2,.3]
     assert dm_label(.05)=='0.05'
 

@@ -31,7 +31,8 @@ VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 
 # Which clusters reach FETCH; settings.yaml `classification` overrides these.
 # Without a width cap or budget every cluster above the floors is classified.
-DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None, "max_fetch_candidates": None}
+DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
+                  "max_fetch_candidates": None, "min_local_snr": None}
 
 
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
@@ -87,19 +88,19 @@ def send_slack_message(text):
 
 
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
-                        limits=None, tsamp=None):
+                        limits=None, tsamp=None, evidence=None, bad_channels=()):
     """Classify one beam's clusters; returns how many went to FETCH and why others did not.
 
     A cluster wider than `max_width_seconds` (needs `tsamp`, the native sample
     time), or beyond the `max_fetch_candidates` strongest, is recorded as
-    'unclassified' instead of being sent to FETCH. Known pulsars never use
-    the budget.
+    'unclassified'. Locally weak events remain auditable as 'unconfirmed'.
+    Known pulsars never use the budget.
     """
     limits = dict(DEFAULT_LIMITS, **{k: v for k, v in (limits or {}).items() if k in DEFAULT_LIMITS})
-    counts = {"fetch": 0, "known_pulsar": 0, "unclassified_wide": 0, "unclassified_budget": 0}
-    width_limit = (limits["max_width_seconds"] / float(tsamp)
-                   if limits["max_width_seconds"] is not None and tsamp else None)
-    budget = limits["max_fetch_candidates"]
+    from lotaas_reprocessing.single_pulse_quality import candidate_key, review_route
+    if limits['min_local_snr'] is not None and evidence is None:
+        raise ValueError('Local S/N screening requires single_pulse_evidence.json')
+    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0}
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
     beam_id = os.path.basename(filterbank_file)
@@ -213,9 +214,11 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     }
                 continue  # Skip further processing for redetections
 
-            # Too wide for FETCH, or past the budget: kept as a record, not classified.
-            reason = ("unclassified_wide" if width_limit is not None and width > width_limit
-                      else "unclassified_budget" if budget is not None and counts["fetch"] >= budget else None)
+            key = candidate_key(dm, tcand, width)
+            if limits['min_local_snr'] is not None and key not in evidence:
+                raise ValueError(f'Missing local S/N evidence for {key}')
+            reason = review_route(width * tsamp if tsamp else None, (evidence or {}).get(key, {}),
+                                  limits, counts['fetch'])
             if reason:
                 counts[reason] += 1
                 insert_detection(
@@ -226,7 +229,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     candidate_dm=dm,
                     snr=snr,
                     width_samples=width,
-                    detection_type="unclassified",
+                    detection_type=reason,
                 )
                 continue
             counts["fetch"] += 1
@@ -249,6 +252,18 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 device=-1,
             )
             cand.get_chunk()
+            if bad_channels:
+                bad = np.asarray(bad_channels, dtype=int)
+                if np.any((bad < 0) | (bad >= cand.data.shape[1])):
+                    raise ValueError('Classifier channel mask is outside the filterbank')
+                # Honour the search's file-order channel mask in both FETCH
+                # planes; a noisy channel must not reappear at classification.
+                good = np.ones(cand.data.shape[1], dtype=bool)
+                good[bad] = False
+                if not good.any():
+                    raise ValueError('No usable channels for classification')
+                baseline = np.median(cand.data[::max(1, len(cand.data) // 8192), good])
+                cand.data[:, bad] = baseline
             time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
             cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size)
             cand.dedisperse()
@@ -447,10 +462,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             )
             num_redetections += 1
         counts["known_pulsar"] = num_redetections
-        if counts["unclassified_wide"] or counts["unclassified_budget"]:
-            logger.info("Not sent to FETCH: %d wider than %s s, %d beyond the budget of %s",
-                        counts["unclassified_wide"], limits["max_width_seconds"],
-                        counts["unclassified_budget"], budget)
+        if counts['unclassified'] or counts['unconfirmed']:
+            logger.info("Single-pulse review routes: %s", counts)
 
         update_beam_run(
             row_id=beam_run_id,

@@ -90,7 +90,14 @@ if __name__ == "__main__":
    
     # Channels always masked, from settings rather than a literal, so a
     # change of band or station set does not need a code edit.
-    bad_channels = settings.get("bad_channels") or []
+    from lotaas_reprocessing.single_pulse_quality import persistent_channels
+    automatic = persistent_channels(data, settings.get('persistent_channel_threshold', 4.0))
+    # data is reversed relative to file order. All persisted channel indices
+    # and configured indices refer to the filterbank, including in the viewer.
+    configured = settings.get("bad_channels") or []
+    if any(not 0 <= c < nchan for c in configured):
+        raise ValueError('bad_channels contains an index outside the filterbank')
+    bad_channels = sorted(set(nchan - 1 - c for c in configured) | set(automatic))
     masked_channels = []
     for bad_channel in bad_channels:
         if not 0 <= bad_channel < nchan:
@@ -273,6 +280,8 @@ if __name__ == "__main__":
                    # dedispersion pollutes at each DM.
                    "nu_min": float(np.min(nu)), "nu_max": float(np.max(nu)),
                    "tstart_mjd": float(fil.header["tstart"]), "bad_channels": [nchan - 1 - channel for channel in bad_channels],
+                   "automatic_bad_channels": [nchan - 1 - channel for channel in automatic],
+                   "single_pulse": settings.get('single_pulse') or {'max_width_seconds': 1.0},
                    "elapsed_seconds": time.monotonic() - started}
 
     # JSON keeps the host orchestrator free of container-only dependencies.

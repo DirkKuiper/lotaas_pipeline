@@ -110,8 +110,12 @@ def compute_filter_widths(tsamp, downsample, max_duration=600):
         Returns:
             np.array: Optimized filter widths in samples.
         """
+        if not np.isfinite(max_duration) or max_duration <= 0:
+            raise ValueError('Maximum pulse duration must be finite and positive')
         min_width = 1  # Smallest width to test in samples
-        max_width = max(1, int(max_duration / (tsamp * downsample)))  # Convert max duration to samples
+        max_width = int(max_duration / (tsamp * downsample))
+        if max_width < 1:
+            return np.array([], dtype=int)
         
         # Generate exponentially spaced filter widths
         filter_widths = np.unique(np.geomspace(min_width, max_width, num=16).astype(int))
@@ -131,12 +135,12 @@ def _kernel_spectra(nsamp, tsamp, downsample):
     return widths, spectra
 
 
-def filter_widths_for(nsamp, tsamp, downsample):
+def filter_widths_for(nsamp, tsamp, downsample, max_duration=600):
     """Widths to search, bounded so every window has enough siblings to
     estimate a noise scale from. Half the series leaves at least nsamp/2
     windows, which is ample for a median."""
     return compute_filter_widths(tsamp, downsample,
-                                 max_duration=min(600, nsamp * tsamp * downsample / 2))
+                                 max_duration=min(max_duration, nsamp * tsamp * downsample / 2))
 
 
 DISPERSION_CONSTANT = 2.41e-4
@@ -160,7 +164,7 @@ def wrap_contaminated_samples(dm, nu_min, nu_max, tsamp, downsample=1):
 
 
 def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5,
-                          seed=0, valid_samples=None):
+                          seed=0, valid_samples=None, max_duration=600):
     signal_data = np.fromfile(data_file, dtype="float32")
     if valid_samples is not None:
         # Drop the polluted tail before anything else, so it cannot raise a
@@ -177,7 +181,7 @@ def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshol
         return _no_detections()
     # Seeded per call, so re-searching one trial reproduces its candidates.
     rng = np.random.default_rng(seed)
-    widths = filter_widths_for(nsamp, tsamp, downsample)
+    widths = filter_widths_for(nsamp, tsamp, downsample, max_duration)
     # One pass in float64: partial sums of float32 drift over millions of samples.
     cumulative = np.empty(nsamp + 1, dtype=np.float64)
     cumulative[0] = 0.0
@@ -231,7 +235,7 @@ def _dm_axis(axis, dms, which="x"):
 
 def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info,
                               dedispersion_plan, detection_threshold=5,
-                              nu_min=None, nu_max=None, trim_wrap=True):
+                              nu_min=None, nu_max=None, trim_wrap=True, max_duration=600):
     """Runs CPU-based matched filtering across all DM trials.
 
     With the band limits available, the tail that circular dedispersion has
@@ -274,7 +278,8 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
                         f"{polluted} of {total} samples would be discarded. "
                         f"Shorten the DM plan for this observation length.")
             detection_times, detection_dms, detection_strengths, detection_widths_samples = run_matched_filtering(
-            dm_filepath, tsamp, dm, downsample, detection_threshold, valid_samples=valid
+            dm_filepath, tsamp, dm, downsample, detection_threshold, valid_samples=valid,
+            max_duration=max_duration
             )
 
             # Calculate sample indices

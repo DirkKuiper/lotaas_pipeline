@@ -32,13 +32,18 @@ def single_pulse(output, metadata):
         (output/name).unlink(missing_ok=True)
     trials = output/'DM_trials'
     validate_trials(metadata, trials)
+    max_duration = (metadata.get('single_pulse') or {}).get('max_width_seconds', 1.0)
     matched_filter.run_all_matched_filtering(str(trials), metadata['tsamp'], str(output),
         metadata['observation_info'], metadata['dedispersion_plan'],
-        nu_min=metadata.get('nu_min'), nu_max=metadata.get('nu_max'))
+        nu_min=metadata.get('nu_min'), nu_max=metadata.get('nu_max'), max_duration=max_duration)
     raw = output/'all_detected_candidates.cands'; clustered = output/'clustered_candidates.txt'
     cluster.cluster_candidates(str(raw), str(clustered), plan=metadata['dedispersion_plan'])
+    from lotaas_reprocessing.single_pulse_quality import measure_clusters
+    evidence = output / 'single_pulse_evidence.json'
+    atomic_json(evidence, measure_clusters(output, metadata))
     summarise(output, 'single_pulse_summary.json', started,
-              [raw, clustered, output/'all_matched_filter_overview.png', output/'dm_vs_time_clusters.png'])
+              [raw, clustered, evidence, output/'all_matched_filter_overview.png', output/'dm_vs_time_clusters.png'],
+              max_width_seconds=max_duration)
 
 
 def sp_classify(output, metadata):
@@ -47,9 +52,13 @@ def sp_classify(output, metadata):
     summary = output/'sp_classify_summary.json'; summary.unlink(missing_ok=True)
     product_outputs(output, 'single_pulse_summary.json')
     plots = output/'candidate_plots'; plots.mkdir(exist_ok=True)
+    import json
+    evidence_path = output / 'single_pulse_evidence.json'
+    evidence = json.loads(evidence_path.read_text()) if evidence_path.exists() else None
     counts = classify.classify_candidates(metadata['filename'], str(output/'clustered_candidates.txt'), str(plots),
                                           metadata['observation_info'], limits=metadata.get('classification'),
-                                          tsamp=metadata.get('tsamp'))
+                                          tsamp=metadata.get('tsamp'), evidence=evidence,
+                                          bad_channels=metadata.get('bad_channels', ()))
     summarise(output, 'sp_classify_summary.json', started,
               [output/'clustered_candidates.txt'] + sorted(plots.glob('*.png')), counts=counts or {})
 

@@ -4,6 +4,11 @@ bad_channels:
   - 138
 rfi_block_size: 1000
 rfi_averaging_factor: 128
+persistent_channel_threshold: 4.0
+single_pulse:
+  # Search templates stop here, before clustering and FETCH.
+  max_width_seconds: 1.0
+# Broad FRB coverage; high DM alone is neither evidence nor an RFI veto.
 dedispersion_plan:
   - low_dm: 0.000
     high_dm: 150.600
@@ -26,17 +31,9 @@ dedispersion_plan:
     ddm: 2.00
     downsample: 16
   - low_dm: 2014.800
-    high_dm: 4469.800
+    high_dm: 3020.000
     ddm: 5.00
     downsample: 32
-  - low_dm: 4469.800
-    high_dm: 8939.800
-    ddm: 10.00
-    downsample: 64
-  - low_dm: 8939.800
-    high_dm: 10019.800
-    ddm: 20.00
-    downsample: 128
 periodicity:
   enabled: true
   period_min_seconds: 0.016
@@ -87,10 +84,10 @@ classification:
   # LOTAAS pulsars sit below the former floor of DM 10.
   min_dm: 2.0
   min_snr: 7.0
-  # FETCH is built for pulses of milliseconds to a fraction of a second. The
-  # boxcar ladder runs to 600 s; at DM > 3000 those windows follow the slow
-  # baseline, and one such cluster took minutes of single-threaded work. Wider
-  # clusters, and those beyond the per-beam budget (strongest first), are
-  # recorded as 'unclassified' rather than sent to FETCH.
+  # Demote only candidates whose same-width local noise check falls below 5.
+  # Evidence and original search scores are retained; unknown checks pass on.
+  min_local_snr: 5.0
+  # Match the search cap. Old wider candidates and budget overflow are
+  # recorded as unclassified; surviving in-range events still require FETCH.
   max_width_seconds: 1.0
   max_fetch_candidates: 200
