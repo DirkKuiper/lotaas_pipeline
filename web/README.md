@@ -26,9 +26,18 @@ token cookie on every request. VS Code's port forwarding (or
   beams searched and under which fingerprints; searched SAPs on the sky. A SAP
   page shows its beam layout and each beam's stages; a beam page its clusters
   in DM and time, stage attempts, candidates and diagnostic plots.
-- **Candidates** — FETCH positives, known-pulsar redetections, FETCH rejects
-  and folded periodic candidates, filtered by type, S/N, review and beam.
-- **Verify** — one candidate at a time, with the next one a key away. A
+- **Single pulse** — FETCH positives, known-pulsar redetections and FETCH
+  rejects, filtered by type, S/N, review and beam.
+- **Periodic** — folded periodic candidates, filtered by DM, period, statistic,
+  review and beam. A period found in 4 or more beams, or in two SAPs, of one
+  observation is hidden as RFI unless all its folds share one DM above zero;
+  the indexer groups folds whose periods agree within 5×10⁻⁴. Each row shows
+  how many beams share its period and the median scatter broadening expected
+  at its DM (Bhat et al. 2004) against its period.
+- The incoherent beam 12 and pilot runs are left out of both lists and queues
+  unless asked for.
+- **Review** — each list has its own queue: one candidate at a time, with the
+  next one a key away. A
   single-pulse candidate gets its dynamic spectrum at any DM, time and frequency
   scrunch, a channel mask, the undedispersed view with the expected sweep drawn
   in, the on- and off-pulse spectrum, S/N against DM beside the fall-off a real
@@ -36,7 +45,8 @@ token cookie on every request. VS Code's port forwarding (or
   DM 0 where undispersed RFI peaks, and the DM-time bowtie. It also compares the
   best width with the narrowest a real pulse can be at that DM, the smearing
   within one channel. A periodic candidate gets its folded profile, phase
-  against time and frequency, search response against DM and fold refinement.
+  against time and frequency, search response against DM, fold refinement and
+  the other beams where the same period was folded.
   Verdicts (RFI, noise, known source, astrophysical, unsure) take one key and a
   note; `,` and `.` step through the queue.
 

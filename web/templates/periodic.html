@@ -1,0 +1,74 @@
+{% extends 'base.html' %}
+{% block title %}Periodic candidates{% endblock %}
+{% block page %}periodic{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Periodic candidates</h1>
+    <div class="muted">Folds of the strongest sifted peaks in each beam (zero acceleration, topocentric periods). The search statistic is a nominal −log₁₀ p, not a Gaussian S/N.</div>
+  </div>
+</div>
+<div class="card small muted" style="margin-bottom: 12px">
+  <strong>Hidden by default: periods found in several beams.</strong> A period that shows up in 4 or more beams, or in two SAPs, of one observation is RFI.
+  The exception is when every fold of it sits at one DM above zero, as a bright pulsar in neighbouring beams would.
+  Tick <em>multi-beam</em> to see them.<br>
+  <strong>Reading a fold.</strong> A pulsar has a narrow pulse, stays at one phase through the hour, is present across the band, and peaks at a DM above zero.
+  RFI tends to be broad, intermittent, confined to some channels, or strongest at DM 0, and often shows up at the same period in many beams.
+  <strong>τ<sub>scat</sub></strong> is the median scatter broadening expected at this DM at 135 MHz (Bhat et al. 2004). Real lines of sight vary about tenfold either way.
+  When τ<sub>scat</sub> exceeds the period, a real pulsar would fold to a flat line.
+  <strong>Fold χ²/dof</strong> uses the whole trial's variance: red noise pushes it below 1 at short periods and far above 1 at long ones. Compare it only between candidates of similar period.
+</div>
+<form class="filters" method="get">
+  <label>Type <select name="type">
+    {% for value, text in [('queue', 'Periodic'), ('periodic_rfi', 'RFI-like (mains, 1 Hz)'), ('all', 'Everything')] %}
+      <option value="{{ value }}" {{ 'selected' if params.get('type') == value }}>{{ text }}{% if value == 'queue' and types.get('periodic') %} ({{ types['periodic'] }}){% elif types.get(value) %} ({{ types[value] }}){% endif %}</option>
+    {% endfor %}</select></label>
+  <label>Review <select name="review">
+    {% for value, text in [('all', 'Any'), ('unreviewed', 'Unreviewed'), ('reviewed', 'Reviewed')] + LABELS.items()|list %}
+      <option value="{{ value }}" {{ 'selected' if params.get('review', 'all') == value }}>{{ text }}</option>
+    {% endfor %}</select></label>
+  <label>DM from <input type="number" step="any" name="min_dm" value="{{ params.get('min_dm', '') }}" style="width: 80px"></label>
+  <label>to <input type="number" step="any" name="max_dm" value="{{ params.get('max_dm', '') }}" style="width: 80px"></label>
+  <label>Period from (s) <input type="number" step="any" name="min_period" value="{{ params.get('min_period', '') }}" style="width: 80px"></label>
+  <label>to <input type="number" step="any" name="max_period" value="{{ params.get('max_period', '') }}" style="width: 80px"></label>
+  <label>Min −log₁₀ p <input type="number" step="0.5" name="min_snr" value="{{ params.get('min_snr', '') }}" style="width: 80px"></label>
+  <label>Beam contains <input name="q" value="{{ params.get('q', '') }}" placeholder="L559289_SAP000"></label>
+  <label>Sort <select name="sort">{% for value, text in [('snr', '−log₁₀ p'), ('dm', 'DM'), ('period', 'Period')] %}
+    <option value="{{ value }}" {{ 'selected' if params.get('sort', 'snr') == value }}>{{ text }}</option>{% endfor %}</select></label>
+  <label class="check" style="flex-direction: row; align-items: center; gap: 6px"><input type="checkbox" name="pilot" value="include" {{ 'checked' if params.get('pilot') == 'include' }}> pilot runs</label>
+  <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Periods found in 4 or more beams or in two SAPs of one observation"><input type="checkbox" name="multibeam" value="include" {{ 'checked' if params.get('multibeam') == 'include' }}> multi-beam</label>
+  <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Beam 12 is the incoherent sum; the campaign no longer searches it"><input type="checkbox" name="incoherent" value="include" {{ 'checked' if params.get('incoherent') == 'include' }}> incoherent beam</label>
+  <button class="primary" type="submit">Apply</button>
+  <a class="button" href="/verify?{{ query }}&kind=periodic">Review these →</a>
+</form>
+<div class="card flush">
+  <div class="table-wrap tall">
+    <table class="sortable">
+      <thead><tr><th>Beam</th><th class="num">DM</th><th class="num">Period (s)</th><th class="num">−log₁₀ p</th><th class="num">Harmonics</th>
+        <th class="num">Fold χ²/dof</th><th class="num">τ<sub>scat</sub> (s)</th><th class="num" title="Beams of this observation with a fold at the same period">Beams</th><th>Catalogue</th><th>Flags</th><th>Review</th></tr></thead>
+      <tbody>
+      {% for c in found %}
+        <tr>
+          <td><a href="/verify/{{ c.id }}?{{ query }}">{{ c.item|beam }}</a></td>
+          <td class="num">{{ '%.1f'|format(c.dm) if c.dm is not none }}</td>
+          <td class="num">{{ '%.6f'|format(c.period) if c.period }}</td>
+          <td class="num">{{ '%.1f'|format(c.snr) if c.snr is not none }}</td>
+          <td class="num">{{ c.harmonics if c.harmonics is not none }}</td>
+          <td class="num" title="{{ c.fold_bins }} phase bins">{{ '%.2f'|format(c.reduced_chi2) if c.reduced_chi2 is not none }}</td>
+          <td class="num">{% if c.tau is not none %}{{ '%.3g'|format(c.tau) }}{% endif %}</td>
+          <td class="num" title="{% if c.family_beams %}{{ c.family_saps }} SAP(s); DM {{ '%.1f'|format(c.family_dm_min) }}–{{ '%.1f'|format(c.family_dm_max) }}{% endif %}">{{ c.family_beams or 1 }}</td>
+          <td>{{ c.catalogue }}</td>
+          <td class="nowrap">{% if c.multibeam %}<span class="flag bad small">multi-beam</span> {% endif %}{% if c.type == 'periodic_rfi' %}<span class="flag bad small">RFI-like</span> {% endif %}{% if c.smeared %}<span class="flag small" title="Expected scattering exceeds the period">τ &gt; P</span> {% endif %}{% if c.pilot %}<span class="flag small">pilot</span>{% endif %}</td>
+          <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% endif %}</td>
+        </tr>
+      {% else %}<tr><td colspan="11" class="muted">No periodic candidates match.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<div class="pager">
+  {% if number > 1 %}<a class="button" href="?{{ query }}&page={{ number - 1 }}">← previous</a>{% endif %}
+  <span class="muted">page {{ number }} of {{ pages }} · {{ count }} candidates</span>
+  {% if number < pages %}<a class="button" href="?{{ query }}&page={{ number + 1 }}">next →</a>{% endif %}
+</div>
+{% endblock %}

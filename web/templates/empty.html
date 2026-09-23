@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
 {% block title %}Verify{% endblock %}
 {% block content %}
-<div class="card"><h1>All caught up</h1><p class="muted">{{ message }}</p><p><a href="/candidates">Browse all candidates →</a></p></div>
+<div class="card"><h1>All caught up</h1><p class="muted">{{ message }}</p><p><a href="{{ back or '/single-pulse' }}">Browse the list →</a></p></div>
 {% endblock %}

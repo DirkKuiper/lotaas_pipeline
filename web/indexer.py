@@ -36,6 +36,7 @@ POINTING = re.compile(r'(P\d+[A-Z]?)')
 PRUNE = {'downloads', 'extracted', 'prepared', 'dispatch', 'data', 'logs', 'staging', 'catalogue',
          'held', 'snippets', 'containers', 'trials', '__pycache__', 'input', 'source'}
 STALE_SECONDS = 2 * 86400
+FAMILY_TOLERANCE = 5e-4  # relative period difference within one periodic family
 
 
 def uri(path):
@@ -392,6 +393,42 @@ class Indexer:
             db.execute("""UPDATE candidates SET sap_key=(SELECT key FROM obs_sap o
                     WHERE o.observation=observation_of(candidates.item) AND o.sap=sap_of(candidates.item))""")
             self.derive_saps()
+            self.derive_families()
+
+    def derive_families(self):
+        """Group the periodic folds of each observation that share a period.
+
+        A pulsar appears in one beam or a few neighbours, at one DM. Periodic RFI
+        reaches most beams of an observation, in every SAP, and at any trial DM,
+        because it is narrow in frequency and dedispersion barely moves it. Folds
+        are chained in period order while neighbours differ by at most
+        FAMILY_TOLERANCE. Refined periods within one RFI family scatter by
+        ~1e-4. Only equal periods are matched: allowing harmonics up to 16
+        merged unrelated long-period folds by chance.
+        """
+        by_observation = {}
+        for row in self.db.execute('SELECT key, item, dm, period FROM periodic WHERE period > 0'):
+            parsed = parse_item(row['item'])
+            if parsed:
+                by_observation.setdefault(parsed[0], []).append(
+                    (row['period'], row['key'], (parsed[1], parsed[2]), row['dm']))
+        rows = []
+        for observation, folds in by_observation.items():
+            folds.sort()
+            start = 0
+            for end in range(1, len(folds) + 1):
+                if end < len(folds) and folds[end][0] <= folds[end - 1][0] * (1 + FAMILY_TOLERANCE):
+                    continue
+                members = folds[start:end]
+                beams = {m[2] for m in members}
+                dms = [m[3] for m in members if m[3] is not None]
+                family = f'{observation}|{members[0][0]:.9g}'
+                rows.extend((m[1], family, len(beams), len({b[0] for b in beams}),
+                             min(dms, default=None), max(dms, default=None)) for m in members)
+                start = end
+        with self.db:
+            self.db.execute('DELETE FROM periodic_families')
+            self.db.executemany('INSERT OR REPLACE INTO periodic_families VALUES (?,?,?,?,?,?)', rows)
 
     def derive_saps(self):
         db = self.db

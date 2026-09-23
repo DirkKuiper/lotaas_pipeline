@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 
+from euroflash.beams import INCOHERENT_BEAMS
 from web import store
 from web.dynspec import Snippet, parse_mask, sweep_seconds
 from web.keys import beam_label, parse_item
@@ -37,7 +38,56 @@ COOKIE = 'lotaas_web'
 STATE_ORDER = ['pending', 'staging', 'flatfielding', 'prepared', 'dispatched', 'searched', 'attention',
                'incomplete']
 FILE_ORDER = ['pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
-QUEUE_TYPES = ('candidate', 'known_pulsar', 'periodic')
+# Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
+# what waits for a person; the other types can be listed but are not queued.
+KINDS = {'sp': {'types': ('candidate', 'known_pulsar', 'rejected'), 'queue': ('candidate', 'known_pulsar'),
+                'page': '/single-pulse', 'sort': 'recent'},
+         'periodic': {'types': ('periodic', 'periodic_rfi'), 'queue': ('periodic',),
+                      'page': '/periodic', 'sort': 'snr'}}
+CENTRE_MHZ = 135.25  # LOTAAS band centre, when a beam's own band is unknown
+# A period found in several beams, or in two SAPs, of one observation is RFI,
+# unless every fold of it sits at one DM above zero, as a bright pulsar seen in
+# neighbouring beams would. The indexer groups the folds (periodic_families).
+MULTIBEAM_BEAMS = 4
+
+
+def multibeam_sql(alias):
+    f = alias
+    return (f'(({f}.beams >= {MULTIBEAM_BEAMS} OR {f}.saps >= 2) AND NOT ({f}.dm_min >= 2 '
+            f'AND {f}.dm_max - {f}.dm_min <= MAX(2, 0.1 * {f}.dm_max)))')
+
+
+def typical_scattering(dm, frequency_mhz):
+    """Median scatter broadening in seconds (Bhat et al. 2004, eq. 5).
+
+    A review hint only: single lines of sight lie up to about ten times either
+    side of it. A pulsar broadened by more than its period folds to a flat line.
+    """
+    if not dm or dm <= 0:
+        return None
+    x = math.log10(dm)
+    return 10 ** (-6.46 + 0.154 * x + 1.07 * x * x - 3.86 * math.log10(frequency_mhz / 1000)) / 1000
+
+
+def fold_summary(candidate):
+    """Figures from a periodic fold record that help rank it in a list."""
+    fold = json.loads(candidate.get('fold_row') or '{}')
+    bins, chi2 = fold.get('fold_bins'), fold.get('fold_chi2')
+    tau = typical_scattering(candidate.get('dm'), candidate.get('centre_mhz') or CENTRE_MHZ)
+    period = candidate.get('period')
+    return {'harmonics': fold.get('harmonic_count'), 'fold_bins': bins,
+            'reduced_chi2': chi2 / (bins - 1) if chi2 is not None and bins and bins > 1 else None,
+            'catalogue': ', '.join(m.get('name', '') for m in fold.get('catalogue_matches') or []),
+            'tau': tau, 'smeared': bool(tau and period and tau > period)}
+
+
+def number(params, name):
+    """A numeric filter from the query string, or None when absent or not a number."""
+    try:
+        value = float(params.get(name) or 'nan')
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 def token(cfg):
@@ -266,10 +316,12 @@ def create_app(cfg, run_background=True):
         with store.reading(cfg) as db:
             health = meta(db, 'health', {})
             last = meta(db, 'last_index', {})
-            unreviewed = db.execute(f"""SELECT COUNT(*) FROM candidates c WHERE c.type IN
-                ('candidate','known_pulsar') AND NOT EXISTS (SELECT 1 FROM r.reviews v WHERE v.key=c.key)""").fetchone()[0]
+            waiting = {}
+            for kind in KINDS:
+                where, args, _ = candidate_filter({'kind': kind, 'review': 'unreviewed'})
+                waiting[kind] = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {where}', args).fetchone()[0]
         return templates.TemplateResponse(request, name, dict(
-            context, health=health, last_index=last, unreviewed=unreviewed, path=request.url.path))
+            context, health=health, last_index=last, waiting=waiting, path=request.url.path))
 
     # ---------------------------------------------------------- overview
     @app.get('/', response_class=HTMLResponse)
@@ -449,21 +501,32 @@ def create_app(cfg, run_background=True):
 
     # -------------------------------------------------------- candidates
     def candidate_filter(params):
-        clauses, args = [], []
-        kind = params.get('type', 'queue')
-        if kind == 'queue':
-            clauses.append("c.type IN ('candidate','known_pulsar','periodic')")
-        elif kind != 'all':
-            clauses.append('c.type=?')
-            args.append(kind)
+        kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
+        clauses, args = ['c.kind=?'], [kind]
+        chosen = params.get('type', 'queue')
+        types = (KINDS[kind]['queue'] if chosen == 'queue' else KINDS[kind]['types'] if chosen == 'all'
+                 else (chosen,))
+        clauses.append(f"c.type IN ({','.join('?' * len(types))})")
+        args.extend(types)
         if params.get('pilot') != 'include':
             clauses.append('COALESCE(c.pilot, 0)=0')
-        if params.get('min_snr'):
-            clauses.append('c.snr>=?')
-            args.append(float(params['min_snr']))
+        if params.get('incoherent') != 'include':
+            # Searched before the campaign left the incoherent beam out.
+            for beam in INCOHERENT_BEAMS:
+                clauses.append("c.item NOT LIKE ? ESCAPE '\\'")
+                args.append(f'%\\_BEAM{beam:03d}\\_%')
+        for name, clause in (('min_snr', 'c.snr>=?'), ('min_dm', 'c.dm>=?'), ('max_dm', 'c.dm<=?'),
+                             ('min_period', 'c.period>=?'), ('max_period', 'c.period<=?')):
+            value = number(params, name)
+            if value is not None:
+                clauses.append(clause)
+                args.append(value)
         if params.get('q'):
             clauses.append('c.item LIKE ?')
             args.append('%' + params['q'] + '%')
+        if kind == 'periodic' and params.get('multibeam') != 'include':
+            clauses.append(f'NOT EXISTS (SELECT 1 FROM periodic_families pf WHERE pf.key=c.key '
+                           f'AND {multibeam_sql("pf")})')
         review = params.get('review', 'all')
         latest = '(SELECT label FROM r.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
         if review == 'unreviewed':
@@ -473,42 +536,77 @@ def create_app(cfg, run_background=True):
         elif review in LABELS:
             clauses.append(f'{latest}=?')
             args.append(review)
-        return ' AND '.join(clauses) or '1=1', args, latest
+        return ' AND '.join(clauses), args, latest
 
+    # A periodic candidate's snr column holds its search statistic.
     ORDERS = {'recent': 'COALESCE(c.slack_sent, 0) DESC, c.found DESC, c.snr DESC',
-              'snr': 'c.snr DESC', 'dm': 'c.dm', 'probability': 'c.probability DESC'}
+              'snr': 'c.snr DESC', 'dm': 'c.dm', 'probability': 'c.probability DESC', 'period': 'c.period'}
+
+    def ordering(params):
+        kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
+        return ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']])
 
     def queue_ids(db, params):
         where, args, _ = candidate_filter(params)
-        order = ORDERS.get(params.get('sort', 'recent'), ORDERS['recent'])
-        return [r[0] for r in db.execute(f'SELECT c.id FROM candidates c WHERE {where} ORDER BY {order}', args)]
+        return [r[0] for r in db.execute(f'SELECT c.id FROM candidates c WHERE {where} ORDER BY {ordering(params)}',
+                                         args)]
 
-    @app.get('/candidates', response_class=HTMLResponse)
-    def candidates(request: Request):
-        params = dict(request.query_params)
+    def listing(request, kind, template):
+        params = dict(request.query_params, kind=kind)
         params.setdefault('type', 'queue')
         where, args, latest = candidate_filter(params)
-        order = ORDERS.get(params.get('sort', 'recent'), ORDERS['recent'])
-        number = max(1, int(params.get('page', 1) or 1))
+        try:
+            number_ = max(1, int(params.get('page') or 1))
+        except ValueError:
+            number_ = 1
         with store.reading(cfg) as db:
             count = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {where}', args).fetchone()[0]
             found = rows(db, f"""SELECT c.*, {latest} AS label,
-                    (SELECT COUNT(*) FROM r.reviews v WHERE v.key=c.key) AS reviews
-                FROM candidates c WHERE {where} ORDER BY {order} LIMIT 100 OFFSET ?""", *args, (number - 1) * 100)
-            types = dict(db.execute('SELECT type, COUNT(*) FROM candidates GROUP BY type').fetchall())
-        query = urlencode({k: v for k, v in params.items() if k != 'page'})
-        return page(request, 'candidates.html', found=found, count=count, params=params, number=number,
-                    pages=max(1, math.ceil(count / 100)), types=types, query=query)
+                    (SELECT COUNT(*) FROM r.reviews v WHERE v.key=c.key) AS reviews, p.row AS fold_row,
+                    (SELECT (b.nu_min + b.nu_max) / 2 FROM beams b WHERE b.item=c.item LIMIT 1) AS centre_mhz,
+                    f.beams AS family_beams, f.saps AS family_saps, f.dm_min AS family_dm_min,
+                    f.dm_max AS family_dm_max, COALESCE({multibeam_sql('f')}, 0) AS multibeam
+                FROM candidates c LEFT JOIN periodic p ON p.key=c.key
+                LEFT JOIN periodic_families f ON f.key=c.key WHERE {where}
+                ORDER BY {ordering(params)} LIMIT 100 OFFSET ?""", *args, (number_ - 1) * 100)
+            # Counts per type under the other filters, for the type selector.
+            every, every_args, _ = candidate_filter(dict(params, type='all'))
+            types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
+                                    every_args).fetchall())
+        if kind == 'periodic':
+            for c in found:
+                c.update(fold_summary(c))
+        query = urlencode({k: v for k, v in params.items() if k not in ('page', 'kind')})
+        return page(request, template, found=found, count=count, params=params, number=number_,
+                    pages=max(1, math.ceil(count / 100)), types=types, query=query, kind=kind)
+
+    @app.get('/single-pulse', response_class=HTMLResponse)
+    def single_pulse(request: Request):
+        return listing(request, 'sp', 'single_pulse.html')
+
+    @app.get('/periodic', response_class=HTMLResponse)
+    def periodic(request: Request):
+        return listing(request, 'periodic', 'periodic.html')
+
+    @app.get('/candidates')
+    def candidates(request: Request):
+        # The combined list was split in two; old links land on the right half.
+        params = dict(request.query_params)
+        target = '/periodic' if params.get('type') in KINDS['periodic']['types'] else '/single-pulse'
+        if params.get('type') == 'periodic':
+            params['type'] = 'queue'
+        return RedirectResponse(target + ('?' + urlencode(params) if params else ''), 301)
 
     @app.get('/verify', response_class=HTMLResponse)
     def verify_queue(request: Request):
         params = dict(request.query_params)
+        params['kind'] = params.get('kind') if params.get('kind') in KINDS else 'sp'
         with store.reading(cfg) as db:
             ids = queue_ids(db, dict(params, review=params.get('review', 'unreviewed')))
         if ids:
-            query = urlencode({k: v for k, v in params.items()})
-            return RedirectResponse(f'/verify/{ids[0]}' + (f'?{query}' if query else ''), 303)
-        return page(request, 'empty.html', message='Nothing waiting for review with these filters.')
+            return RedirectResponse(f'/verify/{ids[0]}?{urlencode(params)}', 303)
+        return page(request, 'empty.html', message='Nothing waiting for review with these filters.',
+                    back=KINDS[params['kind']]['page'], section=params['kind'])
 
     @app.get('/verify/{cid}', response_class=HTMLResponse)
     def verify(request: Request, cid: str):
@@ -518,6 +616,8 @@ def create_app(cfg, run_background=True):
             if row is None:
                 raise HTTPException(404, 'No such candidate')
             candidate = dict(row)
+            # Previous/next stay among candidates of the same kind.
+            params['kind'] = candidate['kind'] if candidate['kind'] in KINDS else 'sp'
             queue = queue_ids(db, dict(params, review=params.get('review', 'all')))
             reviews = rows(db, 'SELECT * FROM r.reviews WHERE key=? ORDER BY created DESC', candidate['key'])
             snippet = db.execute('SELECT meta FROM snippets WHERE key=?', (candidate['key'],)).fetchone()
@@ -527,6 +627,12 @@ def create_app(cfg, run_background=True):
                 ORDER BY id DESC LIMIT 1""", (candidate['item'],)).fetchone()
             periodic = db.execute('SELECT row, fold_data FROM periodic WHERE key=?', (candidate['key'],)).fetchone()
             periodic = dict(periodic) if periodic else None
+            family = db.execute(f"""SELECT f.*, {multibeam_sql('f')} AS multibeam FROM periodic_families f
+                WHERE f.key=?""", (candidate['key'],)).fetchone()
+            family = dict(family) if family else None
+            relatives = rows(db, """SELECT c.id, c.item, c.dm, c.period, c.snr FROM periodic_families f
+                JOIN candidates c ON c.key=f.key WHERE f.family=? AND f.key<>? ORDER BY c.snr DESC LIMIT 40""",
+                family['family'], candidate['key']) if family else []
             kept = next((k for k in kept_beams(db) if k['item'] == candidate['item']), None)
             others = rows(db, """SELECT id, type, dm, snr, time FROM candidates WHERE item=? AND id<>?
                 AND kind=? ORDER BY snr DESC LIMIT 12""", candidate['item'], cid, candidate['kind'])
@@ -550,9 +656,11 @@ def create_app(cfg, run_background=True):
         context = dict(candidate=candidate, reviews=reviews, plots=plots, neighbours=neighbours, query=query,
                        snippet=json.loads(snippet['meta']) if snippet else None, others=others,
                        observed=beam_run['observation_date'] if beam_run else None,
-                       slack_threads=cfg.slack_threads, labels=LABELS, kept=kept, initial=initial)
+                       slack_threads=cfg.slack_threads, labels=LABELS, kept=kept, initial=initial,
+                       section=params['kind'], back=KINDS[params['kind']]['page'])
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
+            context.update(family=family, relatives=relatives)
             return page(request, 'verify_periodic.html', **context)
         return page(request, 'verify_sp.html', **context)
 

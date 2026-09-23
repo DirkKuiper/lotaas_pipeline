@@ -5,7 +5,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="muted small"><a href="/candidates?type=periodic">Periodic candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
+    <div class="muted small"><a href="/periodic">Periodic candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
     <h1>Periodic candidate · P = {{ '%.9f'|format(fold.get('refined_period_seconds') or candidate.period or 0) }} s · DM {{ '%.2f'|format(candidate.dm) }}</h1>
     <div class="muted">search −log₁₀ p = {{ '%.2f'|format(candidate.statistic) }} (nominal, not Gaussian S/N) · {{ fold.get('harmonic_count') }} harmonics{% if fold.get('rfi_like') %} · <span class="flag bad">flagged RFI-like</span>{% endif %}{% if candidate.pilot %} · <span class="flag">pilot run</span>{% endif %}</div>
   </div>
@@ -36,10 +36,13 @@
         <dt>Fold χ²</dt><dd>{{ '%.1f'|format(fold.get('fold_chi2') or 0) }} over {{ fold.get('fold_bins') }} bins</dd>
         <dt>Sifting</dt><dd>{{ fold.get('sift_status') }}, group of {{ fold.get('sift_group_size') }}</dd>
         <dt>Catalogue</dt><dd>{{ candidate.pulsar or (fold.get('catalogue_matches') or [])|map(attribute='name')|join(', ') or 'no association' }}</dd>
+        <dt>Same period</dt><dd>{% if family and family.beams > 1 %}{{ family.beams }} beams in {{ family.saps }} SAP(s) of this observation, DM {{ '%.1f'|format(family.dm_min) }}–{{ '%.1f'|format(family.dm_max) }}{% if family.multibeam %} · <span class="flag bad">multi-beam: RFI</span>{% endif %}{% else %}this beam only{% endif %}</dd>
         <dt>Duration</dt><dd>{{ '%.0f'|format(fold.get('observation_seconds') or 0) }} s at {{ '%.2f'|format((fold.get('effective_sampling_seconds') or 0) * 1000) }} ms</dd>
       </dl>
     </div>
     {% include '_review.html' %}
+    {% if relatives %}<div class="card small"><h2>Same period in other beams</h2>
+      {% for o in relatives %}<div class="stat"><a href="/verify/{{ o.id }}">{{ o.item|beam }} DM {{ '%.1f'|format(o.dm) }}</a><span class="v">{{ '%.1f'|format(o.snr) }}</span></div>{% endfor %}</div>{% endif %}
   </aside>
 </div>
 {% include '_plots.html' %}

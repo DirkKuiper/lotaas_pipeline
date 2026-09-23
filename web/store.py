@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS periodic (key TEXT PRIMARY KEY, dir TEXT, item TEXT, 
     rank INTEGER, dm REAL, period REAL, statistic REAL, harmonics INTEGER, fold_chi2 REAL,
     rfi_like INTEGER, catalogue TEXT, plot TEXT, fold_data TEXT, row TEXT);
 CREATE INDEX IF NOT EXISTS periodic_item ON periodic(item);
+-- Folds of one observation that share a period, across its beams and SAPs.
+CREATE TABLE IF NOT EXISTS periodic_families (key TEXT PRIMARY KEY, family TEXT, beams INTEGER, saps INTEGER,
+    dm_min REAL, dm_max REAL);
+CREATE INDEX IF NOT EXISTS periodic_families_family ON periodic_families(family);
 
 CREATE TABLE IF NOT EXISTS sap_info (key TEXT PRIMARY KEY, observation TEXT, sap INTEGER, pointing TEXT,
     ra_deg REAL, dec_deg REAL, observed TEXT, beams_searched INTEGER, fingerprints TEXT,

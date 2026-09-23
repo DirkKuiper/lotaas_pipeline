@@ -1,16 +1,16 @@
 {% extends 'base.html' %}
-{% block title %}Candidates{% endblock %}
+{% block title %}Single-pulse candidates{% endblock %}
 {% block page %}candidates{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>Candidates</h1>
-    <div class="muted">Single-pulse detections as the classifier recorded them (FETCH positives, known-pulsar redetections, FETCH rejects) and folded periodic candidates. A Slack post is an alert, not a validated detection.</div>
+    <h1>Single-pulse candidates</h1>
+    <div class="muted">Detections as the classifier recorded them: FETCH positives, known-pulsar redetections and FETCH rejects. A Slack post is an alert, not a validated detection. Periodic folds have <a href="/periodic">their own list</a>.</div>
   </div>
 </div>
 <form class="filters" method="get">
   <label>Type <select name="type">
-    {% for value, text in [('queue', 'Positives, pulsars, periodic'), ('candidate', 'FETCH positives'), ('known_pulsar', 'Known pulsars'), ('rejected', 'FETCH rejects'), ('periodic', 'Periodic'), ('periodic_rfi', 'Periodic, RFI-like'), ('all', 'Everything')] %}
+    {% for value, text in [('queue', 'Positives and pulsars'), ('candidate', 'FETCH positives'), ('known_pulsar', 'Known pulsars'), ('rejected', 'FETCH rejects'), ('all', 'Everything')] %}
       <option value="{{ value }}" {{ 'selected' if params.get('type') == value }}>{{ text }}{% if types.get(value) %} ({{ types[value] }}){% endif %}</option>
     {% endfor %}</select></label>
   <label>Review <select name="review">
@@ -21,29 +21,30 @@
   <label>Beam contains <input name="q" value="{{ params.get('q', '') }}" placeholder="L559289_SAP000"></label>
   <label>Sort <select name="sort">{% for value, text in [('recent', 'Newest / on Slack'), ('snr', 'S/N'), ('probability', 'FETCH p'), ('dm', 'DM')] %}
     <option value="{{ value }}" {{ 'selected' if params.get('sort', 'recent') == value }}>{{ text }}</option>{% endfor %}</select></label>
-  <label class="check" style="flex-direction: row; align-items: center; gap: 6px"><input type="checkbox" name="pilot" value="include" {{ 'checked' if params.get('pilot') == 'include' }}> include pilot runs</label>
+  <label class="check" style="flex-direction: row; align-items: center; gap: 6px"><input type="checkbox" name="pilot" value="include" {{ 'checked' if params.get('pilot') == 'include' }}> pilot runs</label>
+  <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Beam 12 is the incoherent sum; the campaign no longer searches it"><input type="checkbox" name="incoherent" value="include" {{ 'checked' if params.get('incoherent') == 'include' }}> incoherent beam</label>
   <button class="primary" type="submit">Apply</button>
-  <a class="button" href="/verify?{{ query }}">Review these →</a>
+  <a class="button" href="/verify?{{ query }}&kind=sp">Review these →</a>
 </form>
 <div class="card flush">
   <div class="table-wrap tall">
     <table class="sortable">
-      <thead><tr><th>Found</th><th>Beam</th><th>Type</th><th class="num">DM</th><th class="num">S/N or stat.</th><th class="num">Width / period</th><th class="num">Time (s)</th>
-        <th class="num">FETCH p</th><th>Pulsar / match</th><th>Slack</th><th>Data</th><th>Review</th></tr></thead>
+      <thead><tr><th>Found</th><th>Beam</th><th>Type</th><th class="num">DM</th><th class="num">S/N</th><th class="num">Width (samples)</th><th class="num">Time (s)</th>
+        <th class="num">FETCH p</th><th>Pulsar</th><th>Slack</th><th>Data</th><th>Review</th></tr></thead>
       <tbody>
       {% for c in found %}
         <tr>
           <td class="small">{{ (c.found or '')[:16] }}</td>
-          <td><a href="/verify/{{ c.id }}">{{ c.item|beam }}</a></td>
+          <td><a href="/verify/{{ c.id }}?{{ query }}">{{ c.item|beam }}</a></td>
           <td class="nowrap">{{ c.type|kind }}{% if c.pilot %} <span class="flag small">pilot</span>{% endif %}</td>
           <td class="num">{{ '%.2f'|format(c.dm) if c.dm is not none }}</td>
           <td class="num">{{ '%.2f'|format(c.snr) if c.snr is not none }}</td>
-          <td class="num">{% if c.kind == 'periodic' %}{{ '%.6f s'|format(c.period) if c.period }}{% else %}{{ c.width }}{% endif %}</td>
+          <td class="num">{{ c.width if c.width is not none }}</td>
           <td class="num">{{ '%.3f'|format(c.time) if c.time is not none }}</td>
           <td class="num">{{ '%.3f'|format(c.probability) if c.probability is not none }}</td>
           <td>{{ c.pulsar or '' }}</td>
           <td>{{ 'posted' if c.slack_sent else '' }}</td>
-          <td class="small">{{ 'snippet' if c.snippet else 'fold' if c.kind == 'periodic' else 'plot' if c.plot_id else '—' }}</td>
+          <td class="small">{{ 'snippet' if c.snippet else 'plot' if c.plot_id else '—' }}</td>
           <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% endif %}</td>
         </tr>
       {% else %}<tr><td colspan="12" class="muted">No candidates match.</td></tr>{% endfor %}

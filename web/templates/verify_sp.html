@@ -6,7 +6,7 @@
 {% set kinds = {'candidate': 'FETCH positive', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject'} %}
 <div class="page-head">
   <div>
-    <div class="muted small"><a href="/candidates">Candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
+    <div class="muted small"><a href="/single-pulse">Single-pulse candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
     <h1>{{ kinds.get(candidate.type, candidate.type) }}{% if candidate.pulsar %} {{ candidate.pulsar }}{% endif %} · DM {{ '%.2f'|format(candidate.dm) }} · S/N {{ '%.2f'|format(candidate.snr) }}</h1>
     <div class="muted">t = {{ '%.3f'|format(candidate.time) }} s · boxcar {{ candidate.width }} sample{{ 's' if candidate.width != 1 }}{% if candidate.probability is not none %} · FETCH p = {{ '%.3f'|format(candidate.probability) }}{% endif %}{% if observed %} · observed {{ observed }}{% endif %}{% if candidate.slack_sent %} · posted to Slack {{ candidate.slack_sent|ago }}{% endif %}{% if candidate.pilot %} · <span class="flag">pilot run</span>{% endif %}</div>
   </div>

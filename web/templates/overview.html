@@ -31,8 +31,10 @@
   <div class="tile"><div class="label">Kept for review</div>
     <div class="value">{{ kept|length }} <span class="muted small">beams</span></div>
     <div class="sub">{{ kept_bytes|size }} of flatfielded data the campaign keeps</div></div>
-  <a class="tile" href="/verify" style="color: inherit; text-decoration: none"><div class="label">Waiting for review</div>
-    <div class="value">{{ unreviewed }}</div><div class="sub">FETCH positives and known pulsars →</div></a>
+  <div class="tile"><div class="label">Waiting for review</div>
+    <div class="value"><a href="/verify?kind=sp" style="color: inherit">{{ waiting.sp }}</a> <span class="muted small">single pulse</span> ·
+      <a href="/verify?kind=periodic" style="color: inherit">{{ waiting.periodic }}</a> <span class="muted small">periodic</span></div>
+    <div class="sub">FETCH positives and known pulsars; periodic folds →</div></div>
 </div>
 
 {% for run in health.get('dispatch') or [] %}
