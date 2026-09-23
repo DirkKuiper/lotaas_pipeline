@@ -304,11 +304,13 @@ class Runner:
         if self.mode == 'gpu':
             if errors:
                 self.fail(item, errors)
-            else:
-                # Periodic trials that are hard links survive; the CPU node needs only those.
-                import shutil
-                shutil.rmtree(output/'DM_trials', ignore_errors=True)
-                self.mark_ready(item, output)
+            # Dedispersion was validated before search() was called. A failed
+            # single-pulse branch must not suppress the independent periodic
+            # search. Its missing completion manifest keeps the beam failed.
+            # Periodic hard links survive removal of the transient trial tree.
+            import shutil
+            shutil.rmtree(output/'DM_trials', ignore_errors=True)
+            self.mark_ready(item, output)
         return errors
 
     def handoff(self):

@@ -356,6 +356,25 @@ def test_the_runner_hands_over_without_numpy(tmp_path, monkeypatch):
     assert sum(apply(dirs).values()) == 4
 
 
+def test_a_failed_single_pulse_branch_still_reaches_periodic_search(tmp_path):
+    run = runner(tmp_path, stages='gpu')
+    run.fp = 'f' * 64
+    output = run.root/'processed/beam/x'
+    output.mkdir(parents=True)
+    atomic_json(output/'metadata.json', {'filename': '/runs/input/beam.fil', 'periodicity_enabled': True})
+    (output/'Periodic_DM_trials').mkdir()
+    trial = output/'Periodic_DM_trials/beam_DM10.dat'
+    trial.write_bytes(b'periodic data')
+    def fail_stage(*args):
+        raise RuntimeError('single-pulse candidate overflow')
+    run.cpu_stage = fail_stage
+    assert run.search('beam', output) == ['single-pulse candidate overflow']
+    assert (run.handoff()/'beam.ready').is_file()
+    assert trial.read_bytes() == b'periodic data'
+    with run.ledger.connect() as db:
+        assert db.execute("SELECT status FROM attempts WHERE stage='classify'").fetchone()[0] == 'failed'
+
+
 def test_a_failed_catalogue_query_is_retried_under_the_node_lock(tmp_path, monkeypatch):
     from lotaas_reprocessing import atnf
     monkeypatch.setenv('HOME', str(tmp_path))
