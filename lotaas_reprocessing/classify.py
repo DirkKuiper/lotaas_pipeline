@@ -30,6 +30,53 @@ CATALOGUE_RADIUS_DEG = 5.0
 VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 
 
+def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
+    """The decimated, time-cropped DM-time plane FETCH receives.
+
+    `your` dedisperses the whole chunk (twice the dispersion sweep, 221,579
+    samples at DM 8,000) at 256 trial DMs and the result is then decimated and
+    cropped to 256 samples around the pulse. That took ~40 s per high-DM
+    candidate and left a few RFI-rich beams classifying for over an hour while
+    the GPUs idled. Only the columns that survive the crop are computed here,
+    accumulating channels in the same order and precision, so the result is
+    bit-identical. Where the crop would reach the median padding added for
+    decimation, or a delay reaches the chunk length, the original computation
+    is used.
+    """
+    nt, nf = cand.data.shape
+    padded = nt + (-nt) % decimate
+    decimated = padded // decimate
+    start = decimated // 2 - time_size // 2
+    dm_list = cand.dm + np.linspace(-float(range_dm), float(range_dm), dmsteps)
+    freqs = np.asarray(cand.chan_freqs)
+    delays = np.round(4148808.0 * dm_list[:, None] * (1 / (freqs[0]) ** 2 - 1 / (freqs[None, :]) ** 2)
+                      / 1000 / cand.native_tsamp).astype("int64")
+    # The window only pays when it is a small part of the chunk (wide pulses
+    # force chunks barely longer than the crop).
+    if not (decimated > start + time_size and start >= 0 and (start + time_size) * decimate <= nt
+            and 2 * time_size * decimate <= nt and np.abs(delays).max() < nt):
+        cand.dmtime(dmsteps=dmsteps, range_dm=range_dm)
+        cand.decimate(key="dmt", axis=1, pad=True, decimate_factor=decimate, mode="median")
+        return crop(cand.dmt, cand.dmt.shape[1] // 2 - time_size // 2, time_size, axis=1)
+    first, width = start * decimate, time_size * decimate
+    rows = np.ascontiguousarray(cand.data.T)
+    plane = np.zeros((dmsteps, width), dtype=np.float32)
+    # your rolls each channel right by its delay: out[t] = data[(t - d) mod nt].
+    # Channels are added in order, as there, so every sum is bit-identical.
+    for channel in range(nf):
+        row = rows[channel]
+        for step in range(dmsteps):
+            begin = (first - delays[step, channel]) % nt
+            end = begin + width
+            if end <= nt:
+                plane[step] += row[begin:end]
+            else:
+                split = nt - begin
+                plane[step, :split] += row[begin:]
+                plane[step, split:] += row[:end - nt]
+    return plane.reshape(dmsteps, time_size, decimate).mean(2)
+
+
 def send_slack_message(text):
     # Notifications are deliberately local; cluster runs never send messages.
     logger.info(text)
@@ -163,7 +210,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 device=-1,
             )
             cand.get_chunk()
-            cand.dmtime(dmsteps=256)
+            time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
+            cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size)
             cand.dedisperse()
 
             fil = FilterbankFile(filterbank_file, "read")
@@ -178,14 +226,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
             cand.dedispersed = normalise(cand.dedispersed)
 
-            # Reshape DM-Time array
-            time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
-            cand.decimate(key="dmt", axis=1, pad=True, decimate_factor=time_decimate_factor, mode="median")
-
-            # Crop along the time axis
-            crop_start_sample_dmt = cand.dmt.shape[1] // 2 - time_size // 2
-            cand.dmt = crop(cand.dmt, crop_start_sample_dmt, time_size, axis=1)
-
+            # The DM-time plane is already decimated and cropped in time.
             # Crop along the DM axis
             crop_start_dm = cand.dmt.shape[0] // 2 - dm_size // 2
             cand.dmt = crop(cand.dmt, crop_start_dm, dm_size, axis=0)
