@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block title %}Coverage{% endblock %}
+{% block page %}coverage{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Coverage</h1>
+    <div class="muted">Every SAP in the inventory. Positions come from the searched beams' headers, so a SAP appears on the sky once its data has been searched.</div>
+  </div>
+</div>
+<div class="card">
+  <h2>Searched and in-progress SAPs on the sky</h2>
+  {% if charts.sky %}<div id="sky" class="chart tall"></div>
+  <div class="muted small">{{ charts.sky|length }} SAPs with known positions. Click one to open it.</div>
+  {% else %}<div class="muted">No SAP has a searched beam with a position yet.</div>{% endif %}
+</div>
+<div class="card flush" style="margin-top: 14px">
+  <div style="padding: 12px 16px 0">
+    <h2>SAPs <span class="muted small"><span id="sap-shown">{{ saps|length }}</span> shown</span></h2>
+    <div class="chips">
+      {% for s in state_order if states.get(s) %}<button type="button" class="chip" data-state="{{ s }}"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s }} {{ states[s] }}</button>{% endfor %}
+      <input id="sap-search" placeholder="Filter: key, observation, pointing…" style="min-width: 260px">
+    </div>
+  </div>
+  <div class="table-wrap tall">
+    <table id="sap-table" class="sortable">
+      <thead><tr><th class="num">#</th><th>SAP (archive)</th><th>Observation</th><th>Pointing</th><th>Observed</th><th>State</th>
+        <th class="num">Beams searched</th><th class="num">Files</th><th>Fingerprints</th><th class="num">FETCH +</th><th>Updated</th><th>Detail</th></tr></thead>
+      <tbody>
+      {% for s in saps %}
+        <tr data-state="{{ s.state }}">
+          <td class="num">{{ s.position }}</td><td><a href="/sap/{{ s.key }}">{{ s.key }}</a></td>
+          <td class="nowrap">{{ s.observation ~ ' SAP' ~ '%03d'|format(s.sap) if s.observation else '—' }}</td>
+          <td>{{ s.pointing or '—' }}</td><td>{{ (s.observed or '—')[:10] }}</td>
+          <td><span class="state" data-state="{{ s.state }}">{{ s.state }}</span></td>
+          <td class="num">{{ s.beams_searched or 0 }}</td><td class="num">{{ s.files - s.excluded }}</td>
+          <td class="mono small">{{ s.fingerprints or '' }}</td>
+          <td class="num">{% if s.candidates %}<strong>{{ s.candidates }}</strong>{% else %}0{% endif %}</td>
+          <td class="when" data-sort="{{ s.updated }}">{{ s.updated|ago }}</td><td class="detail" title="{{ s.detail or '' }}">{{ (s.detail or '')|truncate(90) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<script id="charts" type="application/json">{{ charts|json }}</script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const state = decodeURIComponent(location.hash.slice(1));
+  const chip = state && document.querySelector(`.chip[data-state="${state}"]`);
+  if (chip) chip.click();
+});
+</script>
+{% endblock %}

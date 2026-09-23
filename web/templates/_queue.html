@@ -1,0 +1,6 @@
+<div class="nav-queue">
+  {% if neighbours.previous %}<a class="button" id="previous" href="/verify/{{ neighbours.previous }}{{ '?' ~ query if query }}">← <kbd>,</kbd></a>{% endif %}
+  {% if neighbours.position %}<span class="muted small">{{ neighbours.position }} of {{ neighbours.total }}</span>{% endif %}
+  {% if neighbours.next %}<a class="button" id="next" href="/verify/{{ neighbours.next }}{{ '?' ~ query if query }}"><kbd>.</kbd> →</a>{% endif %}
+  <a class="button" href="/verify?review=unreviewed">next unreviewed</a>
+</div>

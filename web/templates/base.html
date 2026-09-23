@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Campaign{% endblock %} · LOTAAS</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>try { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+<script src="/assets/plotly.min.js" defer></script>
+<script src="/static/common.js" defer></script>
+<script src="/static/pages.js" defer></script>
+{% block head %}{% endblock %}
+</head>
+<body data-page="{% block page %}{% endblock %}">
+{% set d = health.get('driver') or {} %}
+{% set ssh = health.get('ssh') or {} %}
+{% set disk = health.get('disk') or {} %}
+<header class="top">
+  <a class="brand" href="/">LOTAAS · LT5_004</a>
+  <nav>
+    <a href="/" class="{{ 'active' if path == '/' }}">Overview</a>
+    <a href="/staging" class="{{ 'active' if path.startswith('/staging') }}">Staging</a>
+    <a href="/coverage" class="{{ 'active' if path.startswith('/coverage') or path.startswith('/sap') or path.startswith('/beam') }}">Coverage</a>
+    <a href="/candidates" class="{{ 'active' if path.startswith('/candidates') }}">Candidates</a>
+    <a href="/verify" class="{{ 'active' if path.startswith('/verify') }}">Verify{% if unreviewed %}<span class="badge-count">{{ unreviewed }}</span>{% endif %}</a>
+  </nav>
+  <div class="health">
+    {% if d.get('running') %}
+      <span class="pill ok" title="PID {{ d.pid }}">driver up {{ (now() - d.started)|duration if d.started else '' }}</span>
+    {% else %}
+      <span class="pill bad">driver not running</span>
+    {% endif %}
+    {% if health.get('stop_file') %}<span class="pill warn">STOP file present</span>{% endif %}
+    {% set age = (now() - health.status_time) if health.get('status_time') else None %}
+    {% if age is not none %}<span class="pill {{ 'ok' if age < 900 else 'warn' if age < 3600 else 'bad' }}">status {{ health.status_time|ago }}</span>{% endif %}
+    {% for run in health.get('dispatch') or [] %}
+      {% set running = now() - run.started if run.started else 0 %}
+      <span class="pill {{ 'ok' if running < 3 * 3600 else 'warn' }}" title="{{ run.run_name }}">dispatch {{ running|duration }}</span>
+    {% endfor %}
+    {% for node, s in ssh.items() %}
+      <span class="pill {{ 'ok' if s.ok else 'bad' }}" title="{{ s.detail }}">ssh {{ node }}</span>
+    {% endfor %}
+    {% if disk %}<span class="pill {{ 'ok' if disk.free_tb > disk.min_free_tb + 5 else 'warn' if disk.free_tb > disk.min_free_tb else 'bad' }}">{{ '%.1f'|format(disk.free_tb) }} TB free</span>{% endif %}
+  </div>
+  <button class="theme" type="button" onclick="toggleTheme()" title="Switch light/dark">◐</button>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  Index {{ last_index.get('time')|ago }}{% if last_index.get('seconds') is not none %} ({{ '%.1f'|format(last_index.seconds) }} s){% endif %} ·
+  read-only view of the campaign state database, the ledger and the results tree
+</footer>
+{% block scripts %}{% endblock %}
+</body>
+</html>

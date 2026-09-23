@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+{% block title %}{{ item|beam }}{% endblock %}
+{% block page %}beam{% endblock %}
+{% block content %}
+{% set r = results[0] if results else None %}
+<div class="page-head">
+  <div>
+    <div class="muted small"><a href="/coverage">Coverage</a> / {% if sap_key %}<a href="/sap/{{ sap_key }}">{{ sap_key }}</a> /{% endif %}</div>
+    <h1>{{ item|beam }}{% if r and r.pointing %} <span class="muted">· {{ r.pointing }}</span>{% endif %}</h1>
+    <div class="mono muted small">{{ item }}</div>
+  </div>
+</div>
+<div class="grid cols-main">
+  <div class="card">
+    <h2>Single-pulse clusters</h2>
+    {% if charts.clusters or charts.found %}<div id="clusters" class="chart tall"></div>
+    <div class="muted small">Clusters from the latest search of this beam; stars are FETCH positives and known pulsars, crosses FETCH rejects. Click a star or cross to review it.</div>
+    {% else %}<div class="muted">No clusters recorded.</div>{% endif %}
+  </div>
+  <div class="card">
+    <h2>Beam</h2>
+    {% if r %}
+    <dl class="kv">
+      <dt>Position</dt><dd>{% if r.ra_deg is not none %}RA {{ '%.4f'|format(r.ra_deg) }}°, Dec {{ '%.4f'|format(r.dec_deg) }}°{% else %}—{% endif %}</dd>
+      <dt>Observed</dt><dd>{{ r.observed or '—' }}</dd>
+      <dt>Sampling</dt><dd>{{ '%.3f'|format(r.tsamp * 1000) if r.tsamp }} ms, {{ '%.2f'|format(r.nu_min) if r.nu_min }}–{{ '%.2f'|format(r.nu_max) if r.nu_max }} MHz</dd>
+      <dt>Search</dt><dd>{{ r.run_name }} on {{ r.node }} · {{ r.elapsed|duration }}{% if r.pilot %} · <span class="flag">pilot</span>{% endif %}</dd>
+      <dt>Fingerprint</dt><dd class="mono">{{ r.fp16 }}</dd>
+      <dt>Clusters</dt><dd>{{ r.clusters if r.clusters is not none else '—' }}{% if r.max_cluster_snr %}, brightest S/N {{ '%.1f'|format(r.max_cluster_snr) }}{% endif %}</dd>
+      <dt>Periodicity</dt><dd>{{ r.periodic_candidates if r.periodic_candidates is not none else '—' }} candidates, {{ r.periodic_folds if r.periodic_folds is not none else '—' }} folded</dd>
+    </dl>
+    {% if results|length > 1 %}<h3>Earlier searches</h3>{% for x in results[1:] %}<div class="stat small"><span>{{ x.run_name }}</span><span class="mono">{{ x.fp16[:8] }}</span></div>{% endfor %}{% endif %}
+    {% endif %}
+    {% if kept %}<h3>Kept for review</h3><div class="small">The campaign kept this beam's flatfielded filterbank ({{ kept.bytes|size }}): <span class="mono">{{ kept.path }}</span></div>{% endif %}
+    {% if file %}<h3>Archive file</h3><dl class="kv small"><dt>State</dt><dd><span class="state" data-state="{{ file.state }}">{{ file.state }}</span></dd>
+      <dt>Request</dt><dd class="mono">{{ file.request_id }}</dd><dt>File</dt><dd class="mono">{{ file.name }}</dd></dl>{% endif %}
+  </div>
+</div>
+
+<div class="card flush" style="margin-top: 14px">
+  <h2>Candidates in this beam</h2>
+  <div class="table-wrap">
+    <table class="sortable">
+      <thead><tr><th>Type</th><th class="num">DM</th><th class="num">S/N or stat.</th><th class="num">Width / period</th><th class="num">Time (s)</th><th class="num">FETCH p</th><th>Pulsar</th><th>Review</th><th></th></tr></thead>
+      <tbody>
+      {% for c in found %}
+        <tr><td>{{ c.type|kind }}</td><td class="num">{{ '%.2f'|format(c.dm) if c.dm is not none }}</td><td class="num">{{ '%.2f'|format(c.snr) if c.snr is not none }}</td>
+          <td class="num">{% if c.kind == 'periodic' %}{{ '%.6f s'|format(c.period) if c.period }}{% else %}{{ c.width }}{% endif %}</td>
+          <td class="num">{{ '%.3f'|format(c.time) if c.time is not none }}</td><td class="num">{{ '%.3f'|format(c.probability) if c.probability is not none else '' }}</td>
+          <td>{{ c.pulsar or '' }}</td><td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% endif %}</td>
+          <td><a href="/verify/{{ c.id }}">inspect →</a></td></tr>
+      {% else %}<tr><td colspan="9" class="muted">No candidates recorded for this beam.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card flush" style="margin-top: 14px">
+  <h2>Stage attempts</h2>
+  <div class="table-wrap">
+    <table class="sortable">
+      <thead><tr><th>Stage</th><th>Status</th><th>Started</th><th class="num">Took</th><th>Host</th><th>Fingerprint</th><th>Error</th></tr></thead>
+      <tbody>
+      {% for a in attempts %}
+        <tr><td>{{ a.stage }}</td><td class="{{ 'flag ok' if a.status == 'success' else 'flag bad' if a.status == 'failed' else 'flag' }}">{{ a.status }}</td>
+          <td class="when" data-sort="{{ a.started }}">{{ a.started|when }}</td><td class="num" data-sort="{{ a.seconds }}">{{ a.seconds|duration }}</td>
+          <td>{{ a.host }}{% if a.device %} · {{ a.device }}{% endif %}</td><td class="mono small">{{ (a.fingerprint or '')[:8] }}</td><td class="detail" title="{{ a.error or '' }}">{{ (a.error or '')|truncate(200) }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if plots %}
+<div class="card" style="margin-top: 14px">
+  <h2>Diagnostic plots</h2>
+  <div class="gallery">
+    {% for p in plots %}<figure><a href="/plot/{{ p.id }}" target="_blank"><img loading="lazy" src="/plot/{{ p.id }}" alt="{{ p.name }}"></a><figcaption>{{ p.kind }} · {{ p.name }}</figcaption></figure>{% endfor %}
+  </div>
+</div>
+{% endif %}
+<script id="charts" type="application/json">{{ charts|json }}</script>
+{% endblock %}

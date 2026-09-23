@@ -1,0 +1,10 @@
+{% if plots %}
+<div class="card" style="margin-top: 14px">
+  <details {{ 'open' if not open_plots is defined or open_plots }}>
+    <summary><h2 style="display: inline">Pipeline diagnostic plots</h2></summary>
+    <div class="gallery" style="margin-top: 10px">
+      {% for p in plots %}<figure><a href="/plot/{{ p.id }}" target="_blank"><img loading="lazy" src="/plot/{{ p.id }}" alt="{{ p.name }}"></a><figcaption>{{ p.kind }} · {{ p.name }}</figcaption></figure>{% endfor %}
+    </div>
+  </details>
+</div>
+{% endif %}

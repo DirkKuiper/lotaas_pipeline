@@ -1,0 +1,77 @@
+{% extends 'base.html' %}
+{% block title %}{{ candidate.item|beam }} DM {{ '%.1f'|format(candidate.dm) }}{% endblock %}
+{% block page %}verify{% endblock %}
+{% block head %}<script src="/static/review.js" defer></script><script src="/static/viewer.js" defer></script>{% endblock %}
+{% block content %}
+{% set kinds = {'candidate': 'FETCH positive', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject'} %}
+<div class="page-head">
+  <div>
+    <div class="muted small"><a href="/candidates">Candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
+    <h1>{{ kinds.get(candidate.type, candidate.type) }}{% if candidate.pulsar %} {{ candidate.pulsar }}{% endif %} · DM {{ '%.2f'|format(candidate.dm) }} · S/N {{ '%.2f'|format(candidate.snr) }}</h1>
+    <div class="muted">t = {{ '%.3f'|format(candidate.time) }} s · boxcar {{ candidate.width }} sample{{ 's' if candidate.width != 1 }}{% if candidate.probability is not none %} · FETCH p = {{ '%.3f'|format(candidate.probability) }}{% endif %}{% if observed %} · observed {{ observed }}{% endif %}{% if candidate.slack_sent %} · posted to Slack {{ candidate.slack_sent|ago }}{% endif %}{% if candidate.pilot %} · <span class="flag">pilot run</span>{% endif %}</div>
+  </div>
+  {% include '_queue.html' %}
+</div>
+
+{% if snippet %}
+<div class="viewer">
+  <div>
+    <div class="card">
+      <div class="controls">
+        <div class="group"><label>DM<input type="number" id="dm" step="0.01" value="{{ '%.3f'|format(candidate.dm) }}"></label>
+          <button type="button" data-step="-10">−</button><button type="button" data-step="-1">‹</button><button type="button" data-step="1">›</button><button type="button" data-step="10">+</button>
+          <button type="button" id="dm-reset" title="Back to the candidate DM">⟲</button></div>
+        <label>Time scrunch<select id="tscrunch">{% for f in [1, 2, 4, 8, 16, 32] %}<option value="{{ f }}">{{ f }} × {{ '%.1f'|format(snippet.tsamp * 1000 * f) }} ms</option>{% endfor %}</select></label>
+        <label>Subbands<select id="nsub">{% for n in [648, 324, 216, 162, 108, 81, 54, 36, 27, 18] %}<option value="{{ n }}" {{ 'selected' if n == 81 }}>{{ n }}</option>{% endfor %}</select></label>
+        <label>Window<select id="window">{% for w in [0.5, 1, 2, 5, 10, 30, 0] %}<option value="{{ w }}" {{ 'selected' if w == 2 }}>{{ '±%g s'|format(w) if w else 'whole snippet' }}</option>{% endfor %}</select></label>
+        <label>Colour clip<select id="clip">{% for c in [95, 98, 99, 99.5, 99.9] %}<option value="{{ c }}" {{ 'selected' if c == 99 }}>{{ c }} %</option>{% endfor %}</select></label>
+        <label>Mask channels<input id="mask" class="mask" placeholder="e.g. 100-120,509"></label>
+        <label class="check"><input type="checkbox" id="raw"> not dedispersed (<kbd>D</kbd>)</label>
+      </div>
+      <div id="dynamic"></div>
+      <div class="status-line" id="status">Loading…</div>
+    </div>
+    <div class="card" style="margin-top: 14px">
+      <h2>S/N against DM</h2>
+      <div id="dmplots"><div class="muted">Dedispersing at every trial DM…</div></div>
+      <div class="muted small">Left: close to the candidate DM, with the fall-off a real pulse of the fitted width would show (Cordes &amp; McLaughlin 2003). Middle: from DM 0, where undispersed RFI peaks. Right: S/N against DM and time (the bowtie). Click either curve to view at that DM.</div>
+    </div>
+  </div>
+  <aside class="grid" style="align-content: start">
+    <div class="card">
+      <h2>Measured on this snippet</h2>
+      <div class="stat"><span>Boxcar S/N at the search width</span><span class="v" id="m-peak">—</span></div>
+      <div class="stat"><span>Best width</span><span class="v" id="m-width">—</span></div>
+      <div class="stat"><span>Search S/N</span><span class="v">{{ '%.2f'|format(candidate.snr) }}</span></div>
+      <div class="stat"><span>Best DM</span><span class="v" id="m-dm">—</span></div>
+      <div class="stat"><span>Channel smearing (bottom / top)</span><span class="v" id="m-smear">—</span></div>
+      <div class="stat"><span>Narrowest a real pulse can be</span><span class="v" id="m-min">—</span></div>
+      <div class="small" id="m-verdict" style="margin-top: 6px"></div>
+    </div>
+    {% include '_review.html' %}
+    <div class="card small">
+      <h2>Data</h2>
+      <dl class="kv">
+        <dt>Snippet</dt><dd>{{ snippet.samples }} × {{ '%.2f'|format(snippet.tsamp * 1000) }} ms ({{ '%.1f'|format(snippet.samples * snippet.tsamp) }} s){% if snippet.downsample > 1 %}, the search's {{ snippet.downsample }}× resolution at this DM{% endif %}</dd>
+        <dt>Cut from</dt><dd class="mono" style="font-size: 11px">{{ snippet.source }}</dd>
+        <dt>How</dt><dd>{{ snippet.how }}{% if snippet.run_name %}, search {{ snippet.run_name }}{% endif %}</dd>
+        {% if kept %}<dt>Whole beam</dt><dd>kept by the campaign ({{ kept.bytes|size }}): <span class="mono" style="font-size: 11px">{{ kept.path }}</span></dd>{% endif %}
+        <dt>Masked</dt><dd id="m-masked">{{ snippet.bad_channels|join(', ') or 'none' }}</dd>
+      </dl>
+      <p><a class="button" href="/snippet/{{ candidate.id }}.fil">Download .fil</a> <span class="muted">opens in FLITS, your_viewer or PRESTO</span></p>
+    </div>
+    {% if others %}<div class="card small"><h2>Other events in this beam</h2>
+      {% for o in others %}<div class="stat"><a href="/verify/{{ o.id }}">{{ o.type|kind }} DM {{ '%.1f'|format(o.dm) }}</a><span class="v">S/N {{ '%.1f'|format(o.snr) }}</span></div>{% endfor %}</div>{% endif %}
+  </aside>
+</div>
+{% else %}
+<div class="notice warn">No data was kept for this candidate: its beam's filterbank was deleted after the search and no copy was found on disk. Only the pipeline's plot below can be inspected. Candidates found from now on keep a snippet automatically.</div>
+<div class="grid cols-main">
+  <div>{% set open_plots = True %}{% include '_plots.html' %}</div>
+  <aside>{% include '_review.html' %}</aside>
+</div>
+{% endif %}
+{% if snippet %}{% set open_plots = False %}{% include '_plots.html' %}{% endif %}
+<script id="initial" type="application/json">{{ initial|json }}</script>
+<script id="candidate" type="application/json">{{ {'id': candidate.id, 'dm': candidate.dm, 'snr': candidate.snr, 'width': candidate.width, 'has_snippet': snippet is not none, 'fch1': snippet.get('fch1') if snippet else None}|json }}</script>
+{% endblock %}

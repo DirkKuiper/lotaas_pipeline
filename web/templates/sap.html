@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block title %}{{ sap.key }}{% endblock %}
+{% block page %}sap{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <div class="muted small"><a href="/coverage">Coverage</a> /</div>
+    <h1>{{ sap.key }} {% if info and info.observation %}<span class="muted">· {{ info.observation }} SAP{{ '%03d'|format(info.sap) }}{% if info.pointing %} · {{ info.pointing }}{% endif %}</span>{% endif %}</h1>
+    <div><span class="state" data-state="{{ sap.state }}">{{ sap.state }}</span> <span class="muted">{{ sap.detail or '' }}</span></div>
+  </div>
+</div>
+<div class="grid cols-main">
+  <div class="card">
+    <h2>Beam layout</h2>
+    {% if charts.layout %}<div id="layout" class="chart tall"></div>
+    <div class="muted small">Coloured by the brightest single-pulse cluster; a red ring marks a FETCH positive. Click a beam to open it.</div>
+    {% else %}<div class="muted">Positions appear once beams of this SAP have been searched.</div>{% endif %}
+  </div>
+  <div class="card">
+    <h2>Summary</h2>
+    <dl class="kv">
+      <dt>State</dt><dd>{{ sap.state }} · {{ sap.updated|ago }}</dd>
+      {% if sap.run_name %}<dt>Last dispatch</dt><dd class="mono">{{ sap.run_name }}</dd>{% endif %}
+      {% if info %}
+      <dt>Observed</dt><dd>{{ info.observed or '—' }}</dd>
+      <dt>Centre</dt><dd>{% if info.ra_deg is not none %}RA {{ '%.3f'|format(info.ra_deg) }}°, Dec {{ '%.3f'|format(info.dec_deg) }}°{% else %}—{% endif %}</dd>
+      <dt>Beams searched</dt><dd>{{ info.beams_searched }} of {{ files|rejectattr('state', 'equalto', 'excluded')|list|length }}</dd>
+      <dt>Fingerprints</dt><dd class="mono">{{ info.fingerprints or '—' }}</dd>
+      <dt>FETCH positives</dt><dd>{{ info.candidates or 0 }}{% if info.max_snr %} (best S/N {{ '%.1f'|format(info.max_snr) }}){% endif %}</dd>
+      {% endif %}
+      {% if flatfield %}<dt>Flatfield</dt><dd>{{ flatfield.status }}, {{ flatfield.seconds|duration }} · {{ flatfield.finished|when }}</dd>{% endif %}
+      {% if sap.sap_dir %}<dt>Prepared in</dt><dd class="mono small">{{ sap.sap_dir }}</dd>{% endif %}
+    </dl>
+    {% if requests %}
+    <h3>StageIT requests</h3>
+    {% for r in requests %}<div class="stat small"><span class="mono">{{ r.id }}</span><span>{{ r.status or '—' }} · {{ r.files }} files · {{ r.submitted|when }}</span></div>{% endfor %}
+    {% endif %}
+  </div>
+</div>
+
+{% if beams %}
+<div class="card flush" style="margin-top: 14px">
+  <h2>Searched beams</h2>
+  <div class="table-wrap">
+    <table class="sortable">
+      <thead><tr><th class="num">Beam</th>{% for s in stage_names %}<th>{{ s.replace('_', ' ') }}</th>{% endfor %}
+        <th class="num">Clusters</th><th class="num">Max S/N</th><th class="num">Periodic folds</th><th class="num">FETCH +</th><th>Fingerprint</th><th>Run</th></tr></thead>
+      <tbody>
+      {% for b in beams %}
+        {% set st = stages.get(b.item, {}) %}
+        <tr><td class="num"><a href="/beam/{{ b.item }}">{{ b.beam }}</a></td>
+          {% for s in stage_names %}{% set a = st.get(s) %}
+            <td>{% if a %}<span class="{{ 'flag ok' if a.status == 'success' else 'flag bad' if a.status == 'failed' else 'flag' }}" title="{{ a.seconds|duration }}">{{ '✓' if a.status == 'success' else '✗' if a.status == 'failed' else '…' }}</span>{% else %}<span class="muted">·</span>{% endif %}</td>
+          {% endfor %}
+          <td class="num">{{ b.clusters if b.clusters is not none else '—' }}</td><td class="num">{{ '%.1f'|format(b.max_cluster_snr) if b.max_cluster_snr else '—' }}</td>
+          <td class="num">{{ b.periodic_folds if b.periodic_folds is not none else '—' }}</td>
+          <td class="num">{% if b.positives %}<strong>{{ b.positives }}</strong>{% else %}0{% endif %}</td>
+          <td class="mono small">{{ b.fp16[:8] }}</td><td class="small">{{ b.run_name }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid cols-2" style="margin-top: 14px">
+  <div class="card flush">
+    <h2>Archive files</h2>
+    <div class="table-wrap">
+      <table class="sortable">
+        <thead><tr><th class="num">Beam</th><th>State</th><th>dCache</th><th class="num">Requests</th><th class="num">Failures</th><th>Updated</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for f in files %}
+          <tr><td class="num">{{ f.beam }}</td><td><span class="state" data-state="{{ f.state }}">{{ f.state }}</span></td><td>{{ f.locality or '—' }}</td>
+          <td class="num">{{ f.submissions }}</td><td class="num">{{ f.failures }}</td><td class="when" data-sort="{{ f.updated }}">{{ f.updated|ago }}</td><td class="detail" title="{{ f.detail or '' }}">{{ (f.detail or '')|truncate(90) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card flush">
+    <h2>History</h2>
+    <div class="table-wrap">
+      <table class="sortable">
+        <thead><tr><th>When</th><th>Event</th><th>Subject</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for e in events %}
+          <tr><td class="when" data-sort="{{ e.time }}" title="{{ e.time|when }} UTC">{{ e.time|when }}</td><td>{{ e.kind }}</td><td class="mono small">{{ e.subject }}</td><td class="detail" title="{{ e.detail }}">{{ e.detail|truncate(120) }}</td></tr>
+        {% else %}<tr><td colspan="4" class="muted">No events recorded for this SAP.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script id="charts" type="application/json">{{ charts|json }}</script>
+{% endblock %}

@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block title %}{{ candidate.item|beam }} P {{ '%.4f'|format(candidate.period or 0) }} s{% endblock %}
+{% block page %}verify{% endblock %}
+{% block head %}<script src="/static/review.js" defer></script><script src="/static/fold.js" defer></script>{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <div class="muted small"><a href="/candidates?type=periodic">Periodic candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
+    <h1>Periodic candidate · P = {{ '%.9f'|format(fold.get('refined_period_seconds') or candidate.period or 0) }} s · DM {{ '%.2f'|format(candidate.dm) }}</h1>
+    <div class="muted">search −log₁₀ p = {{ '%.2f'|format(candidate.statistic) }} (nominal, not Gaussian S/N) · {{ fold.get('harmonic_count') }} harmonics{% if fold.get('rfi_like') %} · <span class="flag bad">flagged RFI-like</span>{% endif %}{% if candidate.pilot %} · <span class="flag">pilot run</span>{% endif %}</div>
+  </div>
+  {% include '_queue.html' %}
+</div>
+<div class="viewer">
+  <div class="grid">
+    <div class="card"><h2>Folded profile</h2><div id="profile" class="chart" style="height: 220px"></div></div>
+    <div class="grid cols-2">
+      <div class="card"><h2>Across the observation</h2><div id="subints" class="chart" style="height: 320px"></div>
+        <div class="muted small">A real pulsar stays at one phase for the whole hour; RFI comes and goes.</div></div>
+      <div class="card"><h2>Across the band</h2><div id="subbands" class="chart" style="height: 320px"></div>
+        <div class="muted small" id="subbands-note">A dispersed pulsar at the right DM lines up in every subband.</div></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><h2>Search response against DM</h2><div id="dmcurve" class="chart"></div></div>
+      <div class="card"><h2>Fold χ² against trial frequency</h2><div class="muted small">The refinement around the search frequency; the dotted line is the frequency folded.</div><div id="chi2" class="chart"></div></div>
+    </div>
+  </div>
+  <aside class="grid" style="align-content: start">
+    <div class="card small">
+      <h2>Search record</h2>
+      <dl class="kv">
+        <dt>Period</dt><dd>{{ '%.9f'|format(fold.get('refined_period_seconds') or 0) }} s (topocentric)</dd>
+        <dt>Search period</dt><dd>{{ '%.9f'|format(fold.get('period_seconds') or 0) }} s</dd>
+        <dt>DM</dt><dd>{{ fold.get('dm') }} pc cm⁻³ (step {{ fold.get('dm_step') }})</dd>
+        <dt>Statistic</dt><dd>{{ '%.2f'|format(fold.get('statistic') or 0) }}, summed power {{ '%.1f'|format(fold.get('summed_power') or 0) }}</dd>
+        <dt>Fold χ²</dt><dd>{{ '%.1f'|format(fold.get('fold_chi2') or 0) }} over {{ fold.get('fold_bins') }} bins</dd>
+        <dt>Sifting</dt><dd>{{ fold.get('sift_status') }}, group of {{ fold.get('sift_group_size') }}</dd>
+        <dt>Catalogue</dt><dd>{{ candidate.pulsar or (fold.get('catalogue_matches') or [])|map(attribute='name')|join(', ') or 'no association' }}</dd>
+        <dt>Duration</dt><dd>{{ '%.0f'|format(fold.get('observation_seconds') or 0) }} s at {{ '%.2f'|format((fold.get('effective_sampling_seconds') or 0) * 1000) }} ms</dd>
+      </dl>
+    </div>
+    {% include '_review.html' %}
+  </aside>
+</div>
+{% include '_plots.html' %}
+<script id="initial" type="application/json">{{ initial|json }}</script>
+<script id="candidate" type="application/json">{{ {'id': candidate.id, 'dm': candidate.dm, 'period': fold.get('refined_period_seconds') or candidate.period}|json }}</script>
+{% endblock %}

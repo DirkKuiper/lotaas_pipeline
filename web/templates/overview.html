@@ -1,0 +1,122 @@
+{% extends 'base.html' %}
+{% block title %}Overview{% endblock %}
+{% block page %}overview{% endblock %}
+{% block content %}
+{% set searched = saps.get('searched', 0) %}
+{% set nfiles = files.values()|sum - files.get('excluded', 0) %}
+<div class="page-head">
+  <div>
+    <h1>Campaign overview</h1>
+    <div class="muted">{{ total }} SAPs and {{ nfiles }} beam files in the LT5_004 inventory (the incoherent beam 12 excluded)</div>
+  </div>
+  <div class="muted small">refreshes every minute</div>
+</div>
+
+<div class="tiles">
+  <div class="tile"><div class="label">SAPs searched</div>
+    <div class="value">{{ searched }} <span class="muted small">/ {{ total }}</span></div>
+    <div class="bar"><span style="width: {{ (100 * searched / total) if total else 0 }}%"></span></div></div>
+  <div class="tile"><div class="label">Beams searched (production)</div>
+    <div class="value">{{ campaign_beams }}</div>
+    <div class="sub">{{ beams_searched }} including pilot runs</div></div>
+  <div class="tile"><div class="label">Files converted</div>
+    <div class="value">{{ files.get('converted', 0) }} <span class="muted small">/ {{ nfiles }}</span></div>
+    <div class="bar"><span style="width: {{ (100 * files.get('converted', 0) / nfiles) if nfiles else 0 }}%; background: var(--s-converted)"></span></div></div>
+  <div class="tile"><div class="label">Last 24 hours</div>
+    <div class="value">{{ beams_day }} <span class="muted small">beams searched</span></div>
+    <div class="sub">{{ files_day }} files off tape and converted</div></div>
+  <div class="tile"><div class="label">Remaining at that pace</div>
+    <div class="value">{% if eta_days %}{{ '%.0f'|format(eta_days) }} <span class="muted small">days</span>{% else %}—{% endif %}</div>
+    <div class="sub">{{ to_search }} beams to search; the slower of staging and search</div></div>
+  <div class="tile"><div class="label">Kept for review</div>
+    <div class="value">{{ kept|length }} <span class="muted small">beams</span></div>
+    <div class="sub">{{ kept_bytes|size }} of flatfielded data the campaign keeps</div></div>
+  <a class="tile" href="/verify" style="color: inherit; text-decoration: none"><div class="label">Waiting for review</div>
+    <div class="value">{{ unreviewed }}</div><div class="sub">FETCH positives and known pulsars →</div></a>
+</div>
+
+{% for run in health.get('dispatch') or [] %}
+  {% for node, stages in (run.get('stages') or {}).items() %}
+    {% set slow = (stages or [])|selectattr('seconds', 'gt', 3600)|list %}
+    {% if slow %}
+    <div class="notice warn">
+      <strong>{{ run.run_name }}</strong> on {{ node }} has run {{ (now() - run.started)|duration }};
+      {{ slow|length }} search process{{ 'es' if slow|length > 1 }} running over an hour:
+      {% for s in slow %}<a href="/beam/{{ s.beam }}">{{ s.beam|beam }}</a> ({{ s.search or s.script }}, {{ s.seconds|duration }}){{ ', ' if not loop.last }}{% endfor %}.
+      The run, and the next dispatch, wait for them.
+    </div>
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% if not health.get('driver', {}).get('running') %}
+<div class="notice bad"><strong>The campaign driver is not running.</strong> Nothing is being staged, retrieved or dispatched.</div>
+{% endif %}
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>SAPs by state</h2>
+    <div id="sap-bar" style="height: 54px"></div>
+    <div class="chips">{% for s in state_order if saps.get(s) %}<a class="chip" href="/coverage#{{ s }}"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s }} {{ saps[s] }}</a>{% endfor %}</div>
+  </div>
+  <div class="card">
+    <h2>Beam files by state</h2>
+    <div id="file-bar" style="height: 54px"></div>
+    <div class="chips">{% for s in file_order if files.get(s) %}<span class="chip"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s }} {{ files[s] }}</span>{% endfor %}</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top: 14px">
+  <h2>Throughput, last {{ charts.hours }} hours</h2>
+  <div id="throughput" class="chart"></div>
+</div>
+
+<div class="grid cols-main" style="margin-top: 14px">
+  <div class="card flush">
+    <h2>Recent events</h2>
+    <div class="table-wrap">
+      <table class="sortable">
+        <thead><tr><th>When</th><th>Event</th><th>Subject</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for e in events %}
+          <tr><td class="when" data-sort="{{ e.time }}" title="{{ e.time|when }} UTC">{{ e.time|ago }}</td><td>{{ e.kind }}</td>
+          <td>{% if e.subject and e.subject.startswith('L') and '_SAP' in e.subject and e.subject|length < 20 %}<a href="/sap/{{ e.subject }}">{{ e.subject }}</a>{% else %}<span class="mono">{{ e.subject }}</span>{% endif %}</td>
+          <td class="detail" title="{{ e.detail }}">{{ e.detail|truncate(160) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="grid" style="align-content: start">
+    <div class="card">
+      <h2>In flight</h2>
+      {% for s in dispatched %}
+        <div class="stat"><span><a href="/sap/{{ s.key }}">{{ s.key }}</a> <span class="muted small">{{ s.run_name }}</span></span><span class="v">{{ (now() - s.updated)|duration }}</span></div>
+      {% else %}<div class="muted">No SAP is being searched.</div>{% endfor %}
+      {% for run in health.get('dispatch') or [] %}{% for node, stages in (run.get('stages') or {}).items() %}
+        <h3>{{ node }}: {{ (stages or [])|length }} search process{{ 'es' if (stages or [])|length != 1 }}</h3>
+        {% for s in (stages or [])[:8] %}
+          <div class="stat small"><span><a href="/beam/{{ s.beam }}">{{ s.beam|beam }}</a> {{ s.search or s.script }}</span><span class="v {{ 'flag' if s.seconds > 3600 }}">{{ s.seconds|duration }}</span></div>
+        {% endfor %}
+      {% endfor %}{% endfor %}
+    </div>
+    <div class="card">
+      <h2>Needs attention</h2>
+      {% for s in attention %}
+        <div class="stat"><span><a href="/sap/{{ s.key }}">{{ s.key }}</a><br><span class="muted small">{{ s.detail }}</span></span></div>
+      {% else %}<div class="muted">No SAP is waiting for attention.</div>{% endfor %}
+      {% if attention %}
+        <p class="small muted">Requeue unsearched beams: <code class="copy" data-copy="python3 -m euroflash.campaign retry --root {{ health.get('driver', {}).get('options', {}).get('root', '/shared/results/dkuiper/lotaas/campaign') }}" title="Click to copy">python3 -m euroflash.campaign retry --root …</code></p>
+      {% endif %}
+    </div>
+    <div class="card">
+      <h2>Latest FETCH positives</h2>
+      {% for c in review %}
+        <div class="stat"><span><a href="/verify/{{ c.id }}">{{ c.item|beam }}</a><br><span class="muted small">DM {{ '%.1f'|format(c.dm) }} · S/N {{ '%.1f'|format(c.snr) }}{% if c.slack_sent %} · on Slack{% endif %}</span></span>
+          <span>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% else %}<span class="muted small">unreviewed</span>{% endif %}</span></div>
+      {% else %}<div class="muted">None yet.</div>{% endfor %}
+    </div>
+  </div>
+</div>
+<script id="charts" type="application/json">{{ charts|json }}</script>
+<script>setTimeout(() => location.reload(), 60000);</script>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends 'base.html' %}
+{% block title %}Staging{% endblock %}
+{% block page %}staging{% endblock %}
+{% block content %}
+{% set active = requests|selectattr('active')|list %}
+<div class="page-head">
+  <div>
+    <h1>Staging from the LTA</h1>
+    <div class="muted">{{ active|length }} StageIT requests with files still to fetch. The driver asks again after {{ '%g'|format(restage) }} h on tape once StageIT reports a request final, and after {{ '%g'|format(timeout) }} h in any case. A file is fetched only when dCache reports it on disk.</div>
+  </div>
+</div>
+<div class="card flush">
+  <h2>Requests</h2>
+  <div class="table-wrap">
+    <table class="sortable">
+      <thead><tr><th>Request</th><th>SAP</th><th>Submitted</th><th class="num">Age</th><th>StageIT</th><th class="num">Files</th>
+        <th class="num">On tape</th><th class="num">On disk</th><th class="num">Fetching</th><th class="num">Converted</th><th class="num">Failed</th><th>Progress</th></tr></thead>
+      <tbody>
+      {% for r in requests %}
+        {% set done = (r.converted or 0) + (r.excluded or 0) %}
+        <tr>
+          <td class="mono">{{ r.id }}</td><td><a href="/sap/{{ r.sap_key }}">{{ r.sap_key }}</a></td>
+          <td class="when" data-sort="{{ r.submitted }}">{{ r.submitted|when }}</td>
+          <td class="num {{ 'flag' if r.active and r.age_hours and r.age_hours > restage }}" data-sort="{{ r.age_hours }}">{{ '%.1f h'|format(r.age_hours) if r.age_hours is not none }}</td>
+          <td>{{ r.status or '—' }}</td><td class="num">{{ r.files }}</td>
+          <td class="num">{{ r.waiting or 0 }}</td>
+          <td class="num">{{ r.online or 0 }}</td><td class="num">{{ r.working or 0 }}</td>
+          <td class="num">{{ r.converted or 0 }}</td><td class="num {{ 'flag bad' if r.failed }}">{{ r.failed or 0 }}</td>
+          <td style="min-width: 120px"><div class="bar"><span style="width: {{ (100 * done / r.tracked) if r.tracked else 0 }}%; background: var(--s-converted)"></span></div></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="grid cols-2" style="margin-top: 14px">
+  <div class="card">
+    <h2>Time on tape</h2>
+    {% if charts.latency %}<div id="latency" class="chart"></div>
+    <div class="muted small">{{ charts.latency|length }} files, request submission to dCache reporting them on disk.</div>
+    {% else %}<div class="muted">Measured from the state changes the index records; the first files will appear here once they come off tape after the index started.</div>{% endif %}
+  </div>
+  <div class="card">
+    <h2>Staging events, last 72 hours</h2>
+    <div id="event-kinds" class="chart"></div>
+  </div>
+</div>
+
+<div class="grid cols-2" style="margin-top: 14px">
+  <div class="card flush">
+    <h2>Files resubmitted or failing</h2>
+    <div class="table-wrap">
+      <table class="sortable">
+        <thead><tr><th>File</th><th>State</th><th class="num">Requests</th><th class="num">Failures</th><th>dCache</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for f in troubled %}
+          <tr><td class="mono">{{ f.name }}</td><td><span class="state" data-state="{{ f.state }}">{{ f.state }}</span></td>
+          <td class="num">{{ f.submissions }}</td><td class="num">{{ f.failures }}</td><td>{{ f.locality or '—' }}</td><td class="detail" title="{{ f.detail or '' }}">{{ (f.detail or '')|truncate(160) }}</td></tr>
+        {% else %}<tr><td colspan="6" class="muted">No file has needed a second request or failed.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card flush">
+    <h2>Staging log</h2>
+    <div class="table-wrap">
+      <table class="sortable">
+        <thead><tr><th>When</th><th>Event</th><th>Subject</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for e in events %}
+          <tr><td class="when" data-sort="{{ e.time }}" title="{{ e.time|when }} UTC">{{ e.time|ago }}</td><td>{{ e.kind }}</td><td class="mono">{{ e.subject }}</td><td class="detail" title="{{ e.detail }}">{{ e.detail|truncate(160) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script id="charts" type="application/json">{{ charts|json }}</script>
+<script>setTimeout(() => location.reload(), 120000);</script>
+{% endblock %}
