@@ -1,10 +1,12 @@
 # LOTAAS reprocessing pipeline
 
-A single-pulse search over LOTAAS beams from the LOFAR LTA, run on the
-EuroFlash cluster. It stages and retrieves PSRFITS from the archive, converts
-and flatfields it, dedisperses on GPU, searches with a boxcar matched filter,
-clusters the crossings and classifies survivors with FETCH, recording every
-stage in a campaign ledger.
+A single-pulse and periodicity search over LOTAAS beams from the LOFAR LTA,
+run on the EuroFlash cluster. It stages and retrieves PSRFITS from the archive,
+converts and flatfields it, dedisperses on GPU, searches with a boxcar matched
+filter plus a zero-acceleration FFT/harmonic-summing search, clusters the
+crossings and classifies single-pulse survivors with FETCH, and folds periodic
+candidates into retained diagnostic plots. Each search has its own checkpoint
+in the campaign ledger.
 
 There is no Slurm. Work is dispatched over SSH to named GPU nodes, and each
 stage runs inside an Apptainer image that is part of the run's identity.
@@ -13,7 +15,7 @@ stage runs inside an Apptainer image that is part of the run's identity.
 
 ```
 euroflash/              campaign orchestration: staging, dispatch, ledger, reporting
-pipeline/               the two per-beam stages, dedispersion then search
+pipeline/               per-beam dedispersion, independent searches, finalization
 preproc/                PSRFITS to filterbank conversion, and flatfielding
 lotaas_reprocessing/    the science: dedispersion, matched filter, clustering, classifier
 postproc/               Slack notification, and post-detection analysis
@@ -39,7 +41,18 @@ results keep their provenance, but in-flight resume state does not carry over.
 
 ## Quick start
 
-Retrieve a batch, prepare it locally, then dispatch the search:
+Run the campaign continuously: stage a rolling window of SAPs, retrieve each file
+as soon as dCache has it on disk, convert it and delete the raw data, flatfield
+each complete SAP and search it on the GPU nodes.
+
+```bash
+setsid nohup python3 -m euroflash.campaign run --root RESULTS_ROOT/campaign \
+  --inventory RESULTS_ROOT/lt5_004-inventory.txt --ledger CAMPAIGN.sqlite \
+  --dispatch-nodes efc-gpu-01 --control-dir ~/.ssh/control > campaign.log 2>&1 &
+python3 -m euroflash.campaign status --root RESULTS_ROOT/campaign
+```
+
+Or retrieve a batch, prepare it locally, then dispatch the search by hand:
 
 ```bash
 python3 staging/stage_and_extract.py srm_list.txt stage-directory --submit-only
@@ -47,11 +60,11 @@ python3 -m euroflash.stage_campaign stage-directory \
   --destination DATA_DIR --ledger CAMPAIGN.sqlite --workers 2
 
 python3 -m euroflash.run --input DATA_DIR --work PREPARED \
-  --ledger CAMPAIGN.sqlite --prepare-only --preprocess-workers 4
+  --ledger CAMPAIGN.sqlite --prepare-only --preprocess-workers 4 --delete-raw
 
 python3 -m euroflash.cluster --input PREPARED/data --work RESULTS \
   --ledger CAMPAIGN.sqlite --nodes efc-gpu-01 --control-dir ~/.ssh/control \
-  --run-name my-batch --gpus 0,1 --cpu-workers 24
+  --run-name my-batch --gpus 0,1 --workers-per-gpu 3 --cpu-workers 24
 ```
 
 Then report, and announce candidates from the head node:
@@ -84,6 +97,8 @@ apptainer exec --nv --cleanenv --env PYTHONPATH="$PWD" \
   validated, and the limitations that still stand
 - [docs/capacity.md](docs/capacity.md) — measured stage timings and what they
   do and do not imply for a one-year campaign
+- [docs/periodicity-validation.md](docs/periodicity-validation.md) — combined GPU runs,
+  real pulsar recovery, failure recovery and measured periodicity cost
 - [SECURITY.md](SECURITY.md) — credential handling, and a token still awaiting
   rotation
 

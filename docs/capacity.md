@@ -3,11 +3,32 @@
 What has been measured, and what it does and does not imply for a one-year
 campaign.
 
-> **The stage timings below predate the matched-filter rewrite.** That change
-> made a full-length trial 3.7× faster and altered what the search detects, so
-> every CPU-stage number here is stale and every derived forecast with it. They
-> are kept because they are the last measurements actually taken; re-measure
-> before planning on them.
+## Current measurements, 22–23 September
+
+These replace the older stage timings further down, which are kept for their
+provenance. Measured on efc-gpu-01 and the head node with the current code and
+the production image; each number is for one hour-long beam.
+
+| stage | as it was | now |
+| --- | --- | --- |
+| conversion, PSRFITS → filterbank | 213 s alone, 240–300 s at 12-way | **~14 s** (integer-first reduction) |
+| GPU stage, per GPU | 47–52 s per beam, GPU busy ~15 s | **26.8 s per beam** with 3 workers sharing each GPU |
+| periodicity search | 227 s (FFT 88 s of it) | **128–131 s** (fast FFT lengths, no false edge peaks) |
+| single-pulse matched filter | ~65 s | unchanged |
+| FETCH, per candidate | 1.4 s at DM 10 → 40 s at DM 8,000; ~23 s per beam to load | unchanged; ~3.4 s per beam on the measured SAP |
+| download | ~480–530 MB/s per stream | unchanged; 4 streams, HTTP 429 now backs off |
+| raw data kept per beam | ~11.3 GB (tar + FITS + two filterbanks) | receipts only; flatfielded filterbank until searched |
+
+The periodicity search is memory-bound. On one 96-core node, periodicity
+throughput peaks at ~24 concurrent searches and falls beyond. The smooth-length
+FFTs double that peak. Add capacity with more nodes, not more workers per node.
+
+**Tape recall decides the campaign length.** On 22 September, 595 of 600
+randomly sampled LT5_004 files were `NEARLINE` (tape only). One ~60-file request
+at a time completed in 8–11 hours: about 0.65–1.1 TB a day, or roughly a year
+for the ~315 TB inventory. After these changes compute needs about 6 days on two
+GPUs. `euroflash.campaign` now keeps several SAP requests in flight; the rate
+it sustains is the number to measure next.
 
 ## The calculation
 
@@ -75,26 +96,66 @@ rejected the second. Report in
 artificial signals kept outside the campaign database, and a functional check
 rather than a sensitivity study.
 
-## Outstanding: the throughput test
+## The throughput test that measured nothing
 
-Request `991619` is a bounded throughput test of 666 files from three complete
-observations, about 3.25 TB. StageIT reported them online while SURF returned
-HTTP 403 `Permission denied for GET on path /lt5_004/1261459/...`, though a
-byte-range GET on an earlier request still succeeded (206).
+Request `991619` was a bounded throughput test of 666 files from three complete
+observations, about 3.25 TB. StageIT reported all 666 online ten minutes after
+submission. SURF returned HTTP 403 `Permission denied for GET on path
+/lt5_004/1261459/...`.
 
-That is the signature of a path-scoped macaroon presented for a directory it
-does not cover. The request spans three observations, so StageIT issues one
-macaroon per path, and the downloader chose whichever expired last. Tokens are
-now ordered by whether their path caveat covers the URL, and a 401 or 403 falls
-through to the remaining tokens.
+The first diagnosis was a path-scoped macaroon presented for a directory it did
+not cover. The live service disproved it on 22 September:
 
-**This diagnosis rests on the recorded evidence in
-`benchmarks/download-access-check.json` and has not been confirmed against the
-live service.** Confirm before rerunning the throughput test:
+- The request carries one macaroon, scoped to the whole projects tree.
+- That macaroon reads other observations' files.
+- Another request's working macaroon is refused on these files.
+- dCache's namespace API reports every sampled file of the request as
+  `NEARLINE`: on tape, never staged.
+
+The door refuses reads from tape with 403. The token ordering added for the
+first diagnosis is harmless, but the fix is to trust dCache locality rather
+than StageIT's online list. `euroflash.campaign` does that. These observations
+have since been requested again through the driver and are coming online.
+
+## Periodicity capacity measurement
+
+Measure the complete periodic CPU path inside the runtime:
 
 ```bash
-python3 -m euroflash.access_check 991619 --output access-check.json
+apptainer exec --cleanenv --env PYTHONPATH="$PWD" \
+  containers/euroflash-runtime.sif python -m euroflash.periodicity_benchmark \
+  PERIODIC_DM_TRIALS --metadata METADATA_YAML --max-trials 100 \
+  --output periodicity-benchmark.json
 ```
 
-Until sustained tape and download throughput are measured, no end-to-end
-campaign duration is supportable.
+Omit `--max-trials` for a full-beam measurement. A bounded sample spans the
+numeric DM grid and is labelled as sampled coverage. This includes reading,
+search, sifting, folding, plotting and product writing; it excludes GPU
+production and the single-pulse branch. Benchmark work never updates a campaign
+ledger. The per-beam summary also separates search, sift and fold timings.
+
+At 457,728 input samples the production settings generate 7,856 periodic trials,
+sharing 1,844 exact `(DM, downsample)` pairs with the 4,407 single-pulse trials.
+Unique trial payload grows from 3.60 GB to 4.88 GB per beam, excluding small
+metadata files. The combined disk guard includes this extra payload. Worker
+counts must be chosen from full-beam measurements, including peak process RSS,
+RFI candidate volume and the retained-trial backlog. The historical timings
+above remain unsuitable as measurements of this combined implementation.
+
+
+On 22 September, a two-GPU/two-CPU-worker combined run on L559289/SAP000 beams
+13 and 15 measured 51.3–51.9 s for GPU production/validation, 73.7–74.0 s for
+single-pulse searching, and **231.4–235.7 s for periodicity**, including folds and
+plots. Each searched all 7,856 periodic trials. The periodic process peak RSS
+was 1.24–1.25 GB. See [the validation record](periodicity-validation.md) for
+scope and exact evidence. These measurements do not establish sustained
+24-worker throughput or an archive-to-results campaign duration.
+
+
+A full-grid run on the bright real pulsar J0323+3944 additionally measured
+49.5 s for GPU production/validation, 71.8 s for the single-pulse branch and
+248.3 s for periodicity. The latter included 29,903 raw peaks, 12.1 s sifting,
+and 16 folds; peak process RSS was 1.265 GB. This used unflatfielded pilot input,
+so it checks bright-source workload and recovery, not production flatfield
+sensitivity. The bounded sifting allowance is 100 million comparisons, with
+50,000 raw candidates per beam; overflow still fails explicitly.

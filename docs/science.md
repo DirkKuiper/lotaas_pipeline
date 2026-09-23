@@ -5,6 +5,11 @@ what has been measured from what has only been made to run.
 
 ## The per-beam path
 
+Each SAP has 74 beams: 73 coherent tied-array beams and one incoherent beam,
+beam 12, which the archive files under `incoherentstokes/`. The incoherent beam
+is excluded from conversion and search. The central coherent beams 13–73
+define each SAP's flatfield.
+
 1. **Convert.** PSRFITS to 32-bit filterbank, scrunching 4 in frequency and 16
    in time. 2-bit values decode as 0–3; the original unpacking left-shifted
    them. Frequency headers derive from `DAT_FREQ`.
@@ -25,6 +30,107 @@ what has been measured from what has only been made to run.
 6. **Cluster.** Threshold crossings grouped into events on the trial grid.
 7. **Classify.** Survivors above DM 10 and S/N 7, vetted against ATNF, scored
    by six FETCH models, plotted and recorded.
+8. **Periodicity.** A separate DM grid shares preprocessing and exact
+   `(DM, downsample)` trials with the single-pulse search. Its CPU stage runs
+   fractional-frequency FFT harmonic sums, sifts candidates, refines periods
+   and folds a bounded shortlist. Single-pulse and periodicity attempts have
+   independent ledger checkpoints; `classify` succeeds only after both enabled
+   searches and their retained products are complete.
+
+## Periodicity search and products
+
+The search excludes the DM-dependent circular-dedispersion tail before estimating
+noise or searching. Nonfinite, constant, truncated and wholly contaminated trials
+fail explicitly. `periodicity_coverage.json` records valid duration, trimming and
+accessible period limits for every DM. At the usual 7.864 ms input sampling, the
+Nyquist period is 15.729 ms; at downsampling 128 it is 2.013 s. The 16 ms configured
+lower limit does not imply that all DMs can reach it. Preprocessing has already
+averaged 16 native samples; this is not a millisecond-pulsar search.
+
+A twice-padded real FFT evaluates half-bin frequencies. For an H-harmonic sum,
+fundamental templates are spaced at 1/(2 H T), with each harmonic evaluated at
+its nearest half-bin frequency. Every harmonic stays within one quarter of an
+independent Fourier bin. This avoids the former large loss when integer-only
+harmonic samples missed fractional-bin signals. Search boundaries are included.
+Each mean-subtracted trial is zero-padded to the next 7-smooth length before
+the FFT (`fft_fast_lengths`). Lengths with a large prime factor otherwise fall
+back to a several-times slower algorithm; padding keeps every sample and only
+makes the Fourier grid at most ~2% finer.
+
+Noise means are estimated from medians of approximately independent native FFT
+powers, corrected for the exact finite-sample exponential median. Blocks grow
+from 31 bins at low frequency to `red_noise_window_bins` (257 by default). No
+block is shorter than 31 bins, and the real-only Nyquist coefficient, which is
+not exponentially distributed, is excluded. Before 23 September neither held.
+Trials whose length left a final block of one bin, the Nyquist term,
+estimated the noise at the top of the band from that single value, sometimes
+~1000× too low. The whitened power there rose ~100-fold. The result was false
+periodicities at each trial's own Nyquist period (2 × downsample × tsamp) and
+its sub-harmonics, at unrelated DMs. These filled the fold shortlist of every
+normal beam checked; on beam 13, 42 raw peaks fell to none. The
+ranking statistic is **minus log10 of the nominal Gamma(H, 1) survival
+probability**, computed stably for integer H. The default threshold is 12; it
+is not Gaussian sigma. See the [SciPy gamma survival definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.gammaincc.html).
+Noise estimation, Fourier correlations, coloured noise and RFI mean these are
+nominal per-template values, not calibrated survey false-alarm probabilities.
+White-noise and coloured-noise injections are regression checks; neither proves
+survey completeness or universal sensitivity.
+
+The raw JSONL is streamed before sifting. The per-trial, per-beam and
+comparison limits bound what is **retained**, not what is searched.
+
+- **Per trial.** Every template of every trial is searched. A trial with more
+  than `max_candidates_per_trial` (100) peaks keeps its strongest distinct
+  frequencies, one per Fourier bin.
+- **Per beam.** The strongest `max_candidates_per_beam` (20,000) are sifted.
+  If their neighbourhoods would exceed `max_sift_comparisons` (200 million),
+  that set is halved until it fits.
+- **Recording.** Candidates left unsifted keep their rows, labelled with the
+  reason. The coverage report and summary record peaks found, dropped and
+  unsifted per trial and per beam.
+
+These limits replace hard failures. Under them, the brightest sources in the
+survey ended the search: J0323+3944 put up to 1,190 peaks in a trial and
+aborted its beam at DM 25.7, leaving nothing above covered. The same beam now
+completes all 7,856 trials. The pulsar's harmonics sift into one group, folded
+at P = 3.031791 s, DM 26.2, with a catalogue match.
+
+Sifting checks adjacent period buckets, including harmonic relationships, and
+indexes each DM step separately, so coarse high-DM trials do not expand every
+low-DM neighbourhood. Any configured RFI
+line in a summed harmonic flags the candidate; flagged evidence is retained.
+
+Products retained after successful cleanup are:
+
+- `periodicity_raw_candidates.jsonl`: frequency, period, DM, sampling, valid
+  duration, harmonic count, nominal statistic and RFI harmonics for every peak.
+- `periodicity_candidates.jsonl`: raw rows with group, relationship and ranking
+  annotations. `best_candidates` counts group representatives, not discoveries.
+- `periodicity_coverage.json`: actual valid data and searched period bounds.
+- `periodicity_folded_candidates.jsonl` and `periodicity_plots/`: up to 16 group
+  representatives, ordered with unflagged candidates first. Each has a local
+  period refinement, profile, time-phase diagnostic, PNG and numerical NPZ.
+  The top unflagged fold also receives a frequency-phase panel from the original
+  filterbank. Catalogue context matches position, DM and period; it never creates
+  or vetoes a detection. Catalogue unavailability is recorded without losing
+  search products. Periods are topocentric; catalogue matching allows Doppler
+  differences and propagates spin frequency where a catalogue derivative exists.
+- `periodicity_summary.json`: completion manifest, configuration, counts, stage
+  timings and process peak RSS. The latter includes the whole periodicity process,
+  including folds and catalogue loading, and is not a GPU memory measurement.
+
+The shortlist is a bounded follow-up policy, not a claim that all candidates were
+folded. All raw and sifted rows remain available. Fold chi-square and profile bin
+noise are diagnostic quantities and are not promoted to calibrated significance.
+Acceleration searches and an FFA are not implemented; this is explicitly a
+zero-acceleration FFT search.
+
+Trial SHA256 manifests cover both DM directories and detect same-size corruption
+on resume. A dedispersion retry atomically replaces reused hard links. Successful
+single-pulse and periodicity checkpoints survive a failure in the other branch;
+either branch is attempted even if the other fails. Cleanup requires both
+completion manifests and all named fold products. Periodicity notifications are
+an explicit, idempotent head-node operation, with pilots labelled as validation.
 
 ## The matched filter
 
@@ -84,7 +190,14 @@ with any pulsar in 78 square degrees was recorded as a redetection of it. The
 plot footer still lists the full cone, with separations, so a human keeps the
 context the veto does not use.
 
-Survivors are scored by six FETCH models and accepted above 0.5. **A rejection
+Survivors are scored by six FETCH models and accepted above 0.5. Their DM–time
+input is computed only over the 256 decimated samples FETCH receives, not the
+whole chunk of twice the dispersion sweep that `your` dedisperses at 256 DMs.
+Channels are summed in the same order and precision, so the input is
+bit-identical, and the original path remains wherever the crop would reach
+decimation padding. At DM 3,000 and above this took ~40 s per candidate. A few
+RFI-rich beams, with 20–100 candidates near DM 10,000, classified for over an
+hour while the GPUs idled. **A rejection
 is now recorded** as a `rejected` detection row with its probability, and
 logged. It previously left no plot, no row and no log line, so a discarded
 candidate was indistinguishable from one never found.
@@ -126,6 +239,13 @@ benchmark does not, and neither does a functional injection test. The
 clustering and classification policy still requires scientific review before
 any survey candidate claim.
 
+**Periodicity limitations.** Effective sampling and pulse-width sensitivity
+vary by DM. The implementation is zero acceleration, with topocentric periods,
+no FFA and no automated periodic-candidate classifier. Red-noise whitening and
+thresholds need continuing validation across real observing conditions. A
+catalogue match plus a folded diagnostic supports a recovery check, not a new
+pulsar claim.
+
 ## What the tests cover
 
 Dispersed pulse recovery at the right time; CPU/GPU agreement; the matched
@@ -137,8 +257,14 @@ fingerprint stability across image copies and batch growth; token/site
 association and macaroon fallback; tar traversal; node health; disk reclamation;
 and the notifier's send-once, limit and credential behaviour.
 
-Constant signals yield no events. Short pilot filter windows are bounded by the
-observation duration.
+Constant single-pulse inputs yield no events; a constant periodic trial fails
+explicitly because it has no measurable noise. Short pilot filter windows are
+bounded by the observation duration.
+
+Periodicity adds fractional-bin, boundary, noise, RFI-harmonic, dispersed-train,
+long-period, folding, manifest-corruption and independent-branch recovery tests.
+[The periodicity validation record](periodicity-validation.md) includes full-grid
+combined runs and recovery of J0323+3944 from real data.
 
 ## Reference recovery target
 
@@ -160,4 +286,8 @@ matching accepted detection and successful search and classification stages;
 the reference S/N and FETCH scores are not imposed on new results. The report
 identifies the run fingerprint and refuses an ambiguous result directory.
 
-Waiting for tape does not establish pulse recovery.
+The periodic source J0323+3944 has now been recovered with both targeted and
+full DM grids from this beam; see [the validation record](periodicity-validation.md).
+The supplied individual pulse at 2465.653 s has not been recovered as an accepted
+single-pulse detection by these runs. The complete flatfield reference remains
+unavailable; the successful periodic recovery used unflatfielded pilot input.
