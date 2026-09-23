@@ -301,6 +301,21 @@ the same fingerprint, or whose last attempt failed longer ago than the
 retention window (seven days by default). It reads the ledger read-only and
 reports before it deletes.
 
+### Raw data left by earlier retrievals
+
+Tars and PSRFITS from `stage_campaign` runs made before raw data was deleted
+automatically can be removed once they are no longer needed:
+
+```bash
+python3 -m euroflash.reclaim --raw RESULTS_ROOT/data --ledger CAMPAIGN.sqlite   # add --apply
+```
+
+An archive qualifies when the ledger shows its beam converted, with the
+filterbank still on disk, or searched in production, or when it is the
+excluded incoherent beam. Anything without such evidence is kept. Receipts
+and extraction markers stay. On 23 September this reclaimed 1.79 TB: all 178
+archives of the earlier manual staging.
+
 ## Candidate notifications
 
 Candidate plots are posted to `#lotaas-cands` from the head node, by a step

@@ -534,3 +534,31 @@ def test_retry_requeues_attention_saps_with_prepared_beams(tmp_path, monkeypatch
     assert C.retry_saps(tmp_path/'campaign') == [first]
     assert campaign.state.rows('SELECT state FROM saps WHERE key=?', first)[0]['state'] == 'prepared'
     assert campaign.state.rows('SELECT state FROM saps WHERE key=?', second)[0]['state'] == 'attention'
+
+
+def test_raw_reclaim_removes_only_archives_with_evidence(tmp_path):
+    from euroflash.reclaim import survey_raw
+    ledger = Ledger(tmp_path/'ledger.sqlite')
+    data = tmp_path/'data'
+
+    def archive(beam):
+        stem = f'L1000001_SAP000_B{beam:03d}_P000_bf_{beam:08x}'
+        fits = data/stem/'stokes'/f'L400001_SAP0_BEAM{beam}_2bit.fits'
+        fits.parent.mkdir(parents=True)
+        fits.write_bytes(b'psrfits')
+        (data/(stem + '.tar')).write_bytes(b'archive')
+        marker = data/(stem + '.extracted.json')
+        marker.write_text(json.dumps({'request_id': 1, 'archive': {'url': stem}, 'fits': [str(fits)]}))
+        return stem, fits
+    converted_stem, _ = archive(13)
+    lost_stem, _ = archive(14)            # converted, but its output is gone and it was never searched
+    unconverted_stem, _ = archive(15)
+    incoherent_stem, _ = archive(12)
+    output = tmp_path/'prepared'/'downsampled_L400001_SAP000_BEAM013_32bit.fil'
+    output.parent.mkdir(); output.write_bytes(b'fil')
+    for beam, path in ((13, output), (14, tmp_path/'prepared'/'gone.fil')):
+        attempt = ledger.start(f'L400001_SAP000_B{beam:03d}', 'downsample', 'fp', 'log', ['convert'])
+        with ledger.connect() as db:
+            db.execute("UPDATE attempts SET status='success',outputs=? WHERE id=?", (json.dumps({str(path): 3}), attempt))
+    found = {marker.name.split('.')[0]: reason for fits, tar, size, reason, marker in survey_raw(data, tmp_path/'ledger.sqlite')}
+    assert found == {converted_stem: 'converted', incoherent_stem: 'excluded beam'}
