@@ -49,6 +49,60 @@ def test_crowded_low_frequencies_do_not_veto_by_chance():
     assert sum(1 for k in vetoed if isinstance(k, tuple) and k[0] == 'family') >= 25
 
 
+def speak(f, dm, sap, beam, statistic, key=None):
+    return dict(peak(f, dm, sap, beam, key), statistic=statistic)
+
+
+def test_a_bright_pulsar_in_many_beams_survives_its_sidelobes():
+    # J0323+3944 in L603682 SAP000: 51 beams at DM 23.6-28.6, most near 26.2,
+    # and the old rule (every member within max(2, 10%)) vetoed it in its three
+    # best beams. Weak sidelobes folded far from its DM may go.
+    rng = np.random.default_rng(1)
+    dms = np.clip(rng.normal(26.2, 0.8, 50), 23.6, 28.6)
+    sidelobes = [speak(0.32984, float(dm), 0, beam, float(rng.uniform(15, 60)), key=('lobe', beam))
+                 for beam, dm in zip(range(13, 63), dms)]
+    best = speak(0.32984, 26.2, 0, 9, 9358., key='J0323+3944')
+    vetoed = V.decide(sidelobes + [best])
+    assert 'J0323+3944' not in vetoed
+    assert all(abs(p['dm'] - 26.2) > 1.3 for p in sidelobes if p['key'] in vetoed)
+    # Far sidelobes are narrowband and fold at any DM; a third of the family
+    # there (B2016+28 in L606924 SAP002) still leaves the pulsar standing.
+    stray = [speak(0.32984 + 0.2 * RES, float(rng.uniform(200, 1000)), 0, beam, 30.) for beam in range(63, 73)]
+    stray += [speak(0.32984 - 0.2 * RES, float(rng.uniform(200, 1000)), 0, beam, 30.) for beam in range(0, 9)]
+    vetoed = V.decide(sidelobes + stray + [best])
+    assert 'J0323+3944' not in vetoed
+    assert all(p['key'] in vetoed for p in stray)
+    assert sum(1 for p in sidelobes if p['key'] not in vetoed) >= 40
+
+
+def test_a_family_at_dm_zero_is_vetoed_even_where_one_member_sits_above_dm_2():
+    family = [speak(0.0858, 0.0, 0, beam, 17.) for beam in range(13, 53)]
+    home = speak(0.0858, 2.5, 0, 60, 15., key='home')
+    assert 'home' in V.decide(family + [home])
+
+
+def test_neighbouring_rfi_lines_do_not_raise_the_chance_floor():
+    # L603686 SAP000: 3.3812 s in ten beams, ten bins from 3.3483 s in many more.
+    # The mean density around it asked for 46 beams; no count could reach that.
+    res = 1 / 3607.
+    rng = np.random.default_rng(5)
+    background = [dict(speak(float(f), float(rng.uniform(0, 1000)), 0, int(b), 12.5), frequency_resolution_hz=res)
+                  for f, b in zip(rng.uniform(0.05, 1.0, 400), rng.integers(13, 73, 400))]
+    line = [dict(speak(0.29575, dm, 0, beam, 14.), frequency_resolution_hz=res)
+            for beam, dm in zip(range(13, 23), (8.1, 1.3, 0.0, 0.7, 1.5, 0.0, 0.7, 0.3, 7.1, 3.0))]
+    comb = [dict(speak(f, dm, 0, beam, 15.), frequency_resolution_hz=res)
+            for beam, dm in zip(range(13, 73), np.linspace(0, 12, 60)) for f in (0.29866, 0.29900)]
+    vetoed = V.decide(background + line + comb)
+    assert all(p['key'] in vetoed for p in line)
+
+
+def test_a_peak_that_dominates_its_period_is_not_vetoed():
+    # The same period elsewhere at scattered DMs, but here far brighter and dispersed.
+    others = [speak(0.7, dm, 0, beam, 13.) for beam, dm in zip(range(13, 23), np.linspace(0, 900, 10))]
+    vetoed = V.decide(others + [speak(0.7, 57.0, 0, 30, 400., key='bright')])
+    assert 'bright' not in vetoed and all(p['key'] in vetoed for p in others)
+
+
 def beam_dir(root, beam, rows):
     directory = root/f'downsampled_L559955_SAP000_BEAM{beam:03d}_32bit_ff'/'0123456789abcdef'
     directory.mkdir(parents=True)
