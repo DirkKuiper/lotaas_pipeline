@@ -14,8 +14,9 @@ extraction marker keep its provenance. A SAP is flatfielded once all its
 beams are converted, its unflattened filterbanks removed, and it is optionally
 dispatched to the GPU nodes with `euroflash.cluster`. Once searched, a beam's
 flatfielded filterbank is removed unless something was found in it: a
-candidate FETCH accepted, or a periodic fold that is neither RFI-flagged nor a
-catalogued pulsar. Those are kept for review.
+candidate FETCH accepted, or a periodic fold that the rest of its observation
+and of the survey does not explain (euroflash.findings). Those are kept for
+review, and released again when a later SAP of the observation explains them.
 
 StageIT's "online" is only a hint: request 991619 was reported online while
 dCache held every file on tape. A file is fetched only when dCache itself
@@ -643,7 +644,9 @@ class Campaign:
                     done += 1
                     if self.o.keep_prepared or any(b.stem in found for b in beams):
                         kept += 1
-                        self.state.set_file(f['surl'], state='kept', detail=f'searched in {run_name}; kept for review')
+                        why = next((found[b.stem] for b in beams if b.stem in found), 'every beam is kept')
+                        self.state.set_file(f['surl'], state='kept',
+                                            detail=f'searched in {run_name}; kept for review: {why}'[:2000])
                     else:
                         for path in beams:
                             path.unlink(missing_ok=True)
@@ -652,28 +655,68 @@ class Campaign:
                                    detail=None if not failed else f'{failed} beams not searched in {run_name}')
                 self.state.event('searched', sap['key'], f'{done}/{done + failed} beams in {run_name}; '
                                                          f'{kept} kept for review')
+            if not self.o.keep_prepared:
+                observations = {m[1] for sap in saps for m in [re.search(r'(L\d+)/SAP', sap['sap_dir'] or '')] if m}
+                self.release_kept(observations, run_name)
         shutil.rmtree(self.root/'dispatch'/run_name, ignore_errors=True)
 
+    def judge(self):
+        """The periodic index, brought up to date with every run, and a judge over it."""
+        from euroflash.findings import Index, Judge
+        if getattr(self, 'periodic_index', None) is None:
+            self.periodic_index = Index(self.root)
+        self.periodic_index.backfill(self.root/'results')
+        return Judge(self.periodic_index)
+
     def findings(self, run_name):
-        """Beams with a FETCH-accepted candidate, or an unflagged, uncatalogued periodic fold."""
-        found = set()
-        results = self.root/'results'/run_name
-        for snapshot in results.glob('*/ledger-snapshot.sqlite'):
-            db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
-            try:
-                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if 'detections' in tables:
-                    found |= {Path(beam).stem for (beam,) in db.execute(
-                        "SELECT DISTINCT beam_id FROM detections WHERE detection_type='candidate'")}
-            finally:
-                db.close()
-        for folds in results.glob('*/processed/*/*/periodicity_folded_candidates.jsonl'):
-            for line in folds.read_text().splitlines():
-                row = json.loads(line)
-                if not row.get('rfi_like') and not row.get('catalogue_matches'):
-                    found.add(folds.parent.parent.name)
-                    break
+        """{beam stem: why} for the beams of one run worth keeping (euroflash.findings)."""
+        from euroflash.findings import run_candidates
+        judge = self.judge()
+        found = {}
+        for item, beam in judge.index.beams.items():
+            if item and beam['run'] == run_name:
+                keep, why = judge.keep(beam)
+                if keep:
+                    found[item] = why
+        # A beam whose periodic search never ran still keeps a FETCH candidate.
+        for item, n in run_candidates(self.root/'results'/run_name).items():
+            found.setdefault(item, f'{n} FETCH candidate(s)')
         return found
+
+    def release_kept(self, observations=None, run_name=None, apply=True):
+        """Remove kept filterbanks that nothing holds any more; returns [(name, why)].
+
+        A beam kept for a fold loses it when a later SAP of its observation
+        shows the fold's frequency across beams at scattered DMs, or when the
+        rule itself changed (`rekeep`). A FETCH candidate, or a reviewer's
+        astro or unsure verdict on any candidate of the beam, always holds it.
+        """
+        from euroflash.findings import reviewed_items
+        judge = self.judge()
+        reviews = getattr(self.o, 'reviews', None) or self.root.parent/'web'/'reviews.sqlite'
+        protected = reviewed_items(reviews, judge.index)
+        released = []
+        for f in self.state.rows("SELECT * FROM files WHERE state='kept'"):
+            beams = [flattened(p) for p in json.loads(f['fil'] or '[]')]
+            entries = [judge.index.beams.get(b.stem) for b in beams]
+            if not beams or any(e is None for e in entries):
+                continue
+            if observations is not None and not any(e['observation'] in observations for e in entries):
+                continue
+            if any(b.stem in protected for b in beams):
+                continue
+            verdicts = [judge.keep(e) for e in entries]
+            if any(keep for keep, _ in verdicts):
+                continue
+            why = '; '.join(w for _, w in verdicts)
+            released.append((f['name'], why))
+            if apply:
+                for path in beams:
+                    path.unlink(missing_ok=True)
+                self.state.set_file(f['surl'], state='searched',
+                                    detail=f'released{" after " + run_name if run_name else ""}: {why}'[:2000])
+                self.state.event('released', f['name'], why)
+        return released
 
     def unsearched(self, key):
         """Flatfielded beams of a SAP that still need a search."""
@@ -850,9 +893,16 @@ def parser():
     run.add_argument('--cpu-workers', type=int, default=24)
     run.add_argument('--stage-timeout', action='append', default=[], metavar='STAGE=SECONDS')
     run.add_argument('--control-dir', type=Path)
+    run.add_argument('--reviews', type=Path,
+                     help="The web layer's verdicts (default: web/reviews.sqlite beside the campaign root); "
+                          'a beam with an astro or unsure verdict is never released')
     run.add_argument('--once', action='store_true', help='One pass, then exit')
     status = sub.add_parser('status', help='Print the campaign state summary')
     status.add_argument('--root', type=Path, required=True)
+    rekeep = sub.add_parser('rekeep', help='Judge every kept beam again and list (--apply: release) what nothing holds')
+    rekeep.add_argument('--root', type=Path, required=True)
+    rekeep.add_argument('--reviews', type=Path, help='As for run')
+    rekeep.add_argument('--apply', action='store_true', help='Delete their filterbanks; without it, only list them')
     retry = sub.add_parser('retry', help='Queue SAPs in attention for another search of their unsearched beams')
     retry.add_argument('--root', type=Path, required=True)
     retry.add_argument('keys', nargs='*', help='SAP keys; all SAPs in attention with prepared beams if omitted')
@@ -875,6 +925,23 @@ def retry_saps(root, keys=()):
     return queued
 
 
+def rekeep(root, reviews=None, apply=False):
+    """Judge every kept beam under the current rule: what would be (or was) released."""
+    root = Path(root)
+    campaign = Campaign.__new__(Campaign)
+    campaign.root, campaign.o = root, SimpleNamespace(reviews=reviews, keep_prepared=False)
+    campaign.state = State(root/'campaign-state.sqlite')
+    kept = campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='kept'")[0]['n']
+    released = campaign.release_kept(apply=apply)
+    reasons = {}
+    for _, why in released:
+        for part in why.split('; '):
+            key = part.split(' ')[0] if not part.startswith('recurs') else 'recurs'
+            reasons[key] = reasons.get(key, 0) + 1
+    return {'kept': kept, 'released' if apply else 'would_release': len(released),
+            'remaining': kept - len(released), 'fold_reasons': reasons}
+
+
 def main(argv=None):
     p = parser()
     a = p.parse_args(argv)
@@ -883,6 +950,9 @@ def main(argv=None):
         return
     if a.command == 'retry':
         print('Queued for another search:', ' '.join(retry_saps(a.root, a.keys)) or 'nothing')
+        return
+    if a.command == 'rekeep':
+        print(json.dumps(rekeep(a.root, a.reviews, a.apply), indent=2))
         return
     a.root.mkdir(parents=True, exist_ok=True)
     with (a.root/'.campaign.lock').open('w') as lock:

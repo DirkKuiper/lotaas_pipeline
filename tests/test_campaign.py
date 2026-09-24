@@ -92,6 +92,7 @@ def build(tmp_path, monkeypatch, saps, locality=None, **overrides):
                                      '--ledger', str(tmp_path/'ledger.sqlite'), '--poll-seconds', '0',
                                      '--locality-interval', '0', '--files-per-worker', '100',
                                      '--min-free-tb', '0'])
+    options.reviews = tmp_path/'reviews.sqlite'
     for key, value in overrides.items():
         setattr(options, key, value)
     api = FakeStageIT()
@@ -582,6 +583,7 @@ def test_raw_reclaim_removes_only_archives_with_evidence(tmp_path):
 
 
 def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, monkeypatch):
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(tmp_path/'no-catalogue.db'))
     campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
     campaign.tick()
     put_online(api, where, '1000001', 0, FULL)
@@ -603,9 +605,12 @@ def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, mo
         path = node/'processed'/beams[beam].stem/'abc'/'periodicity_folded_candidates.jsonl'
         path.parent.mkdir(parents=True)
         path.write_text(''.join(json.dumps(r) + '\n' for r in rows))
-    folds(30, [{'rfi_like': False, 'catalogue_matches': []}])
-    folds(31, [{'rfi_like': True, 'catalogue_matches': []}])
-    folds(32, [{'rfi_like': False, 'catalogue_matches': [{'name': 'J0323+3944'}]}])
+    fold = {'frequency_hz': 1.25, 'period_seconds': 0.8, 'frequency_resolution_hz': 1 / 3600., 'dm': 40.0,
+            'statistic': 15.0, 'rfi_like': False, 'catalogue_matches': []}
+    folds(30, [fold])
+    folds(31, [dict(fold, rfi_like=True)])
+    folds(32, [dict(fold, catalogue_matches=[{'name': 'J0323+3944'}])])
+    folds(33, [dict(fold, dm=1.2)])
     campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
     remaining = sorted(b for b, p in beams.items() if p.exists())
     assert remaining == [20, 30]
