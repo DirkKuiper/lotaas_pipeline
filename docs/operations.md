@@ -375,7 +375,7 @@ python3 -m euroflash.status CAMPAIGN.sqlite
 ```
 
 The ledger holds `inputs`, `archive_receipts`, `archive_beams`, stage
-`attempts`, classifier `beam_runs`, `detections`, `slack_notifications` and
+`attempts`, classifier `beam_runs`, `detections` and
 imported-node mappings. Archive receipts preserve request IDs, URLs, sizes and
 SHA256 hashes. Beam mappings connect archive pipeline IDs to the
 observation/SAP/beam names inside the FITS. The status report reconciles those
@@ -422,40 +422,14 @@ excluded incoherent beam. Anything without such evidence is kept. Receipts
 and extraction markers stay. On 23 September this reclaimed 1.79 TB: all 178
 archives of the earlier manual staging.
 
-## Candidate notifications
+## Candidates
 
-Candidate plots are posted to `#lotaas-cands` from the head node, by a step
-deliberately outside the search:
+Candidates are reviewed on the web dashboard, not announced: see
+[web/README.md](../web/README.md). Verdicts are kept in its `reviews.sqlite`,
+and the campaign reads the astro and unsure ones before it releases a kept
+filterbank.
 
-```bash
-python3 -m postproc.notify_candidates RESULTS --ledger CAMPAIGN.sqlite
-```
-
-`--watch` keeps posting while a cluster job runs, alongside `euroflash.monitor`;
-`--dry-run` prints the messages without sending them.
-
-The notifier uses only the standard library, for two reasons worth keeping.
-Adding `slack_sdk` would mean rebuilding the image, and the image is part of
-the run fingerprint, so a rebuild would invalidate resume state and the
-provenance of finished work. Posting from the classifier would also put a Slack
-token on the compute nodes, which the credential rules do not allow. Because
-the plots and ledger rows are the durable record, notification can be replayed
-for work already finished.
-
-Each candidate is announced once. The send key is the beam, DM, width and S/N
-rather than the file path, so re-searching a beam under a new fingerprint does
-not repeat an announcement. Only candidates with a matching `candidate` row are
-posted, which keeps injection tests and other synthetic plots out of the
-channel unless `--unrecorded` asks for them, and those are labelled. `--limit`
-(25 by default) bounds one pass so a first run over a backlog does not empty it
-into the channel at once. A Slack outage is logged and retried and never fails
-a search.
-
-Credentials follow the StageIT convention; see [SECURITY.md](../SECURITY.md).
-The bot needs `chat:write`, `files:write` and `channels:read`, and must be a
-member of the channel, which a sending run checks before it posts.
-
-**A Slack post is an alert, not a validated detection.** See
+**A candidate is an alert, not a validated detection.** See
 [science.md](science.md) for what the candidate rules do and do not establish.
 
 
@@ -485,16 +459,3 @@ trials, and left unsifted, with the reason. Unsifted rows stay in the sifted
 JSONL. Aborting instead meant a bright pulsar (J0323+3944) ended the search at
 DM 25.7 with nothing above it covered. Raw evidence already written remains
 available on any other failure.
-
-Post completed periodic plots explicitly from the head node:
-
-```bash
-python3 -m postproc.notify_periodicity RESULTS --ledger CAMPAIGN.sqlite \
-  --limit 1 --dry-run
-```
-
-Remove `--dry-run` to send. `--known-only` selects catalogue associations;
-`--include-pilot` permits clearly labelled validation plots. Sending requires a
-successful periodicity ledger attempt and intact completion products. Tokens
-stay on the head node and are never copied to the compute nodes. Notifications
-are recorded once per beam/run/plot.

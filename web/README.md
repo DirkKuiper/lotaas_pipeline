@@ -70,8 +70,7 @@ token cookie on every request. VS Code's port forwarding (or
   Verdicts (RFI, noise, known source, astrophysical, unsure) take one key and a
   note; `,` and `.` step through the queue.
 
-A Slack post remains an alert. The measures on the Verify page describe the
-snippet; they do not replace a reviewer's judgement.
+The measures on the Verify page describe the snippet; they do not replace a reviewer's judgement.
 
 ## What it reads and writes
 
@@ -122,12 +121,7 @@ example:
 port = 8001
 snippet_types = ["candidate", "known_pulsar"]
 rejected_above = 0.3        # also keep FETCH rejects scoring above 0.3
-slack_threads = true        # offer "reply in the Slack thread" with a verdict
 ```
-
-With `slack_threads`, a verdict can be posted as a reply to the candidate's own
-Slack message, found from the file ID `postproc.notify_candidates` recorded, with
-the same credentials. It is sent only when the reviewer ticks the box.
 
 `python -m web index` and `python -m web snippets` run one pass by hand.
 

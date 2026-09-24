@@ -3,8 +3,8 @@
 A pass
   1. mirrors the campaign state database (SAPs, files, requests, events) and
      records every state change it sees, timed by the source's own 'updated';
-  2. mirrors the ledger (runs, attempts, beam runs, detections, Slack posts,
-     archive beams), incrementally where rows only append;
+  2. mirrors the ledger (runs, attempts, beam runs, detections, archive
+     beams), incrementally where rows only append;
   3. scans the results tree for searched beams, their plots and periodic folds;
   4. derives per-SAP coverage and one candidate table across both searches;
   5. records the health of the driver, the dispatch, SSH and the disk.
@@ -191,10 +191,6 @@ class Indexer:
                         key_of(detection_type,item_of(beam_id),candidate_dm,width_samples,snr),
                         candidate_dm,snr,width_samples,detection_type,pulsar_name,classification_probability,
                         beam_run_id,time_seconds,sample_number FROM lg.detections WHERE id>?""", (low,))
-                if 'slack_notifications' in tables:
-                    db.execute('DELETE FROM slack')
-                    db.execute('INSERT INTO slack SELECT key,kind,beam_id,plot_path,slack_file_id,channel,sent '
-                               'FROM lg.slack_notifications')
                 if 'archive_beams' in tables:
                     last = meta_get(db, 'archive_rowid', 0)
                     db.execute('INSERT OR REPLACE INTO archive_beams SELECT uri,raw_path,item,observation,sap,beam '
@@ -327,7 +323,7 @@ class Indexer:
                 row = json.loads(line)
             except ValueError:
                 continue
-            # The key postproc.notify_periodicity gives its Slack post.
+            # euroflash.findings.periodic_key gives the same key, so the campaign sees these reviews.
             key = 'periodicity|' + hashlib.sha256((item + '|' + path.name + '|' + row['plot']).encode()).hexdigest()
             names = ', '.join(m.get('name', '') for m in row.get('catalogue_matches') or [])
             periodic_rows.append((key, str(path), item, path.name, meta.get('pilot', pilot), rank, row.get('dm'),
@@ -412,7 +408,6 @@ class Indexer:
                     WHERE kind='sp'""")
             db.execute("""UPDATE candidates SET plot_id=(SELECT id FROM plots WHERE plots.key=candidates.key
                     ORDER BY id DESC LIMIT 1)""")
-            db.execute('UPDATE candidates SET slack_sent=(SELECT sent FROM slack WHERE slack.key=candidates.key)')
             db.execute('UPDATE candidates SET snippet=(SELECT path FROM snippets WHERE snippets.key=candidates.key)')
             db.execute("""UPDATE candidates SET sap_key=(SELECT key FROM obs_sap o
                     WHERE o.observation=observation_of(candidates.item) AND o.sap=sap_of(candidates.item))""")

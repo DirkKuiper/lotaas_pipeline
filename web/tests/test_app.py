@@ -94,38 +94,16 @@ def test_reviews_are_kept_apart_and_validated(cfg, campaign):
     assert client.post('/api/review', json={'id': cid, 'label': 'rfi'}).status_code == 400
     assert client.post('/api/review', json={'id': cid, 'label': 'maybe', 'reviewer': 'a'}).status_code == 400
     saved = client.post('/api/review', json={'id': cid, 'label': 'astro', 'reviewer': 'dk', 'note': 'sweep ok',
-                                             'dm': 30.1, 'slack': True})
+                                             'dm': 30.1})
     assert saved.status_code == 200
     reviews = saved.json()['reviews']
-    assert reviews[0]['label'] == 'astro' and reviews[0]['slack_ts'] is None   # threads are off by default
+    assert reviews[0]['label'] == 'astro' and reviews[0]['dm'] == 30.1
     assert cfg.reviews_db.is_file()
     # The index can be thrown away; the verdict survives it.
     cfg.index_db.unlink()
     Indexer(cfg).run_pass()
     page = client_for(cfg).get(f'/verify/{cid}')
     assert 'sweep ok' in page.text
-
-
-def test_slack_reply_goes_to_the_posts_thread(cfg, campaign):
-    from web.slackthread import post_verdict
-    Indexer(cfg).run_pass()
-
-    class FakeSlack:
-        def __init__(self):
-            self.calls = []
-
-        def call(self, method, **params):
-            self.calls.append((method, params))
-            if method == 'files.info':
-                return {'file': {'shares': {'public': {'C1': [{'ts': '123.456'}]}}}}
-            return {'ts': '999.1'}
-
-    slack = FakeSlack()
-    key = f'candidate|{ITEM}|DM30.000|W3|SN12.000'
-    assert post_verdict(cfg, key, 'rfi', 'narrowband', 'dk', 30.0, slack=slack) == '999.1'
-    method, params = slack.calls[-1]
-    assert method == 'chat.postMessage' and params['thread_ts'] == '123.456' and params['channel'] == 'C1'
-    assert 'RFI' in params['text'] and 'narrowband' in params['text']
 
 
 def test_a_period_in_many_beams_is_rfi_unless_it_keeps_one_dm(cfg, campaign):

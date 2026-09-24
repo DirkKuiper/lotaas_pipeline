@@ -177,7 +177,7 @@ class Index:
 
 
 def periodic_key(beam, fold):
-    """The web layer's key for a fold (web.indexer, after postproc.notify_periodicity): its reviews carry it."""
+    """The web layer's key for a fold (web.indexer): its reviews carry it."""
     import hashlib
     return 'periodicity|' + hashlib.sha256(f"{beam['item']}|{beam.get('fp')}|{fold.get('plot')}".encode()).hexdigest()
 

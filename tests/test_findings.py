@@ -177,7 +177,7 @@ def test_a_reviewer_verdict_holds_a_beam(tmp_path):
     key = findings.periodic_key({'item': item, 'fp': 'ec416ee22a75922c'}, fold(f, 8.1))
     with sqlite3.connect(reviews) as db:
         db.execute('CREATE TABLE reviews (id INTEGER PRIMARY KEY, key TEXT, reviewer TEXT, label TEXT, '
-                   'note TEXT, dm REAL, created REAL, slack_ts TEXT)')
+                   'note TEXT, dm REAL, created REAL)')
         db.execute("INSERT INTO reviews(key,reviewer,label,created) VALUES (?,?,?,?)", (key, 'Dirk', 'rfi', 1.))
         db.execute("INSERT INTO reviews(key,reviewer,label,created) VALUES (?,?,?,?)", (key, 'Dirk', 'unsure', 2.))
     assert campaign.release_kept({'L603686'}) == [] and ff.exists()

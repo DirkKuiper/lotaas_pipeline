@@ -18,8 +18,7 @@
     const response = await fetch('/api/review', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: C.id, label, reviewer, note: $('note').value,
-        dm: window.viewerDM ? window.viewerDM() : C.dm, mask: window.viewerMask ? window.viewerMask() : '',
-        slack: $('slack') ? $('slack').checked : false }),
+        dm: window.viewerDM ? window.viewerDM() : C.dm, mask: window.viewerMask ? window.viewerMask() : '' }),
     });
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));

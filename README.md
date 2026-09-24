@@ -18,7 +18,7 @@ euroflash/              campaign orchestration: staging, dispatch, ledger, repor
 pipeline/               per-beam dedispersion, independent searches, finalization
 preproc/                PSRFITS to filterbank conversion, and flatfielding
 lotaas_reprocessing/    the science: dedispersion, matched filter, clustering, classifier
-postproc/               Slack notification, and post-detection analysis
+postproc/               post-detection analysis
 staging/                StageIT client and the staging entry point
 db/                     per-beam classifier records
 containers/             Apptainer definition and build lock
@@ -67,11 +67,11 @@ python3 -m euroflash.cluster --input PREPARED/data --work RESULTS \
   --run-name my-batch --gpus 0,1 --workers-per-gpu 3 --cpu-workers 24
 ```
 
-Then report, and announce candidates from the head node:
+Then report from the head node, and review candidates on the web dashboard
+([web/README.md](web/README.md)):
 
 ```bash
 python3 -m euroflash.status CAMPAIGN.sqlite
-python3 -m postproc.notify_candidates RESULTS --ledger CAMPAIGN.sqlite
 ```
 
 ## Tests
@@ -104,10 +104,10 @@ apptainer exec --nv --cleanenv --env PYTHONPATH="$PWD" \
 
 ## A note on scope
 
-Results from this pipeline are search output, not vetted detections. A Slack
-post is an alert. The clustering and classification policy still needs
-scientific review before any survey candidate claim, and no measurement here
-establishes survey sensitivity. `docs/science.md` is specific about which
+Results from this pipeline are search output, not vetted detections. The
+clustering and classification policy still needs scientific review before any
+survey candidate claim, and no measurement here establishes survey
+sensitivity. `docs/science.md` is specific about which
 claims are supported and which are not.
 
 The Slurm entry points this repository began with (`master.sh`, `bin/*.slurm`,

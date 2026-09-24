@@ -1,5 +1,5 @@
-from postproc.notify_candidates import key_for
 from web.indexer import Indexer, fp16_of, run_of, sexagesimal
+from web.keys import sp_key
 from web.tests.conftest import ITEM
 
 
@@ -18,9 +18,9 @@ def test_index_mirrors_and_derives(cfg, campaign):
     assert db.execute('SELECT COUNT(*) FROM files').fetchone()[0] == 3
     assert db.execute("SELECT key FROM obs_sap WHERE observation='L559289' AND sap=0").fetchone()[0] == 'L1163405_SAP000'
     candidate = db.execute("SELECT * FROM candidates WHERE type='candidate'").fetchone()
-    # The same key the Slack notifier gives its post.
-    assert candidate['key'] == key_for({'item': ITEM, 'dm': 30.0, 'width': 3, 'snr': 12.0})
-    assert candidate['slack_sent'] == 95.0 and candidate['sap_key'] == 'L1163405_SAP000'
+    # The key existing verdicts were saved under.
+    assert candidate['key'] == sp_key('candidate', ITEM, 30.0, 3, 12.0) == f'candidate|{ITEM}|DM30.000|W3|SN12.000'
+    assert candidate['sap_key'] == 'L1163405_SAP000'
     assert candidate['plot_id'] is not None and candidate['run_name'] == 'run-a'
     info = db.execute("SELECT * FROM sap_info WHERE key='L1163405_SAP000'").fetchone()
     assert info['beams_searched'] == 1 and info['pointing'] == 'P1254B' and abs(info['dec_deg'] - 68.416) < 1e-2
@@ -47,3 +47,16 @@ def test_new_ledger_rows_are_picked_up(cfg, campaign):
         db.execute("UPDATE attempts SET status='success' WHERE item='x'")
     indexer.run_pass()
     assert indexer.db.execute("SELECT status FROM attempts WHERE item='x'").fetchone()[0] == 'success'
+
+
+def test_slack_columns_are_dropped_and_verdicts_kept(cfg):
+    import sqlite3
+    from web import store
+    cfg.prepare()
+    with sqlite3.connect(cfg.reviews_db) as db:
+        db.execute('CREATE TABLE reviews (id INTEGER PRIMARY KEY, key TEXT NOT NULL, reviewer TEXT NOT NULL, '
+                   'label TEXT NOT NULL, note TEXT, dm REAL, created REAL NOT NULL, slack_ts TEXT)')
+        db.execute("INSERT INTO reviews(key,reviewer,label,created) VALUES ('k', 'dk', 'noise', 1.0)")
+    reviews = store.reviews(cfg)
+    assert 'slack_ts' not in {row[1] for row in reviews.execute('PRAGMA table_info(reviews)')}
+    assert [tuple(r) for r in reviews.execute('SELECT key, label FROM reviews')] == [('k', 'noise')]

@@ -43,8 +43,6 @@ class Config:
     # Also keep snippets of FETCH rejects scoring above this; None keeps none.
     rejected_above: float | None = None
     exclude_beams: list = field(default_factory=lambda: [12])
-    # Post verdicts as replies in the candidate's Slack thread when asked per review.
-    slack_threads: bool = False
     # Ask for the token cookie; off only for tests on a private machine.
     auth: bool = True
     control_dir: Path = Path('~/.ssh/control').expanduser()

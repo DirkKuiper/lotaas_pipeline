@@ -24,34 +24,8 @@ from lotaas_reprocessing.filterbank import FilterbankFile
 from lotaas_reprocessing.numpy_utils import compute_rfi_mask  # CPU fallback OK
 from lotaas_reprocessing.cupy_utils import fourier_domain_dedispersion  # uses GPU if available
 from lotaas_reprocessing.sap_beam_map import plot_sap_beam_layout, matched_filter_sn_at_idx
-from postproc.slack_client import Slack, SlackError
 
 logger = logging.getLogger(__name__)
-
-# Notifications go through the standard-library Slack client. slack_sdk is
-# not installed in the runtime image, so this module could not be imported
-# there at all; the old path also disabled TLS verification while sending a
-# bot token, and fell back to a hardcoded channel id. Credentials now come
-# from ~/.config/lotaas/slackrc, as everywhere else.
-_slack = None
-
-
-def _slack_client():
-    global _slack
-    if _slack is None:
-        _slack = Slack()
-    return _slack
-
-
-def _send_slack_notification(image_path, title, text):
-    client = _slack_client()
-    if not client.enabled:
-        return
-    try:
-        client.upload(image_path, title=title, comment=text)
-        logger.info("Slack: sent %s", title)
-    except SlackError as error:
-        logger.warning("Slack upload failed: %s", error)
 
 
 def _packed_float_to_sexagesimal_string(val, is_ra=True):
@@ -87,7 +61,6 @@ def classify_candidates(
     tcand: float = None,
     snr: float = None,
     width: int = None,
-    send_to_slack: bool = True,
     sample_idx: int = None,
 ):
     """
@@ -105,8 +78,6 @@ def classify_candidates(
         Optional dict with RA/DEC strings used in the header panel.
     candidate_dm, tcand, snr, width : optional
         If provided, process *this one candidate* directly. If omitted, we will try to read `candidate_file` as a .cands file.
-    send_to_slack : bool
-        If True and SLACK_BOT_TOKEN is configured, upload the final diagnostic plot.
     sample_idx : int or None
         If provided, re-measure S/N at this exact sample index to match the detector.
     """
@@ -445,13 +416,6 @@ def classify_candidates(
             f.write(f"Highest Probability: {highest_prob:.4f}\n")
             f.write(f"Classified as Astrophysical? {'YES' if is_real else 'NO'}\n")
         print(f"[classify] Wrote: {classification_result}")
-
-        if send_to_slack:
-            _send_slack_notification(
-                combined_path,
-                f"Diagnostic - DM {dm}, Width {width_samp}",
-                f"Candidate S/N={snr0} in {filterbank_id}"
-            )
 
         # Save candidate HDF5
         cand.save_h5(cand_dir)

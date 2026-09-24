@@ -48,8 +48,7 @@ CREATE TABLE IF NOT EXISTS detections (id INTEGER PRIMARY KEY, beam_id TEXT, ite
 CREATE INDEX IF NOT EXISTS detections_key ON detections(key);
 CREATE INDEX IF NOT EXISTS detections_item ON detections(item);
 CREATE INDEX IF NOT EXISTS detections_run ON detections(beam_run_id);
-CREATE TABLE IF NOT EXISTS slack (key TEXT PRIMARY KEY, kind TEXT, beam_id TEXT, plot_path TEXT,
-    slack_file_id TEXT, channel TEXT, sent REAL);
+DROP TABLE IF EXISTS slack;
 CREATE TABLE IF NOT EXISTS archive_beams (uri TEXT, raw_path TEXT, item TEXT, observation TEXT,
     sap INTEGER, beam INTEGER, PRIMARY KEY(uri, raw_path));
 CREATE TABLE IF NOT EXISTS archive_receipts (uri TEXT PRIMARY KEY, item TEXT, bytes INTEGER);
@@ -93,7 +92,7 @@ CREATE TABLE IF NOT EXISTS sap_info (key TEXT PRIMARY KEY, observation TEXT, sap
 CREATE TABLE IF NOT EXISTS candidates (key TEXT PRIMARY KEY, id TEXT UNIQUE, kind TEXT, type TEXT,
     item TEXT, sap_key TEXT, dm REAL, snr REAL, width INTEGER, time REAL, probability REAL,
     pulsar TEXT, period REAL, statistic REAL, fp16 TEXT, run_name TEXT, pilot INTEGER,
-    plot_id INTEGER, dir TEXT, slack_sent REAL, snippet TEXT, detections INTEGER, found TEXT);
+    plot_id INTEGER, dir TEXT, snippet TEXT, detections INTEGER, found TEXT);
 CREATE INDEX IF NOT EXISTS candidates_type ON candidates(type, snr);
 CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, meta TEXT);
 -- A single-pulse candidate and the events at its moment in other beams of its observation.
@@ -115,7 +114,7 @@ CREATE TABLE IF NOT EXISTS lotaas_sources (psrj TEXT PRIMARY KEY, bname TEXT, dm
 
 REVIEWS = '''
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, key TEXT NOT NULL, reviewer TEXT NOT NULL,
-    label TEXT NOT NULL, note TEXT, dm REAL, created REAL NOT NULL, slack_ts TEXT);
+    label TEXT NOT NULL, note TEXT, dm REAL, created REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS reviews_key ON reviews(key, created);
 -- Explicit, audited dashboard removals. Keep these outside the rebuildable index.
 CREATE TABLE IF NOT EXISTS candidate_removals (key TEXT PRIMARY KEY, reason TEXT NOT NULL,
@@ -126,6 +125,10 @@ LABELS = {'rfi': 'RFI', 'noise': 'Noise', 'known': 'Known source', 'astro': 'Ast
           'unsure': 'Unsure / follow-up'}
 
 
+# Columns of the retired Slack notifier, dropped from databases made before it went.
+RETIRED = {'candidates': ('slack_sent',), 'reviews': ('slack_ts',)}
+
+
 def _connect(path, schema):
     # URI mode, so the sources can be ATTACHed read-only with ?mode=ro.
     db = sqlite3.connect(f'file:{quote(str(path))}', uri=True, timeout=60, check_same_thread=False)
@@ -133,6 +136,11 @@ def _connect(path, schema):
     db.execute('PRAGMA journal_mode=WAL')
     db.execute('PRAGMA busy_timeout=60000')
     db.executescript(schema)
+    for table, columns in RETIRED.items():
+        present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+        for column in columns:
+            if column in present:
+                db.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
     return db
 
 

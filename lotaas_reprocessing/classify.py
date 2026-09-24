@@ -82,11 +82,6 @@ def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
     return plane.reshape(dmsteps, time_size, decimate).mean(2)
 
 
-def send_slack_message(text):
-    # Notifications are deliberately local; cluster runs never send messages.
-    logger.info(text)
-
-
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
                         limits=None, tsamp=None, evidence=None, bad_channels=()):
     """Classify one beam's clusters; returns how many went to FETCH and why others did not.
@@ -178,7 +173,6 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
         redetections_best = {}
 
         num_redetections = 0
-        slack_messages = []
 
         for _, row in candidates_df.iterrows():
             dm = row["dm"]
@@ -461,10 +455,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 detection_type="known_pulsar",
                 pulsar_name=psr_name
             )
-            slack_messages.append(
-                f"*Redetected:* {psr_name}  DM={info['dm']:.2f}  highest S/N={info['snr']:.2f}"
-                f"  Width={info['width']}  separation={info['separation_deg']:.3f} deg"
-            )
+            logger.info("Redetected %s: DM %.2f, highest S/N %.2f, width %s, %.3f deg away",
+                        psr_name, info['dm'], info['snr'], info['width'], info['separation_deg'])
             num_redetections += 1
         counts["known_pulsar"] = num_redetections
         if counts['unclassified'] or counts['unconfirmed']:
@@ -477,9 +469,6 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             num_redetections=num_redetections,
             highest_snr=highest_snr
         )
-
-        if slack_messages:
-            send_slack_message("\n".join(slack_messages))
 
         print("Finished processing.")
         return counts

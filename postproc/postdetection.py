@@ -148,7 +148,7 @@ def main():
     classify_candidates(
         fil_file, dat_path, classified_output_dir, observation_info,
         candidate_dm, tcand, snr, width,
-        send_to_slack=True, sample_idx=sample_idx,   # <- rely on your updated function
+        sample_idx=sample_idx,
     )
 
     # ========== Step 5: Cross-Beam Dedispersion + Matched-Filter S/N (limit to a few beams) ==========

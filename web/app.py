@@ -407,7 +407,7 @@ def create_app(cfg, run_background=True):
             dispatched = rows(db, "SELECT key, run_name, updated FROM saps WHERE state='dispatched'")
             review = rows(db, """SELECT c.*, (SELECT label FROM r.reviews v WHERE v.key=c.key
                 ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.type='candidate'
-                ORDER BY COALESCE(c.slack_sent, 0) DESC, c.found DESC LIMIT 8""")
+                ORDER BY c.found DESC LIMIT 8""")
             _, lotaas = lotaas_summary(db)
         total = sum(saps.values())
         remaining = sum(v for k, v in saps.items() if k not in ('searched', 'incomplete'))
@@ -635,7 +635,7 @@ def create_app(cfg, run_background=True):
         return ' AND '.join(clauses), args, latest
 
     # A periodic candidate's snr column holds its search statistic.
-    ORDERS = {'recent': 'COALESCE(c.slack_sent, 0) DESC, c.found DESC, c.snr DESC',
+    ORDERS = {'recent': 'c.found DESC, c.snr DESC',
               'snr': 'c.snr DESC', 'dm': 'c.dm', 'probability': 'c.probability DESC', 'period': 'c.period',
               'evidence': '(SELECT score FROM periodic_triage t WHERE t.key=c.key) DESC, c.snr DESC'}
 
@@ -811,7 +811,7 @@ def create_app(cfg, run_background=True):
         context = dict(candidate=candidate, reviews=reviews, plots=plots, neighbours=neighbours, query=query,
                        snippet=json.loads(snippet['meta']) if snippet else None, others=others,
                        observed=beam_run['observation_date'] if beam_run else None,
-                       slack_threads=cfg.slack_threads, labels=LABELS, kept=kept, initial=initial, display=display,
+                       labels=LABELS, kept=kept, initial=initial, display=display,
                        section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence)
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
@@ -947,19 +947,11 @@ def create_app(cfg, run_background=True):
         if mask:
             # A verdict reached with channels removed by hand must say which.
             note = (note + '\n' if note else '') + f'[reviewer mask: {mask}]'
-        slack_ts = None
-        if body.get('slack') and cfg.slack_threads:
-            from web.slackthread import post_verdict
-            try:
-                slack_ts = post_verdict(cfg, row['key'], label, note, reviewer, dm)
-            except Exception as error:
-                logger.error('Slack reply failed: %s', error)
-                raise HTTPException(502, f'Saved nothing: the Slack reply failed ({error})')
         db = store.reviews(cfg)
         try:
             with db:
-                db.execute('INSERT INTO reviews(key,reviewer,label,note,dm,created,slack_ts) VALUES (?,?,?,?,?,?,?)',
-                           (row['key'], reviewer, label, note, dm, time.time(), slack_ts))
+                db.execute('INSERT INTO reviews(key,reviewer,label,note,dm,created) VALUES (?,?,?,?,?,?)',
+                           (row['key'], reviewer, label, note, dm, time.time()))
             history = rows(db, 'SELECT * FROM reviews WHERE key=? ORDER BY created DESC', row['key'])
         finally:
             db.close()

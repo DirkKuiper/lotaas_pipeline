@@ -371,36 +371,6 @@ def test_benchmark_includes_sifting_and_folding(tmp_path):
     assert len(list(trials.glob('*.dat')))==2
 
 
-def test_periodic_notification_is_gated_and_idempotent(tmp_path):
-    import yaml
-    from postproc.notify_candidates import connect
-    from postproc.notify_periodicity import run_once
-    from lotaas_reprocessing.periodicity import atomic_json
-    out=tmp_path/'processed'/'beam'/'fingerprint';out.mkdir(parents=True)
-    row={'plot':'periodic.png','fold_data':'fold.npz','rfi_like':False,'catalogue_matches':[{'name':'J0323+3944'}],
-         'refined_period_seconds':3.032,'dm':26.2,'statistic':25.,'harmonic_count':8,'observation_seconds':3600.}
-    (out/'periodic.png').write_bytes(b'plot');(out/'fold.npz').write_bytes(b'fold')
-    folded=out/'periodicity_folded_candidates.jsonl';folded.write_text(json.dumps(row)+'\n')
-    (out/'metadata.json').write_text(json.dumps({'filename':'beam.fil','pilot':True}))
-    atomic_json(out/'periodicity_summary.json',{'complete':True,'outputs':{'periodic.png':4,'fold.npz':4,folded.name:folded.stat().st_size}})
-    ledger=Ledger(tmp_path/'ledger.sqlite')
-    class FakeSlack:
-        channel='test';calls=[]
-        def upload(self,path,**kwargs):self.calls.append((path,kwargs));return 'Ftest'
-    slack=FakeSlack()
-    with connect(tmp_path/'ledger.sqlite') as db:
-        assert run_once(slack,db,[out])==[]
-        with pytest.raises(ValueError,match='No successful'):
-            run_once(slack,db,[out],include_pilot=True)
-        attempt=ledger.start('beam','periodicity','fingerprint',tmp_path/'log',[])
-        ledger.finish(attempt,[out/'periodicity_summary.json'])
-        assert len(run_once(slack,db,[out],include_pilot=True,known_only=True))==1
-        assert run_once(slack,db,[out],include_pilot=True)==[]
-    assert len(slack.calls)==1
-    assert 'Pilot validation' in slack.calls[0][1]['comment']
-
-
-
 def test_reclaim_protects_active_periodicity_retry_and_counts_hardlinks_once(tmp_path):
     import os,time
     from euroflash.reclaim import survey

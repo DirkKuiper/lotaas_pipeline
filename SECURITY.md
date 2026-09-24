@@ -33,19 +33,17 @@ everyone re-clone: a `git pull` into an existing clone keeps the old commits.
 
 ## Where credentials belong
 
-Both credential files live outside the repository, at mode 0600, and neither
-is copied into the container image or the source snapshot sent to compute
-nodes:
+The StageIT credential file lives outside the repository, at mode 0600, and
+is never copied into the container image or the source snapshot sent to
+compute nodes:
 
 | Purpose | Default path | Override | Contents |
 | --- | --- | --- | --- |
 | StageIT / LTA | `~/.config/lotaas/stagingrc` | `LOTAAS_STAGING_CONFIG` | `api_token = ...` |
-| Slack notifier | `~/.config/lotaas/slackrc` | `LOTAAS_SLACK_CONFIG` | `bot_token = ...`, `channel_id = ...` |
 
-`SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` override the Slack file. Download
-macaroons are fetched per request at run time and are never written to the
+Download macaroons are fetched per request at run time and are never written to the
 repository; `euroflash.access_check` reports their path caveats and HTTP
 status without printing any token.
 
-Notifications are sent only from the head node. The classifier on a compute
-node logs instead of posting, so no Slack token needs to exist there.
+The pipeline no longer posts anywhere: the Slack notifier was removed on
+24 September 2026, and nothing reads `~/.config/lotaas/slackrc` any more.

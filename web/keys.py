@@ -1,9 +1,9 @@
 """Stable names for beams and candidates, shared by the index, the snippets and the pages.
 
-A single-pulse candidate's key is the one postproc.notify_candidates gives
-its Slack post, so a post, a review page and a verdict name the same event.
-It leaves out the fingerprint on purpose: the same event found again by a
-later search is the same candidate.
+A single-pulse candidate's key names the event, so its review page, its
+snippet and its verdicts agree; the verdicts in reviews.sqlite are saved
+under it. It leaves out the fingerprint on purpose: the same event found
+again by a later search is the same candidate.
 """
 import hashlib
 import re

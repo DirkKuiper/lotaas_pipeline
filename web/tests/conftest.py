@@ -99,10 +99,6 @@ def campaign(cfg):
             db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
                        "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
                        "(?,?,?,3,?,NULL,?,?,15.0,1907)", (ITEM + '.fil', dm, snr, kind, p, run))
-        db.execute('CREATE TABLE slack_notifications (key TEXT PRIMARY KEY, kind TEXT NOT NULL, beam_id TEXT, '
-                   'plot_path TEXT, slack_file_id TEXT, channel TEXT NOT NULL, sent REAL NOT NULL)')
-        db.execute("INSERT INTO slack_notifications VALUES (?, 'candidate', ?, NULL, 'F1', 'C1', 95.0)",
-                   (f'candidate|{ITEM}|DM30.000|W3|SN12.000', ITEM))
         db.execute("INSERT INTO archive_beams VALUES ('srm://x/L1163405_SAP000_B025_P000_bf_aa.tar', 'x', ?, "
                    "'L559289', 0, 25)", (ITEM,))
     beam_dir = cfg.result_roots[0] / 'run-a' / 'efc-gpu-01' / 'processed' / ITEM / 'ffffffffffffffff'

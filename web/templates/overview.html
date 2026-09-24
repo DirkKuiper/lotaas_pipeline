@@ -136,7 +136,7 @@
     <div class="card">
       <h2>Latest FETCH positives</h2>
       {% for c in review %}
-        <div class="stat"><span><a href="/verify/{{ c.id }}">{{ c.item|beam }}</a><br><span class="muted small">DM {{ '%.1f'|format(c.dm) }} · S/N {{ '%.1f'|format(c.snr) }}{% if c.slack_sent %} · on Slack{% endif %}</span></span>
+        <div class="stat"><span><a href="/verify/{{ c.id }}">{{ c.item|beam }}</a><br><span class="muted small">DM {{ '%.1f'|format(c.dm) }} · S/N {{ '%.1f'|format(c.snr) }}</span></span>
           <span>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% else %}<span class="muted small">unreviewed</span>{% endif %}</span></div>
       {% else %}<div class="muted">None yet.</div>{% endfor %}
     </div>
