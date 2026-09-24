@@ -6,12 +6,16 @@ rolling window of SAP-sized StageIT requests in flight and processes every
 file the moment dCache holds it on disk:
 
     pending -> staging -> prepared -> dispatched -> searched     (per SAP)
+                                   +-> partial -> prepared -> ...  (searched a few beams short)
     pending -> requested -> online -> working -> converted -> searched | kept   (per file)
 
 Each file is downloaded, extracted, converted to a 32-bit filterbank and its
 tar and PSRFITS deleted before the next is taken; the download receipt and
 extraction marker keep its provenance. A SAP is flatfielded once all its
-beams are converted, its unflattened filterbanks removed, and it is optionally
+beams are converted, or once it has waited `--partial-after-hours` a few beams
+short: then its flatfield is saved, the beams present are searched, and the
+late ones are flatfielded with the saved flatfield and searched as they come
+(state 'partial'). Its unflattened filterbanks are removed, and it is optionally
 dispatched to the GPU nodes with `euroflash.cluster`. Once searched, a beam's
 flatfielded filterbank is removed unless something was found in it: a
 candidate FETCH accepted, or a periodic fold that the rest of its observation
@@ -27,6 +31,7 @@ root, or send SIGTERM, to stop after the current step.
 """
 import argparse
 import calendar
+import functools
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import fcntl
@@ -46,6 +51,9 @@ from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[1]
 CENTRAL = range(13, 74)
+# A SAP searched before its last beams arrived keeps its flatfield here for them.
+MEAN = 'flatfield-mean.npy'
+OUTSTANDING = ('pending', 'requested', 'online', 'working')
 FINAL = {'success', 'failed', 'aborted', 'partial success'}
 NAME = re.compile(r'^L(\d+)_SAP(\d+)_B(\d+)_')
 
@@ -113,17 +121,24 @@ class State:
         with self.db() as db:
             db.execute('INSERT INTO events VALUES (?,?,?,?)', (time.time(), kind, subject, str(detail)[:2000]))
 
-    def load(self, rows, missing_central, exclude_beams=()):
+    def load(self, rows, missing_central, exclude_beams=(), allowed_missing=0):
+        """Queue the inventory. A SAP whose archive lacks more than allowed_missing
+        central beams is 'incomplete' and never staged; one that lacks fewer is
+        searched without them."""
         now = time.time()
         with self.db() as db:
             saps = {}
             for row in rows:
                 saps.setdefault(sap_key(row['archive_obs'], row['sap']), []).append(row)
             for position, (key, files) in enumerate(sorted(saps.items())):
-                incomplete = missing_central(files)
+                missing = missing_central(files)
+                incomplete = len(missing) > allowed_missing
                 db.execute('INSERT OR IGNORE INTO saps(key,position,files,state,detail,updated) VALUES (?,?,?,?,?,?)',
                            (key, position, len(files), 'incomplete' if incomplete else 'pending',
-                            f'missing central beams {incomplete}' if incomplete else None, now))
+                            f'missing central beams {missing}' if missing else None, now))
+                if missing and not incomplete:
+                    # Queued as incomplete under a stricter limit: stage it now.
+                    db.execute("UPDATE saps SET state='pending',updated=? WHERE key=? AND state='incomplete'", (now, key))
                 db.executemany('INSERT OR IGNORE INTO files(surl,name,sap_key,beam,state,updated) VALUES (?,?,?,?,?,?)',
                                [(f['surl'], f['name'], key, f['beam'],
                                  'excluded' if f['beam'] in exclude_beams else 'pending', now) for f in files])
@@ -292,7 +307,7 @@ class Campaign:
         limit = self.staging_limit()
         target = getattr(self.o, 'staging_files_target', 0)
         outstanding = self.state.rows("""SELECT COUNT(*) AS n FROM files f JOIN saps s ON s.key=f.sap_key
-            WHERE s.state='staging' AND f.state IN ('pending','requested','online','working')""")[0]['n']
+            WHERE s.state IN ('staging','partial') AND f.state IN ('pending','requested','online','working')""")[0]['n']
         admitted = []
         while (staging < limit and waiting < self.o.max_prepared_saps
                and free_tb > self.o.min_free_tb and not self.stopping
@@ -314,7 +329,7 @@ class Campaign:
     def request(self):
         """Submit one StageIT request per staging SAP for its unrequested files."""
         submitted = []
-        for sap in self.state.rows("SELECT key FROM saps WHERE state='staging' ORDER BY position"):
+        for sap in self.state.rows("SELECT key FROM saps WHERE state IN ('staging','partial') ORDER BY position"):
             files = self.state.rows("SELECT surl,submissions FROM files WHERE sap_key=? AND state='pending'", sap['key'])
             if not files:
                 continue
@@ -495,15 +510,22 @@ class Campaign:
 
     # ---------------------------------------------------------- flatfield
     def prepare(self):
-        """Flatfield every SAP whose files are all converted or given up on."""
+        """Flatfield SAPs that are complete or given up on, those stalled a few beams short, and late beams."""
         prepared = []
-        for sap in self.state.rows("SELECT * FROM saps WHERE state='staging' ORDER BY position"):
+        now = time.time()
+        for sap in self.state.rows("SELECT * FROM saps WHERE state IN ('staging','partial') ORDER BY position"):
+            if sap['key'] in self.flatfield_jobs:
+                continue
             files = self.state.rows('SELECT * FROM files WHERE sap_key=?', sap['key'])
-            if any(f['state'] not in ('converted', 'failed', 'excluded') for f in files):
+            if sap['state'] == 'partial':
+                self.prepare_late(sap, files)
+                continue
+            outstanding = [f for f in files if f['state'] in OUTSTANDING]
+            if outstanding and not self.stalled(files, outstanding, now):
                 continue
             lost = sorted(f['beam'] for f in files if f['state'] == 'failed' and f['beam'] in CENTRAL)
             converted = [Path(p) for f in files if f['state'] == 'converted' for p in json.loads(f['fil'])]
-            if lost or not converted:
+            if len(lost) > getattr(self.o, 'partial_missing', 0) or not converted:
                 self.state.set_sap(sap['key'], state='attention',
                                    detail=f'central beams not retrieved: {lost}' if lost else 'no beam converted')
                 self.state.event('attention', sap['key'], 'cannot flatfield')
@@ -515,9 +537,19 @@ class Campaign:
             sap_dir = directories.pop()
             flattened = [p.with_name(p.stem + '_ff.fil') for p in converted]
             if any(p.is_file() for p in converted) or not all(p.is_file() for p in flattened):
+                # A SAP short of central beams (lost, absent from the archive or
+                # still to come) is flatfielded with those present; one still
+                # waiting for beams keeps its flatfield for them.
+                present = {f['beam'] for f in files if f['state'] == 'converted'}
+                short = any(b not in present for b in CENTRAL)
+                job = functools.partial(self.runner.flatfield, sap_dir, allow_partial=short,
+                                        save_mean=str(sap_dir/MEAN) if outstanding else None)
                 # Flatfielding reads the whole SAP (~4 min); keep downloading meanwhile.
-                self.flatfield_jobs[sap['key']] = self.flatfield_pool.submit(self.runner.flatfield, sap_dir)
+                self.flatfield_jobs[sap['key']] = self.flatfield_pool.submit(job)
                 self.state.set_sap(sap['key'], state='flatfielding', sap_dir=str(sap_dir))
+                if outstanding:
+                    self.state.event('partial', sap['key'], f'searched without {len(outstanding)} beams still '
+                                     f'being retrieved: {sorted(f["beam"] for f in outstanding)}')
             else:
                 self.finish_flatfield(sap['key'], sap_dir, None)
                 prepared.append(sap['key'])
@@ -528,6 +560,29 @@ class Campaign:
                 if self.finish_flatfield(key, sap_dir, job.exception()):
                     prepared.append(key)
         return prepared
+
+    def stalled(self, files, outstanding, now):
+        """A few beams short, with no beam of the SAP converted for --partial-after-hours."""
+        hours = getattr(self.o, 'partial_after_hours', 0)
+        if not hours or len(outstanding) > getattr(self.o, 'partial_missing', 0):
+            return False
+        done = [f['updated'] or 0 for f in files if f['state'] == 'converted']
+        return bool(done) and now - max(done) >= hours * 3600
+
+    def prepare_late(self, sap, files):
+        """Late beams of a SAP searched without them: flatfield each set with the SAP's saved flatfield."""
+        sap_dir = Path(sap['sap_dir'])
+        late = [Path(p) for f in files if f['state'] == 'converted' for p in json.loads(f['fil']) if Path(p).is_file()]
+        if late:
+            job = functools.partial(self.runner.flatfield, sap_dir, mean=str(sap_dir/MEAN))
+            self.flatfield_jobs[sap['key']] = self.flatfield_pool.submit(job)
+            self.state.set_sap(sap['key'], state='flatfielding')
+        elif not any(f['state'] in OUTSTANDING for f in files) and not self.unsearched(sap['key']):
+            lost = sorted(f['beam'] for f in files if f['state'] == 'failed')
+            (sap_dir/MEAN).unlink(missing_ok=True)
+            self.state.set_sap(sap['key'], state='searched',
+                               detail=f'searched without beams never retrieved: {lost}' if lost else None)
+            self.state.event('searched', sap['key'], 'the last late beams are in' if not lost else f'gave up on {lost}')
 
     def finish_flatfield(self, key, sap_dir, error):
         if error is not None:
@@ -651,8 +706,22 @@ class Campaign:
                         for path in beams:
                             path.unlink(missing_ok=True)
                         self.state.set_file(f['surl'], state='searched', detail=f'searched in {run_name}')
-                self.state.set_sap(sap['key'], state='searched' if not failed else 'attention',
-                                   detail=None if not failed else f'{failed} beams not searched in {run_name}')
+                outstanding = self.state.rows(f"""SELECT COUNT(*) AS n FROM files WHERE sap_key=?
+                    AND state IN ({','.join('?' * len(OUTSTANDING))})""", sap['key'], *OUTSTANDING)[0]['n']
+                if failed and not self.retried(sap['key']):
+                    # One more attempt before a person is asked: the 25 M-crossing
+                    # guard and a node lost mid-run both left beams unsearched.
+                    self.state.set_sap(sap['key'], state='prepared', run_name=None,
+                                       detail=f'automatic retry: {failed} beams not searched in {run_name}')
+                    self.state.event('retry', sap['key'], f'automatic: {failed} beams not searched in {run_name}')
+                elif failed:
+                    self.state.set_sap(sap['key'], state='attention', detail=f'{failed} beams not searched in {run_name}')
+                elif outstanding:
+                    self.state.set_sap(sap['key'], state='partial', detail=f'waiting for {outstanding} late beams')
+                else:
+                    if sap['sap_dir']:
+                        (Path(sap['sap_dir'])/MEAN).unlink(missing_ok=True)
+                    self.state.set_sap(sap['key'], state='searched', detail=None)
                 self.state.event('searched', sap['key'], f'{done}/{done + failed} beams in {run_name}; '
                                                          f'{kept} kept for review')
             if not self.o.keep_prepared:
@@ -718,6 +787,9 @@ class Campaign:
                 self.state.event('released', f['name'], why)
         return released
 
+    def retried(self, key):
+        return bool(self.state.rows("SELECT 1 FROM events WHERE kind='retry' AND subject=? LIMIT 1", key))
+
     def unsearched(self, key):
         """Flatfielded beams of a SAP that still need a search."""
         paths = []
@@ -753,6 +825,10 @@ class Campaign:
         with self.state.db() as db:
             db.execute("UPDATE files SET state='online' WHERE state='working'")
             db.execute("UPDATE saps SET state='staging' WHERE state='flatfielding'")
+        for sap in self.state.rows("SELECT * FROM saps WHERE state='staging' AND sap_dir IS NOT NULL"):
+            if (Path(sap['sap_dir'])/MEAN).is_file() and self.state.rows(
+                    "SELECT 1 FROM files WHERE sap_key=? AND state IN ('searched','kept') LIMIT 1", sap['key']):
+                self.state.set_sap(sap['key'], state='partial')
         # Searched before per-beam states existed: both filterbanks deleted.
         for f in self.state.rows("""SELECT f.surl,f.fil FROM files f JOIN saps s ON s.key=f.sap_key
                                     WHERE f.state='converted' AND s.state NOT IN ('staging','flatfielding')"""):
@@ -827,7 +903,7 @@ class Campaign:
             print(time.strftime('%Y-%m-%d %H:%M:%S'), json.dumps({k: report[k] for k in ('saps', 'files', 'free_tb')}),
                   flush=True)
             idle = not self.state.rows("SELECT 1 FROM saps WHERE state IN "
-                                       "('pending','staging','flatfielding','prepared','dispatched') LIMIT 1")
+                                       "('pending','staging','flatfielding','prepared','dispatched','partial') LIMIT 1")
             if self.o.once or self.should_stop() or (idle and not self.dispatches):
                 break
             # Retrieval work is taken in bounded batches; go straight back for more.
@@ -876,6 +952,13 @@ def parser():
     run.add_argument('--only-sap', nargs='+', help='Restrict admission to these SAP keys, e.g. L1163405_SAP001')
     run.add_argument('--exclude-beams', type=int, nargs='+', default=[12],
                      help='Beams never staged, converted or searched (default: 12, the incoherent beam)')
+    run.add_argument('--partial-after-hours', type=float, default=2.0,
+                     help='Search a SAP without its last --partial-missing beams once none has arrived for this long; '
+                          'the late ones are searched as they come (0 waits for every beam)')
+    run.add_argument('--partial-missing', type=int, default=3,
+                     help='Beams a SAP may still be waiting for, or have lost, and be searched without')
+    run.add_argument('--max-missing-central', type=int, default=3,
+                     help='Stage and search a SAP whose archive lacks up to this many central beams')
     run.add_argument('--keep-unflattened', action='store_true')
     run.add_argument('--keep-prepared', action='store_true',
                      help='Keep every flatfielded beam after its search, not only those with findings')
@@ -961,7 +1044,8 @@ def main(argv=None):
         except BlockingIOError:
             p.error(f'Another campaign driver is running in {a.root}')
         campaign = Campaign(a)
-        campaign.state.load(parse_inventory(a.inventory), missing_central_beams, tuple(a.exclude_beams))
+        campaign.state.load(parse_inventory(a.inventory), missing_central_beams, tuple(a.exclude_beams),
+                            a.max_missing_central)
         def stop(*_):
             campaign.stopping = True
         signal.signal(signal.SIGTERM, stop)

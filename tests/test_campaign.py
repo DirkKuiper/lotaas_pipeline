@@ -64,11 +64,18 @@ class FakeRunner:
             delete_converted(raw)
         return directory.parent, output
 
-    def flatfield(self, sap):
+    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None):
         paths = sorted(sap.glob('B*/*_32bit.fil'))
+        central = {int(p.parent.name[1:]) for p in paths} & set(C.CENTRAL)
+        if len(central) < len(C.CENTRAL) and not (allow_partial or mean):
+            raise ValueError(f'Missing {len(C.CENTRAL) - len(central)} central beams')
+        if mean and not Path(mean).is_file():
+            raise FileNotFoundError(mean)
         for path in paths:
             path.with_name(path.stem + '_ff.fil').write_bytes(b'ff')
-        self.flatfielded.append(sap)
+        if save_mean:
+            Path(save_mean).write_bytes(b'mean')
+        self.flatfielded.append((sap, allow_partial, save_mean, mean))
         return paths
 
 
@@ -192,23 +199,30 @@ def test_stageit_online_is_not_trusted_and_tape_only_files_are_requested_again(t
     assert all(r['submissions'] == 2 for r in campaign.state.rows("SELECT submissions FROM files WHERE state!='excluded'"))
 
 
-def test_a_file_that_keeps_failing_to_download_is_given_up_and_blocks_its_sap(tmp_path, monkeypatch):
-    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], max_failures=2)
-    campaign.tick()
-    put_online(api, where, '1000001', 0, FULL)
-    bad = C.basename(surl('1000001', 0, 20))
+def test_a_file_that_keeps_failing_is_given_up_and_its_sap_searched_without_it(tmp_path, monkeypatch):
+    def run(tmp, **overrides):
+        tmp.mkdir()
+        campaign, api, where = build(tmp, monkeypatch, [('1000001', 0, FULL)], max_failures=2, **overrides)
+        campaign.tick()
+        put_online(api, where, '1000001', 0, FULL)
+        bad = C.basename(surl('1000001', 0, 20))
 
-    def flaky(url, tokens, target, max_bytes):
-        if Path(target).name == bad:
-            raise IOError('Incomplete HTTP body')
-        return fake_download(url, tokens, target, max_bytes)
-    monkeypatch.setattr('euroflash.download.download', flaky)
-    campaign.tick()
-    campaign.tick()
-    campaign.tick()
-    row = campaign.state.rows('SELECT state,failures FROM files WHERE name=?', bad)[0]
-    assert row == {'state': 'failed', 'failures': 2}
-    sap = campaign.state.rows('SELECT state,detail FROM saps')[0]
+        def flaky(url, tokens, target, max_bytes):
+            if Path(target).name == bad:
+                raise IOError('Incomplete HTTP body')
+            return fake_download(url, tokens, target, max_bytes)
+        monkeypatch.setattr('euroflash.download.download', flaky)
+        for _ in range(3):
+            campaign.tick()
+        settle(campaign)
+        settle(campaign)
+        row = campaign.state.rows('SELECT state,failures FROM files WHERE name=?', bad)[0]
+        assert row == {'state': 'failed', 'failures': 2}
+        return campaign, campaign.state.rows('SELECT state,detail FROM saps')[0]
+    campaign, sap = run(tmp_path/'default')
+    assert sap['state'] == 'prepared'
+    assert campaign.runner.flatfielded[-1][1] is True           # flatfielded without central beam 20
+    campaign, sap = run(tmp_path/'strict', partial_missing=0)
     assert sap['state'] == 'attention' and '20' in sap['detail']
 
 
@@ -249,6 +263,14 @@ def test_a_search_removes_prepared_beams_that_succeeded_and_keeps_failures(tmp_p
     snapshot(tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'/'ledger-snapshot.sqlite', statuses)
     campaign.finish_dispatch(Namespace(run_name=run_name, returncode=1, node='efc-gpu-01'))
     assert [b.exists() for b in beams] == [True] + [False] * (len(beams) - 1)
+    # The first time, the unsearched beam is dispatched again without asking anyone.
+    after = campaign.state.rows('SELECT state,detail FROM saps')[0]
+    assert after['state'] == 'prepared' and after['detail'].startswith('automatic retry: 1 beams')
+    assert campaign.unsearched(sap['key']) == [beams[0]]
+    again = 'campaign-test-2'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=again)
+    snapshot(tmp_path/'campaign'/'results'/again/'efc-gpu-01'/'ledger-snapshot.sqlite', {beams[0].stem: 'failed'})
+    campaign.finish_dispatch(Namespace(run_name=again, returncode=1, node='efc-gpu-01'))
     after = campaign.state.rows('SELECT state,detail FROM saps')[0]
     assert after['state'] == 'attention' and after['detail'].startswith('1 beams')
 
@@ -432,7 +454,7 @@ def test_flatfielding_runs_beside_retrieval_and_frees_the_staging_slot(tmp_path,
                                  max_staging_saps=1)
     gate = threading.Event()
     slow = campaign.runner.flatfield
-    campaign.runner.flatfield = lambda sap: (gate.wait(5), slow(sap))[1]
+    campaign.runner.flatfield = lambda sap, **kw: (gate.wait(5), slow(sap, **kw))[1]
     campaign.tick()
     put_online(api, where, '1000001', 0, FULL)
     campaign.tick()
@@ -618,3 +640,65 @@ def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, mo
     assert campaign.kept_summary()['beams'] == 2
     assert campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='searched'")[0]['n'] == 71
     assert not campaign.unsearched(sap['key'])
+
+
+def test_a_sap_stalled_a_few_beams_short_is_searched_and_its_late_beams_follow(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)],
+                                 partial_after_hours=2.0, partial_missing=3)
+    campaign.tick()
+    late = [38, 58]
+    put_online(api, where, '1000001', 0, [b for b in FULL if b not in late])
+    campaign.tick()
+    settle(campaign)
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'staging'     # not stalled yet
+    with campaign.state.db() as db:                                                  # two hours pass
+        db.execute("UPDATE files SET updated=updated-7300 WHERE state='converted'")
+    settle(campaign)
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    sap_dir = Path(sap['sap_dir'])
+    assert sap['state'] == 'prepared' and (sap_dir/C.MEAN).is_file()
+    assert campaign.runner.flatfielded[-1][1:] == (True, str(sap_dir/C.MEAN), None)
+    event = campaign.state.rows("SELECT detail FROM events WHERE kind='partial'")[0]['detail']
+    assert '[38, 58]' in event
+    # The search of the beams present ends; the SAP waits for the rest.
+    run_name = 'campaign-partial'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    searched = sorted(sap_dir.glob('B*/*_ff.fil'))
+    snapshot(tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'/'ledger-snapshot.sqlite',
+             {b.stem: 'success' for b in searched})
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    assert sap['state'] == 'partial' and sap['detail'] == 'waiting for 2 late beams'
+    # The late beams arrive, are flatfielded with the saved flatfield and searched.
+    put_online(api, where, '1000001', 0, late)
+    campaign.tick()
+    settle(campaign)
+    settle(campaign)
+    assert campaign.runner.flatfielded[-1][1:] == (False, None, str(sap_dir/C.MEAN))
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    assert sap['state'] == 'prepared'
+    assert [p.parent.name for p in campaign.unsearched(sap['key'])] == ['B038', 'B058']
+    run_name = 'campaign-late'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    snapshot(tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'/'ledger-snapshot.sqlite',
+             {p.stem: 'success' for p in campaign.unsearched(sap['key'])})
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'searched'
+    assert not (sap_dir/C.MEAN).exists()
+
+
+def test_a_sap_the_archive_holds_a_few_central_beams_short_is_searched(tmp_path, monkeypatch):
+    short = [b for b in FULL if b != 38]
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, short)])
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'incomplete'   # build() loads strictly
+    campaign.state.load(C.parse_inventory(tmp_path/'inventory.txt'), C.missing_central_beams, (12,), 3)
+    assert campaign.state.rows('SELECT state,detail FROM saps')[0] == {
+        'state': 'pending', 'detail': 'missing central beams [38]'}
+    campaign.tick()
+    put_online(api, where, '1000001', 0, short)
+    campaign.tick()
+    settle(campaign)
+    settle(campaign)
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'prepared'
+    assert campaign.runner.flatfielded[-1][1:] == (True, None, None)

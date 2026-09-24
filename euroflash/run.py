@@ -234,14 +234,25 @@ class Runner:
             delete_converted(raw)
         return sap, output
 
-    def flatfield(self, sap):
-        """Flatfield every converted beam present in one SAP directory."""
+    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None):
+        """Flatfield every converted beam present in one SAP directory.
+
+        allow_partial takes fewer than 61 central beams (pilots, SAPs whose
+        archive lacks a few, SAPs searched before their last beams arrived);
+        save_mean keeps the flatfield for beams that arrive later, and mean
+        applies such a saved one to them, each late set a step of its own.
+        """
         paths = sorted(sap.glob('B*/*_32bit.fil'))
         if not paths:
             raise ValueError(f'No converted beams in {sap}')
-        arguments = [sap] + (['--allow-partial'] if self.args.pilot else [])
-        self.step(sap.parent.name+'_'+sap.name, 'flatfield',
-                  self.command('preproc/flatfield_fil.py', arguments),
+        arguments = [sap] + (['--allow-partial'] if allow_partial or self.args.pilot else [])
+        item = sap.parent.name+'_'+sap.name
+        if save_mean:
+            arguments += ['--save-mean', save_mean]
+        if mean:
+            arguments += ['--mean', mean]
+            item += '_late_' + '-'.join(p.parent.name for p in paths)
+        self.step(item, 'flatfield', self.command('preproc/flatfield_fil.py', arguments),
                   [p.with_name(p.stem+'_ff.fil') for p in paths])
         return [p.with_name(p.stem+'_ff.fil') for p in paths]
 

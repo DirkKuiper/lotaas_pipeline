@@ -67,19 +67,39 @@ def apply_flatfield(files, mean):
         print('Flatfielded:', output, flush=True)
 
 
+def save_mean(mean, path):
+    """Keep a SAP's flatfield for its beams that arrive after the rest were searched."""
+    partial = path + '.partial.npy'
+    np.save(partial, mean.astype(np.float32))
+    os.replace(partial, path)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('sap_directory')
-    p.add_argument('--allow-partial', action='store_true', help='Pilot only: permit fewer than 61 central beams')
+    p.add_argument('--allow-partial', action='store_true',
+                   help='Permit fewer than 61 central beams: pilots, SAPs whose archive lacks a few, and SAPs '
+                        'searched before their last beams arrived')
+    p.add_argument('--save-mean', help='Also write the flatfield (the central beams\' mean, float32 .npy) here')
+    p.add_argument('--mean', help='Flatfield the beams present with this saved mean instead of their own: the '
+                                  'beams of a SAP that arrived after the rest were flatfielded and removed')
     a = p.parse_args()
     files = sorted(glob.glob(os.path.join(a.sap_directory, 'B*', '*_32bit.fil')))
+    if a.mean:
+        if not files:
+            raise ValueError(f'No unflattened beams in {a.sap_directory}')
+        apply_flatfield(files, np.load(a.mean, mmap_mode='r'))
+        return
     found = {extract_beam_id(f) for f in files if 13 <= extract_beam_id(f) <= 73}
     missing = set(range(13, 74)) - found
     if missing and not a.allow_partial:
-        raise ValueError(f'Missing {len(missing)} central beams. Use --allow-partial only for a pilot.')
+        raise ValueError(f'Missing {len(missing)} central beams; --allow-partial flatfields without them')
     if missing:
-        print(f'PILOT: flatfield uses only {len(found)} of 61 central beams', flush=True)
-    apply_flatfield(files, compute_flatfield(files))
+        print(f'PARTIAL: flatfield uses {len(found)} of 61 central beams', flush=True)
+    mean = compute_flatfield(files)
+    if a.save_mean:
+        save_mean(mean, a.save_mean)
+    apply_flatfield(files, mean)
 
 
 if __name__ == '__main__':
