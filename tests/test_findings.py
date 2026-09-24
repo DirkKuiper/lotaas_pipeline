@@ -196,3 +196,12 @@ def test_the_keep_rule_runs_without_numpy(monkeypatch):
         monkeypatch.delitem(sys.modules, name, raising=False)
     module = importlib.import_module('euroflash.findings')
     assert module.Judge and importlib.import_module('lotaas_reprocessing.periodicity_veto').dm_consistent([30.0, 30.2])
+
+
+def test_ecliptic_positions_are_read_too():
+    # B0138+59 (J0141+6009) has an ecliptic timing solution; RA 01:41:39.9, Dec +60:09:32.
+    ra, dec = psrcat.ecliptic_to_equatorial(50.28081, 45.30668)
+    assert abs(ra - 25.416) < 0.01 and abs(dec - 60.159) < 0.01
+    text = 'PSRJ     J0141+6009\nELONG    50.28081\nELAT     45.30668\nDM       34.8\nF0       0.8130\n@---\n'
+    pulsar, = psrcat.parse(text)
+    assert abs(pulsar['ra'] - 25.416) < 0.01 and abs(pulsar['dec'] - 60.159) < 0.01

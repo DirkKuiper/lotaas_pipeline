@@ -51,12 +51,30 @@ def _records(text):
         yield record
 
 
+OBLIQUITY_DEG = 23.4392911   # J2000 mean obliquity of the ecliptic
+
+
+def ecliptic_to_equatorial(elong, elat):
+    """(ra, dec) in degrees from J2000 ecliptic longitude and latitude in degrees."""
+    lon, lat, eps = map(math.radians, (elong, elat, OBLIQUITY_DEG))
+    dec = math.asin(math.sin(lat) * math.cos(eps) + math.cos(lat) * math.sin(eps) * math.sin(lon))
+    ra = math.atan2(math.sin(lon) * math.cos(eps) - math.tan(lat) * math.sin(eps), math.cos(lon))
+    return math.degrees(ra) % 360, math.degrees(dec)
+
+
 def parse(text):
-    """Pulsars with a position, a DM and a period: dicts of name, ra, dec (deg), dm, period, f1, pepoch."""
+    """Pulsars with a position, a DM and a period: dicts of name, ra, dec (deg), dm, period, f1, pepoch.
+
+    Timing solutions in ecliptic coordinates give ELONG and ELAT instead of
+    RAJ and DECJ; 72 of the 383 pulsars LOTAAS detected are listed that way.
+    """
     pulsars = []
     for r in _records(text):
         try:
-            ra, dec = _sexagesimal(r['RAJ'], True), _sexagesimal(r['DECJ'], False)
+            if 'RAJ' in r and 'DECJ' in r:
+                ra, dec = _sexagesimal(r['RAJ'], True), _sexagesimal(r['DECJ'], False)
+            else:
+                ra, dec = ecliptic_to_equatorial(float(r['ELONG']), float(r['ELAT']))
             dm = float(r['DM'])
             if 'F0' in r:
                 f0 = float(r['F0'])
