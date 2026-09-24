@@ -34,19 +34,20 @@ SINGLE = 'single pulse'
 BOTH = 'single pulse and periodic'
 
 
-def catalogue_text(path=None):
+def catalogue_text(path=None, member='psrcat.db'):
+    """A file of the cached catalogue package: psrcat.db, or psrcat_ref for its references."""
     path = Path(path or os.environ.get('LOTAAS_PSRCAT') or psrcat.DEFAULT)
     try:
         if path.suffix == '.db':
-            return path.read_text(errors='replace')
+            return (path if member == 'psrcat.db' else path.with_name(member)).read_text(errors='replace')
         with tarfile.open(path) as archive:
-            member = next(m for m in archive.getmembers() if m.name.endswith('psrcat.db'))
-            return archive.extractfile(member).read().decode(errors='replace')
+            found = next(m for m in archive.getmembers() if m.name.endswith(member))
+            return archive.extractfile(found).read().decode(errors='replace')
     except (OSError, StopIteration, tarfile.TarError):
         return ''
 
 
-def _attributes(text):
+def attributes(text):
     """{PSRJ: {'surveys': [...], 'type': str, 'reference': str}} from the raw records."""
     found, record = {}, {}
 
@@ -76,10 +77,10 @@ def sources(path=None):
     text = catalogue_text(path)
     if not text:
         return []
-    attributes = _attributes(text)
+    found = attributes(text)
     out = []
     for p in psrcat.parse(text):
-        a = attributes.get(p['name'])
+        a = found.get(p['name'])
         if not a or 'lotaas' not in a['surveys']:
             continue
         period = 1 / p['f0']

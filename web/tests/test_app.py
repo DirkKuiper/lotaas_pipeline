@@ -168,29 +168,68 @@ def test_an_event_in_many_beams_at_scattered_dms_leaves_the_queue(cfg, campaign)
     assert 'Same moment in 6 beams of 1 SAP' in page and 'scattered DMs: interference' in page
 
 
-def test_known_pulsars_near_the_beams_are_listed_with_what_was_found(cfg, campaign, monkeypatch, tmp_path):
+def test_known_pulsars_no_lofar_paper_reports_are_listed_with_what_was_found(cfg, campaign, monkeypatch, tmp_path):
+    from web import lofar
     catalogue = tmp_path/'psrcat.db'
-    catalogue.write_text('PSRJ     J0847+6830\nRAJ      08:47:30.0\nDECJ     +68:30:00\nDM       30.0\n'
-                         'P0       0.5\nS400     12.0\n@----\n'
-                         'PSRJ     J0850+6800\nRAJ      08:50:00.0\nDECJ     +68:00:00\n'
-                         'DM       55.0\nP0       1.2\nS150     45.0\n@----\n'
-                         'PSRJ     J0846+6820\nRAJ      08:46:00.0\nDECJ     +68:20:00\nDM       40.0\n'
-                         'P0       0.0031\n@----\n')
+    catalogue.write_text(
+        'PSRJ     J0847+6830\nRAJ      08:47:30.0\nDECJ     +68:30:00\nDM       30.0\nP0       0.5\n'
+        'S400     12.0\nSURVEY   gbncc\n@----\n'
+        'PSRJ     J0850+6800\nRAJ      08:50:00.0\nDECJ     +68:00:00\nDM       55.0   0.1  bkk+16\n'
+        'P0       1.2\nS150     45.0\n@----\n'
+        'PSRJ     J0849+6810\nRAJ      08:49:00.0\nDECJ     +68:10:00\nDM       20.0\nP0       0.8\nSURVEY   lotaas\n@----\n'
+        'PSRJ     J0846+6820\nRAJ      08:46:00.0\nDECJ     +68:20:00\nDM       40.0\nP0       0.0031\n@----\n'
+        'PSRJ     J0848+6815\nRAJ      08:48:00.0\nDECJ     +68:15:00\nDM       400.0\nP0       0.5\n@----\n'
+        'PSRJ     J0845+6900\nPSRB     B0840+69\nRAJ      08:45:00.0\nDECJ     +69:00:00\nDM       10.0\n'
+        'P0       0.7\nS400     12.0\n@----\n'
+        'PSRJ     J1200+4500\nRAJ      12:00:00.0\nDECJ     +45:00:00\nDM       20.0\nP0       0.9\n@----\n')
+    (tmp_path/'psrcat_ref').write_text('***bkk+16  bkk+16:  Bilous, A. V., Kondratiev, V. I. & et al., 2016. '
+                                       'A LOFAR census of non-recycled pulsars. aap, 591, A134.\n\n'
+                                       '***xyz+20  xyz+20:  Other, A., 2020. Pulsars at 1.4 GHz. apj, 1, 1.\n')
+    census = tmp_path/'lofar-pulsars.tsv'
+    census.write_text('# test\nname\treference\tdetected\tlimit_mjy\nB0840+69\tBilous et al. 2016\t0\t5.0\n')
     monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    monkeypatch.setattr(lofar, 'TABLE', census)
     add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0),
-                              (25, 55.2, 9.0, 2, 'known_pulsar', 'J0850+6800', 1200.0)])
+                              (25, 10.1, 9.0, 2, 'known_pulsar', 'J0845+6900', 1200.0)])
     fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 80.0, 'half')     # its second harmonic
     Indexer(cfg).run_pass()
     client = client_for(cfg)
-    # A reviewer found the J0850+6800 'redetection' to be noise: it no longer counts.
-    cid = client.get('/single-pulse').text.split('J0850+6800')[0].rsplit('href="/verify/', 1)[1].split('?')[0]
+    # A reviewer found the J0845+6900 'redetection' to be noise: it no longer counts.
+    cid = client.get('/single-pulse').text.split('J0845+6900')[0].rsplit('href="/verify/', 1)[1].split('?')[0]
     assert client.post('/api/review', json={'id': cid, 'label': 'noise', 'reviewer': 'Dirk'}).status_code == 200
     Indexer(cfg).run_pass()
     page = client.get('/pulsars').text
-    assert 'J0847+6830' in page and 'S/N 14.0' in page and '(1/2)' in page and 'flag ok">both' in page
-    j0850 = page.split('J0850+6800')[1].split('</tr>')[0]
-    assert 'flag bad">missed' in j0850 and '>53<' in j0850      # bright (S150 45 mJy, 53 at 135 MHz) and near
-    assert 'P below the search' in page.split('J0846+6820')[1].split('</tr>')[0]
+    table = page.split('<tbody>')[1]
+    assert 'J0850+6800' not in table and 'J0849+6810' not in table and 'J1200+4500' not in table
+    row = table.split('J0847+6830')[1].split('</tr>')[0]
+    assert 'gbncc' in row and 'best S/N 14.0' in row and '(1/2)' in row and 'both · first LOFAR?' in row
+    row = table.split('J0845+6900')[1].split('</tr>')[0]
+    assert 'not detected: Bilous et al. 2016: &lt; 5 mJy' in row and 'flag">not found' in row
+    assert 'scattered beyond P' in table.split('J0848+6815')[1].split('</tr>')[0]
+    assert 'P below the search' in table.split('J0846+6820')[1].split('</tr>')[0]
+    # Found, then within reach and not found, then scattered, then too fast.
+    assert table.index('J0847+6830') < table.index('J0845+6900') < table.index('J0848+6815') < table.index('J0846+6820')
+    flat = page.replace('\n', '')
+    assert '>6</div>' in flat and '1 published by LOTAAS' in flat and '1 by other LOFAR work' in flat
+    everything = client.get('/pulsars?show=all').text.split('<tbody>')[1]
+    assert 'Bilous et al. 2016' in everything.split('J0850+6800')[1].split('</tr>')[0]
+    assert 'LOTAAS' in everything.split('J0849+6810')[1].split('</tr>')[0]
+    overview = client.get('/').text.replace('\n', '')
+    assert 'Known pulsars no LOFAR paper reports, found here' in overview
+    assert '1 <span class="muted small">/ 4 near searched beams' in overview
+
+
+def test_lofar_references_names_and_scattering():
+    from web import lofar
+    ref = ('***bkk+16  bkk+16:  Bilous, A. V. & Kondratiev, V. I., 2016. A LOFAR census of non-recycled '
+           'pulsars. aap, 591, A134.\n***bgt+21  bgt+21:  Bondonneau, L., 2021. Pulsars with NenuFAR: Backend '
+           'and pipelines. aap, 652, A34.\n')
+    assert lofar.citations(ref) == {'bkk+16': 'Bilous et al. 2016'}              # NenuFAR is not LOFAR
+    resolve = lofar.resolver([('J0636+5128', None), ('J0033+5700', None), ('J0014+4746', 'B0011+47')])
+    assert resolve('J0636+5129') == 'J0636+5128'                                  # a refined position
+    assert resolve('J0033+57') == 'J0033+5700' and resolve('B0011+47') == 'J0014+4746'
+    assert resolve('J2000+0000') is None
+    assert 20 < lofar.scattering_ms(100.0) < 40 and lofar.scattering_ms(0) is None
 
 
 def test_unreviewed_candidates_come_first_and_saving_moves_to_the_next_unreviewed(cfg, campaign):

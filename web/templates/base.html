@@ -24,7 +24,7 @@
     <a href="/single-pulse" class="{{ 'active' if path.startswith('/single-pulse') or section == 'sp' }}" title="FETCH positives and known pulsars waiting for review">Single pulse{% if waiting.sp %}<span class="badge-count">{{ waiting.sp }}</span>{% endif %}</a>
     <a href="/periodic" class="{{ 'active' if path.startswith('/periodic') or section == 'periodic' }}" title="Periodic folds waiting for review">Periodic{% if waiting.periodic %}<span class="badge-count">{{ waiting.periodic }}</span>{% endif %}</a>
     <a href="/lotaas" class="{{ 'active' if path.startswith('/lotaas') }}" title="Every published LOTAAS source, how LOTAAS found it, and what this campaign found of it">LOTAAS sources</a>
-    <a href="/pulsars" class="{{ 'active' if path.startswith('/pulsars') }}" title="Catalogued pulsars near searched beams, and what the search found of them">Known pulsars</a>
+    <a href="/pulsars" class="{{ 'active' if path.startswith('/pulsars') }}" title="Catalogued pulsars near searched beams that no LOFAR publication reports, and whether this campaign found them">Not seen by LOFAR</a>
   </nav>
   <div class="health">
     {% if d.get('running') %}

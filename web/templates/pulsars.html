@@ -1,42 +1,52 @@
 {% extends 'base.html' %}
-{% block title %}Known pulsars{% endblock %}
+{% block title %}Not seen by LOFAR{% endblock %}
 {% block page %}candidates{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>Known pulsars</h1>
-    <div class="muted">Every catalogued pulsar within {{ radius }}° of a beam the campaign searched, and what its search found: single pulses through the classifier's redetections (less those a reviewer called noise or RFI, and those seen across beams at scattered DMs), periods through any fold of the observation at the pulsar's DM and period, a harmonic 1/2–1/32, a multiple or a small fraction. Pilot and validation runs are left out. A bright pulsar within {{ beam_radius }}° of a beam that is found neither way is the search losing something. The flux is the catalogue's, scaled to 135 MHz with index −1.6: an indication, not a measurement.</div>
+    <h1>Known pulsars LOFAR has not reported</h1>
+    <div class="muted">Catalogued pulsars within {{ searched_radius }}° of a beam this campaign searched that no LOFAR publication known here reports: not LOTAAS (the catalogue's SURVEY field), no catalogue parameter cited to a paper about LOFAR or LOTAAS, and not among the detections of the LOFAR censuses (Bilous et al. 2016 and 2020), the profiles of Pilia et al. 2016 or the rotation-measure census of Sobey et al. 2019. A pulsar found here from this list may be LOFAR's first detection of it; check the literature before saying so. The flux is the catalogue's, scaled to 135 MHz with index −1.6, and the scattering time a typical one for the DM at 135 MHz (Bhat et al. 2004, uncertain by a factor of about 4): indications of reach, not measurements. Found counts single pulses (the classifier's redetections, and FETCH positives reviewed as a known source at its DM) and periods (any fold at its DM and period, a harmonic, a multiple or a small fraction).</div>
   </div>
 </div>
 <div class="tiles">
-  <div class="tile"><div class="label">Within {{ beam_radius }}° of a searched beam, P ≥ {{ (min_period * 1000)|round|int }} ms</div><div class="value">{{ summary.near }}</div><div class="sub">{{ summary.found }} found either way</div></div>
-  <div class="tile"><div class="label">Of those, found as a period</div><div class="value">{{ summary.periodic }}</div></div>
-  <div class="tile"><div class="label">Brighter than {{ bright_mjy|int }} mJy at 135 MHz</div><div class="value">{{ summary.bright }}</div><div class="sub">{{ summary.bright_periodic }} found as a period</div></div>
-  <div class="tile"><div class="label">Observations</div><div class="value">{{ summary.observations }}</div></div>
+  <div class="tile"><div class="label">Catalogued pulsars near searched beams</div><div class="value">{{ summary.near }}</div>
+    <div class="sub">{{ summary.lotaas }} published by LOTAAS (<a href="/lotaas">LOTAAS sources</a>) · {{ summary.lofar_other }} by other LOFAR work</div></div>
+  <div class="tile"><div class="label">No LOFAR paper reports them</div><div class="value">{{ summary.unseen }}</div>
+    <div class="sub">{{ summary.unseen_limits }} observed by a LOFAR census and not detected</div></div>
+  <div class="tile"><div class="label">Of those, found here</div><div class="value">{{ summary.unseen_found }}</div>
+    <div class="sub">possible first LOFAR detections</div></div>
+  <div class="tile"><div class="label">Within reach, not found</div><div class="value">{{ summary.unseen_open }}</div>
+    <div class="sub">{{ summary.unseen_out }} more faster than {{ (min_period * 1000)|round|int }} ms or scattered beyond their period</div></div>
+</div>
+<div class="chips">
+  {% for key, text in shows.items() %}<a class="chip{{ ' on' if key == show }}" href="/pulsars?show={{ key }}">{{ text }}</a>{% endfor %}
 </div>
 <div class="card flush">
   <div class="table-wrap tall">
     <table class="sortable">
-      <thead><tr><th>Observation</th><th>Pulsar</th><th class="num">DM</th><th class="num">P (s)</th>
-        <th class="num" title="Catalogue flux scaled to 135 MHz">S135 (mJy)</th><th>Nearest beam</th>
-        <th class="num">Separation (°)</th><th class="num" title="Searched beams within {{ beam_radius }}°">Beams near</th>
-        <th>Single pulses</th><th>Periodic</th><th>Found</th></tr></thead>
+      <thead><tr><th>Pulsar</th><th title="The survey that discovered it, from the catalogue">Discovered by</th><th class="num">P (s)</th><th class="num">DM</th>
+        <th class="num" title="Catalogue flux scaled to 135 MHz with index -1.6">S135 (mJy)</th>
+        <th class="num" title="Typical scattering time at 135 MHz for the DM (Bhat et al. 2004)">τ135 (ms)</th>
+        <th>Nearest searched beam</th><th class="num">Separation (°)</th><th class="num" title="Searched beams within {{ beam_radius }}°">Beams near</th>
+        <th>LOFAR</th><th>Single pulses here</th><th>Periodic here</th><th>This campaign</th></tr></thead>
       <tbody>
       {% for k in found %}
         <tr>
-          <td>{{ k.observation }}</td>
-          <td class="nowrap">{{ k.psrj }}{% if k.bname %} <span class="muted small">{{ k.bname }}</span>{% endif %}</td>
-          <td class="num">{{ '%.2f'|format(k.dm) }}</td>
-          <td class="num">{{ '%.6f'|format(k.period) }}</td>
-          <td class="num" title="{{ k.flux_source or 'no catalogue flux' }}">{{ '%.0f'|format(k.flux_mjy) if k.flux_mjy is not none else '' }}</td>
+          <td class="nowrap">{{ k.psrj }}{% if k.bname %} <span class="muted small">{{ k.bname }}</span>{% endif %}{% if k.rrat %} <span class="flag small">RRAT</span>{% endif %}</td>
+          <td class="nowrap small">{{ k.survey or '' }}</td>
+          <td class="num">{{ '%.4f'|format(k.period) }}</td>
+          <td class="num">{{ '%.1f'|format(k.dm) }}</td>
+          <td class="num" title="{{ k.flux_source or 'no catalogue flux' }}">{{ '%.1f'|format(k.flux_mjy) if k.flux_mjy is not none else '' }}</td>
+          <td class="num">{{ '%.3g'|format(k.scatter_ms) if k.scatter_ms is not none else '' }}</td>
           <td><a href="/beam/{{ k.beam_item }}">{{ k.beam_item|beam }}</a></td>
           <td class="num">{{ '%.2f'|format(k.separation_deg) }}</td>
           <td class="num">{{ k.beams_near }}</td>
-          <td class="nowrap">{% if k.sp_count %}{% if k.sp_id %}<a href="/verify/{{ k.sp_id }}">{% endif %}{{ k.sp_count }} beam{{ 's' if k.sp_count != 1 }}, S/N {{ '%.1f'|format(k.sp_best_snr) }}{% if k.sp_id %}</a>{% endif %}{% else %}—{% endif %}</td>
+          <td class="small">{% if k.lofar %}{{ k.lofar }}{% elif k.lofar_limits %}<span class="muted" title="Observed by a LOFAR census and not detected">not detected: {{ k.lofar_limits }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+          <td class="nowrap">{% if k.sp_count %}{% if k.sp_id %}<a href="/verify/{{ k.sp_id }}">{% endif %}{{ k.sp_count }}, best S/N {{ '%.1f'|format(k.sp_best_snr) }}{% if k.sp_id %}</a>{% endif %}{% else %}—{% endif %}</td>
           <td class="nowrap">{% if k.periodic_count %}{% if k.periodic_id %}<a href="/verify/{{ k.periodic_id }}">{% endif %}{{ k.periodic_count }} fold{{ 's' if k.periodic_count != 1 }}, best {{ '%.0f'|format(k.periodic_best) }} ({{ k.periodic_relation }}){% if k.periodic_id %}</a>{% endif %}{% else %}—{% endif %}</td>
-          <td class="nowrap">{% if not k.reachable %}<span class="muted small" title="The periodic search starts at {{ (min_period * 1000)|round|int }} ms">P below the search</span>{% elif k.status == 'missed' %}<span class="flag{{ ' bad' if k.separation_deg <= beam_radius and (k.flux_mjy or 0) >= bright_mjy }}">missed</span>{% elif k.status == 'both' %}<span class="flag ok">both</span>{% else %}<span class="flag">{{ k.status }}</span>{% endif %}</td>
+          <td class="nowrap">{% if k.found %}<span class="flag ok">{{ k.status }}{% if k.unseen %} · first LOFAR?{% endif %}</span>{% elif k.status == 'millisecond' %}<span class="muted small" title="The periodic search starts at {{ (min_period * 1000)|round|int }} ms">P below the search</span>{% elif k.status == 'scattered' %}<span class="muted small" title="Typical scattering at 135 MHz exceeds the period">scattered beyond P</span>{% else %}<span class="flag">not found</span>{% endif %}</td>
         </tr>
-      {% else %}<tr><td colspan="11" class="muted">No catalogued pulsar near a searched beam, or no catalogue on this host.</td></tr>{% endfor %}
+      {% else %}<tr><td colspan="13" class="muted">No pulsar in this selection{% if not summary.near %}: no catalogued pulsar lies within {{ searched_radius }}° of a searched beam, or there is no catalogue on this host{% endif %}.</td></tr>{% endfor %}
       </tbody>
     </table>
   </div>

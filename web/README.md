@@ -56,6 +56,16 @@ token cookie on every request. VS Code's port forwarding (or
   at its DM (Bhat et al. 2004) against its period.
 - The incoherent beam 12 and pilot runs are left out of both lists and queues
   unless asked for.
+- **LOTAAS sources** — every source the original LOTAAS search published, how
+  it found each (periodicity or single pulses), and whether this campaign has
+  found it again.
+- **Not seen by LOFAR** — catalogued pulsars within 1° of a searched beam that
+  no LOFAR publication reports (`web/lofar.py`: the catalogue's SURVEY field
+  and references, plus the census tables in `web/data/lofar-pulsars.tsv`,
+  rebuilt from VizieR with `python -m web.lofar`). One found here may be
+  LOFAR's first detection of it; the page also shows the census flux limits
+  and which are out of reach (faster than 16 ms, or scattered beyond their
+  period at 135 MHz).
 - **Review** — each list has its own queue: one candidate at a time, with the
   next one a key away. A
   single-pulse candidate gets its dynamic spectrum at any DM, time and frequency

@@ -1,0 +1,520 @@
+# LOFAR pulsar detections and census non-detections, built by python -m web.lofar
+# from VizieR J/A+A/591/A134, J/A+A/635/A75, J/A+A/586/A92 and J/MNRAS/484/3646.
+name	reference	detected	limit_mjy
+J0006+1834	Bilous et al. 2016	1	
+B0011+47	Bilous et al. 2016	1	
+J0033+57	Bilous et al. 2016	0	2.0
+B0037+56	Bilous et al. 2016	1	
+B0045+33	Bilous et al. 2016	1	
+B0052+51	Bilous et al. 2016	1	
+B0053+47	Bilous et al. 2016	1	
+B0105+65	Bilous et al. 2016	1	
+B0105+68	Bilous et al. 2016	1	
+J0106+4855	Bilous et al. 2016	0	1.6
+B0114+58	Bilous et al. 2016	1	
+B0136+57	Bilous et al. 2016	1	
+J0137+1654	Bilous et al. 2016	1	
+J0152+0948	Bilous et al. 2016	1	
+B0153+39	Bilous et al. 2016	1	
+J0205+6449	Bilous et al. 2016	0	2.2
+J0212+5222	Bilous et al. 2016	1	
+B0226+70	Bilous et al. 2016	1	
+B0301+19	Bilous et al. 2016	1	
+B0320+39	Bilous et al. 2016	1	
+J0324+5239	Bilous et al. 2016	1	
+J0329+1654	Bilous et al. 2016	1	
+B0331+45	Bilous et al. 2016	1	
+B0402+61	Bilous et al. 2016	1	
+B0410+69	Bilous et al. 2016	1	
+J0413+58	Bilous et al. 2016	0	1.9
+J0417+35	Bilous et al. 2016	1	
+J0419+44	Bilous et al. 2016	0	1.9
+J0435+27	Bilous et al. 2016	1	
+B0450+55	Bilous et al. 2016	1	
+B0458+46	Bilous et al. 2016	1	
+B0523+11	Bilous et al. 2016	1	
+B0525+21	Bilous et al. 2016	1	
+B0531+21	Bilous et al. 2016	1	
+B0540+23	Bilous et al. 2016	1	
+B0609+37	Bilous et al. 2016	1	
+J0611+30	Bilous et al. 2016	1	
+B0626+24	Bilous et al. 2016	1	
+B0643+80	Bilous et al. 2016	1	
+J0646+0905	Bilous et al. 2016	0	3.1
+J0647+0913	Bilous et al. 2016	0	3.3
+B0655+64	Bilous et al. 2016	1	
+B0656+14	Bilous et al. 2016	1	
+J0711+0931	Bilous et al. 2016	1	
+B0751+32	Bilous et al. 2016	1	
+B0809+74	Bilous et al. 2016	1	
+J0815+0939	Bilous et al. 2016	1	
+B0823+26	Bilous et al. 2016	1	
+B0841+80	Bilous et al. 2016	1	
+B0917+63	Bilous et al. 2016	1	
+B0940+16	Bilous et al. 2016	1	
+B0943+10	Bilous et al. 2016	1	
+J0943+22	Bilous et al. 2016	1	
+J0947+27	Bilous et al. 2016	1	
+B1910+20	Bilous et al. 2016	1	
+B1112+50	Bilous et al. 2016	1	
+B1133+16	Bilous et al. 2016	1	
+B1237+25	Bilous et al. 2016	1	
+J1238+21	Bilous et al. 2016	1	
+J1246+22	Bilous et al. 2016	1	
+J1313+0931	Bilous et al. 2016	1	
+B1322+83	Bilous et al. 2016	1	
+J1503+2111	Bilous et al. 2016	1	
+B1508+55	Bilous et al. 2016	1	
+B1530+27	Bilous et al. 2016	1	
+B1541+09	Bilous et al. 2016	1	
+J1549+2113	Bilous et al. 2016	1	
+J1612+2008	Bilous et al. 2016	1	
+J1627+1419	Bilous et al. 2016	1	
+B1633+24	Bilous et al. 2016	1	
+J1645+1012	Bilous et al. 2016	1	
+J1649+2533	Bilous et al. 2016	1	
+J1652+2651	Bilous et al. 2016	1	
+J1720+2150	Bilous et al. 2016	1	
+B1737+13	Bilous et al. 2016	1	
+J1740+1000	Bilous et al. 2016	1	
+J1741+2758	Bilous et al. 2016	1	
+J1746+2245	Bilous et al. 2016	1	
+J1746+2540	Bilous et al. 2016	1	
+J1752+2359	Bilous et al. 2016	1	
+B1753+52	Bilous et al. 2016	1	
+J1758+3030	Bilous et al. 2016	1	
+J1806+1023	Bilous et al. 2016	0	3.2
+B1811+40	Bilous et al. 2016	1	
+J1813+1822	Bilous et al. 2016	0	2.5
+J1814+1130	Bilous et al. 2016	0	3.3
+J1819+1305	Bilous et al. 2016	1	
+J1821+1715	Bilous et al. 2016	1	
+J1822+1120	Bilous et al. 2016	0	3.1
+J1828+1359	Bilous et al. 2016	0	3.2
+J1834+10	Bilous et al. 2016	1	
+J1837+1221	Bilous et al. 2016	0	3.6
+J1838+1650	Bilous et al. 2016	1	
+B1839+09	Bilous et al. 2016	1	
+B1839+56	Bilous et al. 2016	1	
+J1842+1332	Bilous et al. 2016	0	3.4
+B1842+14	Bilous et al. 2016	1	
+J1843+2024	Bilous et al. 2016	0	2.0
+J1848+0826	Bilous et al. 2016	1	
+B1848+12	Bilous et al. 2016	1	
+B1848+13	Bilous et al. 2016	1	
+J1849+2423	Bilous et al. 2016	1	
+B1852+10	Bilous et al. 2016	0	5.4
+J1853+0853	Bilous et al. 2016	0	4.3
+J1859+1526	Bilous et al. 2016	1	
+J1900+30	Bilous et al. 2016	1	
+J1901+1306	Bilous et al. 2016	1	
+J1903+2225	Bilous et al. 2016	0	2.8
+B1905+39	Bilous et al. 2016	1	
+J1906+1854	Bilous et al. 2016	1	
+J1908+2351	Bilous et al. 2016	1	
+J1909+1859	Bilous et al. 2016	1	
+J1911+1758	Bilous et al. 2016	1	
+J1912+2525	Bilous et al. 2016	1	
+J1913+3732	Bilous et al. 2016	1	
+B1915+22	Bilous et al. 2016	1	
+B1918+26	Bilous et al. 2016	1	
+B1919+21	Bilous et al. 2016	1	
+J1927+0911	Bilous et al. 2016	0	5.2
+B1929+10	Bilous et al. 2016	1	
+B1930+13	Bilous et al. 2016	1	
+J1937+2950	Bilous et al. 2016	1	
+J1941+1026	Bilous et al. 2016	0	3.2
+J1941+1341	Bilous et al. 2016	0	3.6
+B1942+17	Bilous et al. 2016	0	2.5
+B1944+17	Bilous et al. 2016	1	
+B1946+35	Bilous et al. 2016	1	
+J1947+0915	Bilous et al. 2016	0	3.8
+B1949+14	Bilous et al. 2016	1	
+J1951+1123	Bilous et al. 2016	1	
+J1953+1149	Bilous et al. 2016	0	2.9
+B1953+50	Bilous et al. 2016	1	
+J1956+0838	Bilous et al. 2016	1	
+J1959+3620	Bilous et al. 2016	0	3.5
+B2000+40	Bilous et al. 2016	1	
+J2002+1637	Bilous et al. 2016	1	
+J2007+0809	Bilous et al. 2016	1	
+J2007+0910	Bilous et al. 2016	1	
+J2008+2513	Bilous et al. 2016	1	
+J2015+2524	Bilous et al. 2016	0	2.0
+B2016+28	Bilous et al. 2016	1	
+J2017+2043	Bilous et al. 2016	1	
+B2020+28	Bilous et al. 2016	1	
+B2021+51	Bilous et al. 2016	1	
+B2022+50	Bilous et al. 2016	1	
+J2024+48	Bilous et al. 2016	0	2.7
+B2025+21	Bilous et al. 2016	1	
+J2027+4557	Bilous et al. 2016	0	3.1
+B2028+22	Bilous et al. 2016	1	
+J2030+55	Bilous et al. 2016	0	2.1
+B2034+19	Bilous et al. 2016	1	
+J2036+2835	Bilous et al. 2016	1	
+B2036+53	Bilous et al. 2016	1	
+J2040+1657	Bilous et al. 2016	1	
+J2043+2740	Bilous et al. 2016	1	
+B2044+15	Bilous et al. 2016	1	
+J2045+0912	Bilous et al. 2016	1	
+B2045+56	Bilous et al. 2016	1	
+J2047+5029	Bilous et al. 2016	0	2.9
+J2048+2255	Bilous et al. 2016	1	
+B2053+21	Bilous et al. 2016	1	
+B2053+36	Bilous et al. 2016	1	
+J2102+38	Bilous et al. 2016	0	2.3
+B2110+27	Bilous et al. 2016	1	
+J2111+2106	Bilous et al. 2016	1	
+J2111+40	Bilous et al. 2016	0	1.1
+B2113+14	Bilous et al. 2016	1	
+B2122+13	Bilous et al. 2016	1	
+J2139+2242	Bilous et al. 2016	1	
+B2148+63	Bilous et al. 2016	1	
+J2151+2315	Bilous et al. 2016	0	2.1
+B2154+40	Bilous et al. 2016	1	
+J2155+2813	Bilous et al. 2016	1	
+J2156+2618	Bilous et al. 2016	1	
+J2203+50	Bilous et al. 2016	0	1.9
+J2205+1444	Bilous et al. 2016	1	
+J2206+6151	Bilous et al. 2016	0	2.4
+B2210+29	Bilous et al. 2016	1	
+J2215+1538	Bilous et al. 2016	1	
+B2217+47	Bilous et al. 2016	1	
+J2222+2923	Bilous et al. 2016	1	
+B2224+65	Bilous et al. 2016	1	
+B2227+61	Bilous et al. 2016	1	
+J2234+2114	Bilous et al. 2016	1	
+B2241+69	Bilous et al. 2016	1	
+J2243+1518	Bilous et al. 2016	1	
+J2253+1516	Bilous et al. 2016	1	
+B2303+30	Bilous et al. 2016	1	
+B2303+46	Bilous et al. 2016	1	
+B2306+55	Bilous et al. 2016	1	
+J2307+2225	Bilous et al. 2016	1	
+B2310+42	Bilous et al. 2016	1	
+B2315+21	Bilous et al. 2016	1	
+J2319+6411	Bilous et al. 2016	0	2.3
+B0011+47	Bilous et al. 2020	1	
+B0045+33	Bilous et al. 2020	0	56.0
+B0052+51	Bilous et al. 2020	0	22.6
+B0053+47	Bilous et al. 2020	1	
+B0105+68	Bilous et al. 2020	0	140.7
+B0114+58	Bilous et al. 2020	0	99.8
+J0137+1654	Bilous et al. 2020	0	42.8
+B0136+57	Bilous et al. 2020	0	47.8
+B0153+39	Bilous et al. 2020	0	52.6
+B0226+70	Bilous et al. 2020	1	
+B0301+19	Bilous et al. 2020	1	
+B0320+39	Bilous et al. 2020	1	
+J0324+5239	Bilous et al. 2020	0	70.5
+B0410+69	Bilous et al. 2020	0	38.4
+J0417+35	Bilous et al. 2020	0	38.0
+B0450+55	Bilous et al. 2020	1	
+B0531+21	Bilous et al. 2020	0	70.6
+J0611+30	Bilous et al. 2020	1	
+B0609+37	Bilous et al. 2020	1	
+B0626+24	Bilous et al. 2020	0	51.5
+B0643+80	Bilous et al. 2020	0	66.8
+B0655+64	Bilous et al. 2020	1	
+B0656+14	Bilous et al. 2020	0	94.8
+B0751+32	Bilous et al. 2020	1	
+B0809+74	Bilous et al. 2020	1	
+B0823+26	Bilous et al. 2020	1	
+B0841+80	Bilous et al. 2020	0	24.5
+B0917+63	Bilous et al. 2020	1	
+B0940+16	Bilous et al. 2020	0	61.2
+J0943+22	Bilous et al. 2020	0	39.2
+B0943+10	Bilous et al. 2020	1	
+J0947+27	Bilous et al. 2020	0	19.7
+B1112+50	Bilous et al. 2020	1	
+B1133+16	Bilous et al. 2020	1	
+J1238+21	Bilous et al. 2020	1	
+B1237+25	Bilous et al. 2020	1	
+J1313+0931	Bilous et al. 2020	1	
+B1322+83	Bilous et al. 2020	1	
+J1503+2111	Bilous et al. 2020	0	35.9
+B1508+55	Bilous et al. 2020	1	
+B1530+27	Bilous et al. 2020	1	
+B1541+09	Bilous et al. 2020	1	
+J1549+2113	Bilous et al. 2020	0	91.8
+J1612+2008	Bilous et al. 2020	0	55.1
+J1627+1419	Bilous et al. 2020	0	68.0
+B1633+24	Bilous et al. 2020	1	
+J1645+1012	Bilous et al. 2020	1	
+J1649+2533	Bilous et al. 2020	0	68.8
+J1652+2651	Bilous et al. 2020	0	31.9
+J1720+2150	Bilous et al. 2020	0	57.6
+B1737+13	Bilous et al. 2020	1	
+J1741+2758	Bilous et al. 2020	0	56.3
+J1746+2245	Bilous et al. 2020	0	21.6
+J1752+2359	Bilous et al. 2020	0	51.3
+B1753+52	Bilous et al. 2020	0	19.1
+J1758+3030	Bilous et al. 2020	1	
+B1811+40	Bilous et al. 2020	1	
+J1838+1650	Bilous et al. 2020	0	92.5
+B1839+09	Bilous et al. 2020	1	
+B1839+56	Bilous et al. 2020	1	
+B1842+14	Bilous et al. 2020	1	
+J1900+30	Bilous et al. 2020	0	48.7
+B1905+39	Bilous et al. 2020	0	35.3
+B1919+21	Bilous et al. 2020	1	
+B1929+10	Bilous et al. 2020	1	
+B1946+35	Bilous et al. 2020	0	79.5
+B1953+50	Bilous et al. 2020	1	
+J2017+2043	Bilous et al. 2020	0	43.1
+B2016+28	Bilous et al. 2020	1	
+B2020+28	Bilous et al. 2020	1	
+B2022+50	Bilous et al. 2020	1	
+B2034+19	Bilous et al. 2020	0	25.7
+J2040+1657	Bilous et al. 2020	0	36.7
+B2044+15	Bilous et al. 2020	0	48.1
+B2053+21	Bilous et al. 2020	0	34.2
+B2113+14	Bilous et al. 2020	0	46.0
+J2139+2242	Bilous et al. 2020	0	39.0
+B2154+40	Bilous et al. 2020	0	45.2
+B2217+47	Bilous et al. 2020	1	
+B2224+65	Bilous et al. 2020	1	
+B2227+61	Bilous et al. 2020	0	60.5
+J2253+1516	Bilous et al. 2020	0	42.5
+B2303+30	Bilous et al. 2020	1	
+B2303+46	Bilous et al. 2020	0	44.5
+B2306+55	Bilous et al. 2020	1	
+B2310+42	Bilous et al. 2020	1	
+B2315+21	Bilous et al. 2020	1	
+B0011+47	Pilia et al. 2016	1	
+B0031-07	Pilia et al. 2016	1	
+J0051+0423	Pilia et al. 2016	1	
+B0059+65	Pilia et al. 2016	1	
+B0105+65	Pilia et al. 2016	1	
+B0114+58	Pilia et al. 2016	1	
+B0136+57	Pilia et al. 2016	1	
+B0138+59	Pilia et al. 2016	1	
+B0301+19	Pilia et al. 2016	1	
+B0320+39	Pilia et al. 2016	1	
+B0329+54	Pilia et al. 2016	1	
+B0331+45	Pilia et al. 2016	1	
+B0339+53	Pilia et al. 2016	1	
+B0355+54	Pilia et al. 2016	1	
+B0402+61	Pilia et al. 2016	1	
+B0410+69	Pilia et al. 2016	1	
+B0447-12	Pilia et al. 2016	1	
+B0450+55	Pilia et al. 2016	1	
+B0450-18	Pilia et al. 2016	1	
+B0523+11	Pilia et al. 2016	1	
+B0525+21	Pilia et al. 2016	1	
+B0540+23	Pilia et al. 2016	1	
+B0609+37	Pilia et al. 2016	1	
+B0611+22	Pilia et al. 2016	1	
+B0626+24	Pilia et al. 2016	1	
+B0643+80	Pilia et al. 2016	1	
+B0809+74	Pilia et al. 2016	1	
+B0818-13	Pilia et al. 2016	1	
+B0820+02	Pilia et al. 2016	1	
+B0823+26	Pilia et al. 2016	1	
+B0834+06	Pilia et al. 2016	1	
+B0906-17	Pilia et al. 2016	1	
+B0917+63	Pilia et al. 2016	1	
+B0919+06	Pilia et al. 2016	1	
+B0943+10	Pilia et al. 2016	1	
+B0950+08	Pilia et al. 2016	1	
+B1112+50	Pilia et al. 2016	1	
+B1133+16	Pilia et al. 2016	1	
+B1237+25	Pilia et al. 2016	1	
+J1238+21	Pilia et al. 2016	1	
+J1313+0931	Pilia et al. 2016	1	
+B1322+83	Pilia et al. 2016	1	
+B1508+55	Pilia et al. 2016	1	
+B1530+27	Pilia et al. 2016	1	
+B1540-06	Pilia et al. 2016	1	
+B1541+09	Pilia et al. 2016	1	
+B1604-00	Pilia et al. 2016	1	
+B1612+07	Pilia et al. 2016	1	
+J1627+1419	Pilia et al. 2016	1	
+B1633+24	Pilia et al. 2016	1	
+B1642-03	Pilia et al. 2016	1	
+J1645+1012	Pilia et al. 2016	1	
+J1652+2651	Pilia et al. 2016	1	
+B1737+13	Pilia et al. 2016	1	
+B1749-28	Pilia et al. 2016	1	
+B1818-04	Pilia et al. 2016	1	
+B1821+05	Pilia et al. 2016	1	
+B1822-09	Pilia et al. 2016	1	
+B1831-04	Pilia et al. 2016	1	
+B1839+09	Pilia et al. 2016	1	
+B1839+56	Pilia et al. 2016	1	
+B1842+14	Pilia et al. 2016	1	
+B1848+12	Pilia et al. 2016	1	
+B1848+13	Pilia et al. 2016	1	
+B1857-26	Pilia et al. 2016	1	
+B1905+39	Pilia et al. 2016	1	
+B1907+00	Pilia et al. 2016	1	
+B1907+02	Pilia et al. 2016	1	
+B1907+10	Pilia et al. 2016	1	
+B1911-04	Pilia et al. 2016	1	
+B1914+09	Pilia et al. 2016	1	
+B1915+13	Pilia et al. 2016	1	
+B1917+00	Pilia et al. 2016	1	
+B1918+26	Pilia et al. 2016	1	
+B1919+21	Pilia et al. 2016	1	
+B1920+21	Pilia et al. 2016	1	
+B1923+04	Pilia et al. 2016	1	
+B1929+10	Pilia et al. 2016	1	
+B1953+50	Pilia et al. 2016	1	
+B2021+51	Pilia et al. 2016	1	
+B2022+50	Pilia et al. 2016	1	
+B2043-04	Pilia et al. 2016	1	
+B2044+15	Pilia et al. 2016	1	
+B2106+44	Pilia et al. 2016	1	
+B2110+27	Pilia et al. 2016	1	
+B2113+14	Pilia et al. 2016	1	
+B2122+13	Pilia et al. 2016	1	
+B2148+63	Pilia et al. 2016	1	
+B2154+40	Pilia et al. 2016	1	
+B2217+47	Pilia et al. 2016	1	
+B2224+65	Pilia et al. 2016	1	
+B2227+61	Pilia et al. 2016	1	
+J2248-0101	Pilia et al. 2016	1	
+J2253+1516	Pilia et al. 2016	1	
+B2255+58	Pilia et al. 2016	1	
+B2303+30	Pilia et al. 2016	1	
+B2306+55	Pilia et al. 2016	1	
+B2310+42	Pilia et al. 2016	1	
+B2315+21	Pilia et al. 2016	1	
+B2334+61	Pilia et al. 2016	1	
+J0014+4746	Sobey et al. 2019	1	
+J0030+0451	Sobey et al. 2019	1	
+J0040+5716	Sobey et al. 2019	1	
+J0048+3412	Sobey et al. 2019	1	
+J0055+5117	Sobey et al. 2019	1	
+J0056+4756	Sobey et al. 2019	1	
+J0108+6608	Sobey et al. 2019	1	
+J0108+6905	Sobey et al. 2019	1	
+J0137+1654	Sobey et al. 2019	1	
+J0139+5814	Sobey et al. 2019	1	
+J0152+0948	Sobey et al. 2019	1	
+J0156+3949	Sobey et al. 2019	1	
+J0212+5222	Sobey et al. 2019	1	
+J0214+5222	Sobey et al. 2019	1	
+J0218+4232	Sobey et al. 2019	1	
+J0231+7026	Sobey et al. 2019	1	
+J0304+1932	Sobey et al. 2019	1	
+J0323+3944	Sobey et al. 2019	1	
+J0335+4555	Sobey et al. 2019	1	
+J0406+6138	Sobey et al. 2019	1	
+J0407+1607	Sobey et al. 2019	1	
+J0415+6954	Sobey et al. 2019	1	
+J0417+35	Sobey et al. 2019	1	
+J0435+2749	Sobey et al. 2019	1	
+J0454+5543	Sobey et al. 2019	1	
+J0525+1115	Sobey et al. 2019	1	
+J0528+2200	Sobey et al. 2019	1	
+J0534+2200	Sobey et al. 2019	1	
+J0543+2329	Sobey et al. 2019	1	
+J0611+30	Sobey et al. 2019	1	
+J0612+3721	Sobey et al. 2019	1	
+J0621+1002	Sobey et al. 2019	1	
+J0629+2415	Sobey et al. 2019	1	
+J0636+5129	Sobey et al. 2019	1	
+J0645+5158	Sobey et al. 2019	1	
+J0653+8051	Sobey et al. 2019	1	
+J0659+1414	Sobey et al. 2019	1	
+J0700+6418	Sobey et al. 2019	1	
+J0754+3231	Sobey et al. 2019	1	
+J0814+7429	Sobey et al. 2019	1	
+J0826+2637	Sobey et al. 2019	1	
+J0849+8028	Sobey et al. 2019	1	
+J0921+6254	Sobey et al. 2019	1	
+J0943+1631	Sobey et al. 2019	1	
+J0943+2253	Sobey et al. 2019	1	
+J0946+0951	Sobey et al. 2019	1	
+J0947+2740	Sobey et al. 2019	1	
+J1012+5307	Sobey et al. 2019	1	
+J1022+1001	Sobey et al. 2019	1	
+J1024-0719	Sobey et al. 2019	1	
+J1115+5030	Sobey et al. 2019	1	
+J1136+1551	Sobey et al. 2019	1	
+J1238+2152	Sobey et al. 2019	1	
+J1246+2253	Sobey et al. 2019	1	
+J1300+1240	Sobey et al. 2019	1	
+J1313+0931	Sobey et al. 2019	1	
+J1321+8323	Sobey et al. 2019	1	
+J1509+5531	Sobey et al. 2019	1	
+J1532+2745	Sobey et al. 2019	1	
+J1543+0929	Sobey et al. 2019	1	
+J1612+2008	Sobey et al. 2019	1	
+J1627+1419	Sobey et al. 2019	1	
+J1635+2418	Sobey et al. 2019	1	
+J1640+2224	Sobey et al. 2019	1	
+J1645+1012	Sobey et al. 2019	1	
+J1649+2533	Sobey et al. 2019	1	
+J1652+2651	Sobey et al. 2019	1	
+J1720+2150	Sobey et al. 2019	1	
+J1740+1311	Sobey et al. 2019	1	
+J1741+2758	Sobey et al. 2019	1	
+J1744-1134	Sobey et al. 2019	1	
+J1746+2245	Sobey et al. 2019	1	
+J1746+2540	Sobey et al. 2019	1	
+J1752+2359	Sobey et al. 2019	1	
+J1754+5201	Sobey et al. 2019	1	
+J1758+3030	Sobey et al. 2019	1	
+J1810+1744	Sobey et al. 2019	1	
+J1813+4013	Sobey et al. 2019	1	
+J1821+1715	Sobey et al. 2019	1	
+J1838+1650	Sobey et al. 2019	1	
+J1840+5640	Sobey et al. 2019	1	
+J1841+0912	Sobey et al. 2019	1	
+J1844+1454	Sobey et al. 2019	1	
+J1849+2423	Sobey et al. 2019	1	
+J1850+1335	Sobey et al. 2019	1	
+J1851+1259	Sobey et al. 2019	1	
+J1907+4002	Sobey et al. 2019	1	
+J1912+2525	Sobey et al. 2019	1	
+J1920+2650	Sobey et al. 2019	1	
+J1921+2153	Sobey et al. 2019	1	
+J1923+2515	Sobey et al. 2019	1	
+J1932+1059	Sobey et al. 2019	1	
+J1939+2134	Sobey et al. 2019	1	
+J1946+1805	Sobey et al. 2019	1	
+J1948+3540	Sobey et al. 2019	1	
+J1955+5059	Sobey et al. 2019	1	
+J1956+0838	Sobey et al. 2019	1	
+J2002+1637	Sobey et al. 2019	1	
+J2007+0809	Sobey et al. 2019	1	
+J2007+0910	Sobey et al. 2019	1	
+J2017+2043	Sobey et al. 2019	1	
+J2018+2839	Sobey et al. 2019	1	
+J2022+2854	Sobey et al. 2019	1	
+J2022+5154	Sobey et al. 2019	1	
+J2023+5037	Sobey et al. 2019	1	
+J2036+2835	Sobey et al. 2019	1	
+J2037+1942	Sobey et al. 2019	1	
+J2038+5319	Sobey et al. 2019	1	
+J2043+1711	Sobey et al. 2019	1	
+J2043+2740	Sobey et al. 2019	1	
+J2046+1540	Sobey et al. 2019	1	
+J2046+5708	Sobey et al. 2019	1	
+J2055+2209	Sobey et al. 2019	1	
+J2111+2106	Sobey et al. 2019	1	
+J2113+2754	Sobey et al. 2019	1	
+J2116+1414	Sobey et al. 2019	1	
+J2139+2242	Sobey et al. 2019	1	
+J2149+6329	Sobey et al. 2019	1	
+J2155+2813	Sobey et al. 2019	1	
+J2157+4017	Sobey et al. 2019	1	
+J2205+1444	Sobey et al. 2019	1	
+J2212+2933	Sobey et al. 2019	1	
+J2214+3000	Sobey et al. 2019	1	
+J2215+1538	Sobey et al. 2019	1	
+J2219+4754	Sobey et al. 2019	1	
+J2222+2923	Sobey et al. 2019	1	
+J2225+6535	Sobey et al. 2019	1	
+J2229+6205	Sobey et al. 2019	1	
+J2242+6950	Sobey et al. 2019	1	
+J2253+1516	Sobey et al. 2019	1	
+J2305+3100	Sobey et al. 2019	1	
+J2305+4707	Sobey et al. 2019	1	
+J2308+5547	Sobey et al. 2019	1	
+J2313+4253	Sobey et al. 2019	1	
+J2317+1439	Sobey et al. 2019	1	
+J2317+2149	Sobey et al. 2019	1	

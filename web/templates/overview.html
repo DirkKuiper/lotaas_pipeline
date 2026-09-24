@@ -12,7 +12,7 @@
   {% include '_project_filter.html' %}
 </div>
 
-{% if lotaas.total %}
+{% if lotaas.total or pulsars.near %}
 <div class="tiles">
   <div class="tile"><div class="label">Published LOTAAS sources redetected</div>
     <div class="value">{{ lotaas.found }} <span class="muted small">/ {{ lotaas.searched }} searched</span></div>
@@ -21,6 +21,9 @@
   <div class="tile"><div class="label">LOTAAS sources in fields searched so far</div>
     <div class="value">{{ lotaas.searched }} <span class="muted small">/ {{ lotaas.total }}</span></div>
     <div class="sub">{{ lotaas.missed }} searched but not found yet</div></div>
+  {% if pulsars.near %}<div class="tile"><div class="label">Known pulsars no LOFAR paper reports, found here</div>
+    <div class="value">{{ pulsars.unseen_found }} <span class="muted small">/ {{ pulsars.unseen }} near searched beams</span></div>
+    <div class="sub">{{ pulsars.unseen_open }} within reach not found · {{ pulsars.unseen_out }} millisecond or scattered<br><a href="/pulsars">Not seen by LOFAR →</a></div></div>{% endif %}
 </div>
 {% endif %}
 {% if scope %}

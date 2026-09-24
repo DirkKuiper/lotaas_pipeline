@@ -60,8 +60,6 @@ COINCIDENT_BEAMS = 5
 
 # The periodic search's shortest period; millisecond pulsars are out of its reach.
 MIN_PERIOD_SECONDS = 0.016
-# Flux at 135 MHz (catalogue, scaled) above which a pulsar near a beam should be found.
-BRIGHT_MJY = 20.0
 
 
 def coincident_sql(alias):
@@ -409,9 +407,10 @@ def create_app(cfg, run_background=True):
                 ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.type='candidate'
                 ORDER BY c.found DESC LIMIT 8""")
             _, lotaas = lotaas_summary(db)
+            _, pulsars = pulsar_summary(db)
         total = sum(saps.values())
         remaining = sum(v for k, v in saps.items() if k not in ('searched', 'incomplete'))
-        return page(request, 'overview.html', lotaas=lotaas, saps=saps, files=files, total=total, remaining=remaining,
+        return page(request, 'overview.html', lotaas=lotaas, pulsars=pulsars, saps=saps, files=files, total=total, remaining=remaining,
                     beams_searched=beams_searched, campaign_beams=campaign_beams,
                     eta_days=estimate.get('pace_days'), forecast=forecast, inventory=inventory,
                     scope=scope, selected_project=selected_project, estimate=estimate,
@@ -819,29 +818,50 @@ def create_app(cfg, run_background=True):
             return page(request, 'verify_periodic.html', **context)
         return page(request, 'verify_sp.html', **context)
 
-    # ------------------------------------------------------- known pulsars
-    @app.get('/pulsars', response_class=HTMLResponse)
-    def known_pulsars(request: Request):
-        from web.indexer import BEAM_RADIUS_DEG, KNOWN_PULSAR_RADIUS_DEG
-        with store.reading(cfg) as db:
-            found = rows(db, """SELECT k.*,
-                    (SELECT id FROM candidates c WHERE c.kind='sp' AND c.type='known_pulsar' AND c.pulsar=k.psrj
-                     AND c.item=k.sp_item ORDER BY c.snr DESC LIMIT 1) AS sp_id,
-                    (SELECT id FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
-                     AND c.snr=k.periodic_best LIMIT 1) AS periodic_id
-                FROM pulsar_recovery k ORDER BY k.observation, k.separation_deg""")
+    # ------------------------------------------------ pulsars LOFAR has not seen
+    PULSAR_SHOWS = {'unseen': 'Never reported by LOFAR', 'found': 'Found here, never reported by LOFAR',
+                    'all': 'Every catalogued pulsar near a searched beam'}
+
+    def pulsar_summary(db):
+        found = rows(db, """SELECT k.*,
+                (SELECT id FROM candidates c WHERE c.kind='sp' AND c.item=k.sp_item AND c.snr=k.sp_best_snr
+                 LIMIT 1) AS sp_id,
+                (SELECT id FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
+                 AND c.snr=k.periodic_best LIMIT 1) AS periodic_id
+            FROM catalogue_pulsars k""")
         for k in found:
-            k['reachable'] = k['period'] >= MIN_PERIOD_SECONDS
+            k['unseen'] = not k['lofar']
             k['status'] = ('both' if k['sp_count'] and k['periodic_count'] else 'single pulses' if k['sp_count']
-                           else 'periodic' if k['periodic_count'] else 'missed')
-        near = [k for k in found if k['separation_deg'] <= BEAM_RADIUS_DEG and k['reachable']]
-        bright = [k for k in near if (k['flux_mjy'] or 0) >= BRIGHT_MJY]
-        summary = {'near': len(near), 'found': sum(k['status'] != 'missed' for k in near),
-                   'periodic': sum(1 for k in near if k['periodic_count']),
-                   'bright': len(bright), 'bright_periodic': sum(1 for k in bright if k['periodic_count']),
-                   'observations': len({k['observation'] for k in found})}
-        return page(request, 'pulsars.html', found=found, summary=summary, beam_radius=BEAM_RADIUS_DEG,
-                    radius=KNOWN_PULSAR_RADIUS_DEG, bright_mjy=BRIGHT_MJY, min_period=MIN_PERIOD_SECONDS)
+                           else 'periodic' if k['periodic_count'] else
+                           'millisecond' if k['period'] < MIN_PERIOD_SECONDS else
+                           'scattered' if (k['scatter_ms'] or 0) / 1000 > k['period'] else 'not found')
+            k['found'] = k['status'] in ('both', 'single pulses', 'periodic')
+        unseen = [k for k in found if k['unseen']]
+        summary = {'near': len(found), 'found': sum(k['found'] for k in found),
+                   'lotaas': sum(1 for k in found if 'LOTAAS' in (k['lofar'] or '')),
+                   'lofar_other': sum(1 for k in found if k['lofar'] and 'LOTAAS' not in k['lofar']),
+                   'unseen': len(unseen), 'unseen_found': sum(k['found'] for k in unseen),
+                   'unseen_limits': sum(1 for k in unseen if k['lofar_limits']),
+                   'unseen_open': sum(1 for k in unseen if k['status'] == 'not found'),
+                   'unseen_out': sum(1 for k in unseen if k['status'] in ('millisecond', 'scattered'))}
+        return found, summary
+
+    @app.get('/pulsars', response_class=HTMLResponse)
+    def pulsars(request: Request):
+        from web.indexer import BEAM_RADIUS_DEG, SEARCHED_RADIUS_DEG
+        show = request.query_params.get('show', 'unseen')
+        show = show if show in PULSAR_SHOWS else 'unseen'
+        with store.reading(cfg) as db:
+            found, summary = pulsar_summary(db)
+        chosen = {'unseen': lambda k: k['unseen'], 'found': lambda k: k['unseen'] and k['found'],
+                  'all': lambda k: True}[show]
+        # Found first: a pulsar no LOFAR paper reports, found here, is the point of the page.
+        # Then the brightest of those not found, then those the search cannot see.
+        order = {'both': 0, 'periodic': 1, 'single pulses': 2, 'not found': 3, 'scattered': 4, 'millisecond': 5}
+        shown = sorted((k for k in found if chosen(k)),
+                       key=lambda k: (order[k['status']], -(k['flux_mjy'] or 0), k['psrj']))
+        return page(request, 'pulsars.html', found=shown, summary=summary, show=show, shows=PULSAR_SHOWS,
+                    searched_radius=SEARCHED_RADIUS_DEG, beam_radius=BEAM_RADIUS_DEG, min_period=MIN_PERIOD_SECONDS)
 
     # ------------------------------------------------------ LOTAAS sources
     LOTAAS_SHOWS = {'searched': 'In fields searched so far', 'all': 'All published LOTAAS sources',

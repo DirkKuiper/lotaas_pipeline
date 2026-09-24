@@ -94,15 +94,18 @@ CREATE TABLE IF NOT EXISTS candidates (key TEXT PRIMARY KEY, id TEXT UNIQUE, kin
     pulsar TEXT, period REAL, statistic REAL, fp16 TEXT, run_name TEXT, pilot INTEGER,
     plot_id INTEGER, dir TEXT, snippet TEXT, detections INTEGER, found TEXT);
 CREATE INDEX IF NOT EXISTS candidates_type ON candidates(type, snr);
+CREATE INDEX IF NOT EXISTS candidates_item ON candidates(item, kind);
 CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, meta TEXT);
 -- A single-pulse candidate and the events at its moment in other beams of its observation.
 CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, saps INTEGER,
     dm_min REAL, dm_max REAL, consistent INTEGER);
--- Every catalogued pulsar near a campaign-searched beam, and what the search found of it.
-CREATE TABLE IF NOT EXISTS pulsar_recovery (observation TEXT, psrj TEXT, bname TEXT, dm REAL, period REAL,
-    flux_mjy REAL, flux_source TEXT, beam_item TEXT, separation_deg REAL, beams_near INTEGER,
+-- Every catalogued pulsar near a campaign-searched beam, what LOFAR has published of it, and what the search found.
+DROP TABLE IF EXISTS pulsar_recovery;
+CREATE TABLE IF NOT EXISTS catalogue_pulsars (psrj TEXT PRIMARY KEY, bname TEXT, dm REAL, period REAL,
+    flux_mjy REAL, flux_source TEXT, survey TEXT, rrat INTEGER, lofar TEXT, lofar_limits TEXT, scatter_ms REAL,
+    observation TEXT, beam_item TEXT, separation_deg REAL, beams_near INTEGER,
     sp_count INTEGER, sp_best_snr REAL, sp_item TEXT, periodic_count INTEGER, periodic_best REAL,
-    periodic_item TEXT, periodic_relation TEXT, PRIMARY KEY(observation, psrj));
+    periodic_item TEXT, periodic_relation TEXT);
 DROP TABLE IF EXISTS known_pulsars;
 -- Every published LOTAAS source (web.lotaas), how LOTAAS found it, and what this campaign found of it.
 CREATE TABLE IF NOT EXISTS lotaas_sources (psrj TEXT PRIMARY KEY, bname TEXT, dm REAL, period REAL,
