@@ -69,9 +69,11 @@ def campaign(cfg):
     state = State(cfg.state_db)
     prepared = cfg.campaign_root / 'prepared' / 'data' / 'L559289' / 'SAP000'
     with state.db() as db:
-        db.execute("INSERT INTO saps VALUES ('L1163405_SAP000', 0, 2, 'searched', NULL, ?, 'run-a', 100.0)",
+        db.execute("INSERT INTO saps(key,position,files,state,detail,sap_dir,run_name,updated) "
+                   "VALUES ('L1163405_SAP000', 0, 2, 'searched', NULL, ?, 'run-a', 100.0)",
                    (str(prepared),))
-        db.execute("INSERT INTO saps VALUES ('L1163405_SAP001', 1, 1, 'pending', NULL, NULL, NULL, 100.0)")
+        db.execute("INSERT INTO saps(key,position,files,state,detail,sap_dir,run_name,updated) "
+                   "VALUES ('L1163405_SAP001', 1, 1, 'pending', NULL, NULL, NULL, 100.0)")
         for beam, st in ((25, 'searched'), (12, 'excluded')):
             db.execute('INSERT INTO files(surl,name,sap_key,beam,state,request_id,submissions,updated) '
                        'VALUES (?,?,?,?,?,?,?,?)', (f'srm://x/L1163405_SAP000_B{beam:03d}_P000_bf_aa.tar',

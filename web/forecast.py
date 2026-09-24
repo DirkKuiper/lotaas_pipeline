@@ -127,16 +127,22 @@ def excluded_sql(cfg, column):
     return column + ' NOT IN (' + ','.join(str(int(b)) for b in cfg.exclude_beams) + ')' if cfg.exclude_beams else '1'
 
 
-def rates(db, cfg, now):
+def source_sql(source, table='p'):
+    """SAPs of one source ('lta' or 'spider'); every SAP when source is None."""
+    return f"COALESCE({table}.source,'lta')='{source}'" if source in ('lta', 'spider') else '1'
+
+
+def rates(db, cfg, now, source=None):
     """Successful arrivals/completions in fixed wall-clock windows, including idle time."""
-    allowed = excluded_sql(cfg, 'f.beam')
+    allowed = excluded_sql(cfg, 'f.beam') + ' AND ' + source_sql(source)
     arrivals = list(db.execute(f"""SELECT r.uri, r.bytes, MIN(a.finished) AS finished
-        FROM archive_receipts r JOIN files f ON f.surl=r.uri
+        FROM archive_receipts r JOIN files f ON f.surl=r.uri LEFT JOIN saps p ON p.key=f.sap_key
         JOIN attempts a ON a.item=r.item AND a.stage='retrieve' AND a.status='success'
         WHERE {allowed} AND f.state!='excluded' AND a.finished IS NOT NULL
         GROUP BY r.uri"""))
     searches = list(db.execute(f"""SELECT s.item, s.finished FROM ({SEARCH}) s
         WHERE EXISTS (SELECT 1 FROM archive_beams ab JOIN files f ON f.surl=ab.uri
+                      LEFT JOIN saps p ON p.key=f.sap_key
                       WHERE ab.item=s.item AND {allowed} AND f.state!='excluded')"""))
     windows = []
     for hours in (6, 24):
@@ -157,6 +163,40 @@ def rates(db, cfg, now):
     return windows, charts, min(history) if history else None
 
 
+def spider_scope(db, cfg, now):
+    """Early-cycle LOTAAS from SPIDER, shaped like a catalogue project (overview, filter, coverage).
+
+    Its SAPs are all in the campaign from the start, so their states are the
+    driver's own. Sizes are known once fetched; the rest are taken at the
+    median fetched size (the tars are all ~1.19 GB).
+    """
+    allowed = excluded_sql(cfg, 'f.beam') + " AND f.state!='excluded' AND " + source_sql('spider')
+    row = dict(db.execute(f"""SELECT COUNT(*) AS files, COUNT(r.uri) AS retrieved_files,
+        COALESCE(SUM(r.bytes),0) AS retrieved_bytes, COUNT(s.uri) AS searched_files,
+        COUNT(DISTINCT substr(f.sap_key, 1, instr(f.sap_key, '_SAP') - 1)) AS observations
+        FROM files f JOIN saps p ON p.key=f.sap_key LEFT JOIN archive_receipts r ON r.uri=f.surl
+        LEFT JOIN ({SEARCHED_URIS}) s ON s.uri=f.surl WHERE {allowed}""").fetchone())
+    if not row['files']:
+        return None
+    sizes = [r[0] for r in db.execute(f"""SELECT r.bytes FROM archive_receipts r JOIN files f ON f.surl=r.uri
+        JOIN saps p ON p.key=f.sap_key WHERE {allowed} ORDER BY r.bytes""")]
+    typical = sizes[len(sizes) // 2] if sizes else 1_190_000_000
+    remaining = (row['files'] - row['retrieved_files']) * typical
+    sap_states = dict(db.execute("SELECT state, COUNT(*) FROM saps p WHERE " + source_sql('spider') + " GROUP BY state"))
+    file_states = dict(db.execute(f'SELECT f.state, COUNT(*) FROM files f JOIN saps p ON p.key=f.sap_key '
+                                  f'WHERE {allowed} GROUP BY f.state'))
+    saps = sum(sap_states.values())
+    scope = dict(row, key='ec', project='EC_LOTAAS', label='Early-cycle LOTAAS from SPIDER (EC_LOTAAS)',
+                 bytes=row['retrieved_bytes'] + remaining, remaining_bytes=remaining, unknown_sizes=0,
+                 in_campaign=row['files'], remaining_beams=row['files'] - row['searched_files'],
+                 unmapped_observations=0, kinds={'survey': row['observations']}, gzip_files=0,
+                 duplicate_beam_keys=0, all_archive_bytes=row['retrieved_bytes'] + remaining,
+                 sap_states=sap_states, file_states=file_states, saps=saps, queued_saps=saps,
+                 searched_saps=sap_states.get('searched', 0))
+    scope['projections'] = [projection(scope, rate) for rate in rates(db, cfg, now, 'spider')[0]]
+    return scope
+
+
 def projection(scope, rate):
     """Missing rates stay unknown unless that stage has no work remaining."""
     download = (None if scope['unknown_sizes'] else
@@ -171,7 +211,10 @@ def projection(scope, rate):
 def update(db, cfg, now=None):
     now = time.time() if now is None else now
     source = catalogue(db, cfg.observation_catalogue)
+    # Throughput charts count everything searched; paces are per source, since SPIDER
+    # beams need no tape and would flatter the LTA projections.
     windows, charts, first = rates(db, cfg, now)
+    lta_windows = rates(db, cfg, now, 'lta')[0]
     allowed = excluded_sql(cfg, 'f.beam')
     # Only use source sizes when the catalogue is available and validated.
     join_catalogue = 'c.uri=f.surl' if source['available'] else '0'
@@ -187,7 +230,8 @@ def update(db, cfg, now=None):
         FROM files f LEFT JOIN catalogue_files c ON {join_catalogue}
         LEFT JOIN archive_receipts r ON r.uri=f.surl
         LEFT JOIN ({SEARCHED_URIS}) s ON s.uri=f.surl
-        LEFT JOIN saps p ON p.key=f.sap_key WHERE {allowed} AND f.state!='excluded'""").fetchone())
+        LEFT JOIN saps p ON p.key=f.sap_key WHERE {allowed} AND f.state!='excluded'
+        AND {source_sql('lta')}""").fetchone())
     current.update(key='inventory', label='Current campaign inventory',
                    remaining_beams=current['files'] - current['searched_files'])
     scopes = [current]
@@ -244,7 +288,7 @@ def update(db, cfg, now=None):
             row['queued_saps'] = row['saps'] - row['sap_states'].get('not_queued', 0)
             row['searched_saps'] = row['sap_states'].get('searched', 0)
             row['kinds'] = dict(db.execute(f'SELECT kind, COUNT(*) FROM catalogue_observations WHERE {condition} GROUP BY kind', params))
-            row['projections'] = [projection(row, rate) for rate in windows]
+            row['projections'] = [projection(row, rate) for rate in lta_windows]
             return row
 
         scopes.extend([
@@ -257,7 +301,11 @@ def update(db, cfg, now=None):
             row['project'] = project
             projects.append(row)
     for scope in scopes:
-        scope['projections'] = [projection(scope, rate) for rate in windows]
+        scope['projections'] = [projection(scope, rate) for rate in lta_windows]
+    early = spider_scope(db, cfg, now)
+    if early:
+        scopes.append(early)
+        projects.append(early)
     report = {'time': now, 'catalogue': {k: v for k, v in source.items() if k != 'stamp'},
               'scopes': scopes, 'rates': windows, 'charts': charts, 'first_completion': first,
               'exclude_beams': cfg.exclude_beams, 'projects': projects}

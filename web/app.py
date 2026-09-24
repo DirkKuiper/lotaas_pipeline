@@ -394,6 +394,7 @@ def create_app(cfg, run_background=True):
             rate = next((r for r in forecast.get('rates', []) if r['hours'] == 24), {})
             inventory = next((s for s in forecast.get('scopes', []) if s['key'] == 'inventory'), {})
             scope, selected_project = catalogue_scope(request, forecast)
+            early = next((s for s in forecast.get('scopes', []) if s['key'] == 'ec'), None)
             if scope:
                 saps, files = scope['sap_states'], scope['file_states']
             estimate = next((p for p in (scope or inventory).get('projections', []) if p['hours'] == 24), {})
@@ -410,7 +411,9 @@ def create_app(cfg, run_background=True):
             _, pulsars = pulsar_summary(db)
         total = sum(saps.values())
         remaining = sum(v for k, v in saps.items() if k not in ('searched', 'incomplete'))
+        early_day = next((p for p in (early or {}).get('projections', []) if p['hours'] == 24), {})
         return page(request, 'overview.html', lotaas=lotaas, pulsars=pulsars, saps=saps, files=files, total=total, remaining=remaining,
+                    early=early, early_day=early_day,
                     beams_searched=beams_searched, campaign_beams=campaign_beams,
                     eta_days=estimate.get('pace_days'), forecast=forecast, inventory=inventory,
                     scope=scope, selected_project=selected_project, estimate=estimate,
@@ -463,7 +466,8 @@ def create_app(cfg, run_background=True):
         with store.reading(cfg) as db:
             forecast = meta(db, 'forecast', {})
             scope, selected_project = catalogue_scope(request, forecast)
-            if scope:
+            early = scope is not None and scope.get('key') == 'ec'
+            if scope and not early:
                 condition, args = ('c.project=?', (selected_project,)) if selected_project else ('1', ())
                 catalogue_saps = rows(db, f"""SELECT c.*, i.ra_deg, i.dec_deg, i.pointing
                     FROM catalogue_saps c LEFT JOIN sap_info i ON i.key=c.queue_key
@@ -480,10 +484,10 @@ def create_app(cfg, run_background=True):
                             states=scope['sap_states'], state_order=STATE_ORDER, charts={'sky': sky})
             saps = rows(db, """SELECT s.key, s.position, s.files, s.state, s.detail, s.run_name, s.updated,
                     i.observation, i.sap, i.pointing, i.ra_deg, i.dec_deg, i.observed, i.beams_searched,
-                    i.fingerprints, i.candidates, i.max_snr, COALESCE(x.n, 0) AS excluded
+                    i.fingerprints, i.candidates, i.max_snr, COALESCE(x.n, 0) AS excluded, s.source
                 FROM saps s LEFT JOIN sap_info i ON i.key=s.key
                 LEFT JOIN (SELECT sap_key, COUNT(*) AS n FROM files WHERE state='excluded' GROUP BY sap_key) x
-                    ON x.sap_key=s.key ORDER BY s.position""")
+                    ON x.sap_key=s.key WHERE ? = 0 OR s.source='spider' ORDER BY s.position""", int(early))
         states = {}
         for s in saps:
             states[s['state']] = states.get(s['state'], 0) + 1
@@ -491,7 +495,7 @@ def create_app(cfg, run_background=True):
                 'pointing': s['pointing'], 'searched': s['beams_searched']}
                for s in saps if s['ra_deg'] is not None]
         return page(request, 'coverage.html', saps=saps, states=states, state_order=STATE_ORDER,
-                    charts={'sky': sky})
+                    early=early, charts={'sky': sky})
 
     @app.get('/catalogue/{project}/{observation}/{sap}', response_class=HTMLResponse)
     def catalogue_sap(request: Request, project: str, observation: str, sap: int):
@@ -535,7 +539,8 @@ def create_app(cfg, run_background=True):
                 names = {f['name'][:-4] if f['name'].endswith('.tar') else f['name']: f['beam'] for f in files}
                 for a in rows(db, """SELECT item, stage, status, fingerprint, seconds, finished FROM attempts
                         WHERE id IN (SELECT MAX(id) FROM attempts WHERE (item LIKE ? AND stage='downsample')
-                        OR (stage='retrieve' AND item LIKE ?) GROUP BY item, stage)""", short + '_B%', key + '_B%'):
+                        OR (stage='retrieve' AND (item LIKE ? OR item IN (SELECT substr(name, 1, length(name) - 4)
+                            FROM files WHERE sap_key=?))) GROUP BY item, stage)""", short + '_B%', key + '_B%', key):
                     beam_number = names.get(a['item']) if a['stage'] == 'retrieve' else int(a['item'].rsplit('_B', 1)[1])
                     if beam_number is not None:
                         stages.append(dict(a, item=f'downsampled_{short}_BEAM{beam_number:03d}_32bit_ff'))
@@ -549,7 +554,14 @@ def create_app(cfg, run_background=True):
         layout = [{'beam': b['beam'], 'ra': b['ra_deg'], 'dec': b['dec_deg'], 'snr': b['max_cluster_snr'],
                    'clusters': b['clusters'], 'item': b['item'], 'positives': b['positives']}
                   for b in beams if b['ra_deg'] is not None]
+        levelling = None
+        if row['sap_dir']:
+            try:
+                levelling = json.loads((Path(row['sap_dir']) / 'row-levelling.json').read_text())
+            except (OSError, ValueError):
+                pass
         return page(request, 'sap.html', sap=dict(row), info=dict(info) if info else None, files=files,
+                    levelling=levelling,
                     requests=requests, events=events, beams=beams, stages=by_item,
                     stage_names=['retrieve', 'downsample', 'dedisperse', 'single_pulse', 'sp_classify', 'periodicity',
                                  'periodicity_fold', 'classify'],

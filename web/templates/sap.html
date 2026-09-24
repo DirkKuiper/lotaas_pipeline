@@ -28,7 +28,12 @@
       <dt>Fingerprints</dt><dd class="mono">{{ info.fingerprints or '—' }}</dd>
       <dt>FETCH positives</dt><dd>{{ info.candidates or 0 }}{% if info.max_snr %} (best S/N {{ '%.1f'|format(info.max_snr) }}){% endif %}</dd>
       {% endif %}
+      {% if sap.source == 'spider' %}<dt>Source</dt><dd>SPIDER, early cycle (converted there; no tape)</dd>{% endif %}
       {% if flatfield %}<dt>Flatfield</dt><dd>{{ flatfield.status }}, {{ flatfield.seconds|duration }} · {{ flatfield.finished|when }}</dd>{% endif %}
+      {% if levelling %}<dt>2-bit rows</dt><dd>{% if levelling.row %}{{ levelling.row }} samples ({{ '%.2f'|format(levelling.row * 0.00786432) }} s), levelled
+        <div class="muted small">The early-cycle conversion lost each row's mean. A pulse keeps about 1 − width / {{ '%.2f'|format(levelling.row * 0.00786432) }} s of its S/N{% if levelling.row == 32 %}; wider than ~0.25 s is lost{% endif %}.</div>
+        {% else %}no row steps found; not levelled{% endif %}
+        <div class="muted small mono">edge-jump excess {{ levelling.edge_excess }}</div></dd>{% endif %}
       {% if sap.sap_dir %}<dt>Prepared in</dt><dd class="mono small">{{ sap.sap_dir }}</dd>{% endif %}
     </dl>
     {% if requests %}

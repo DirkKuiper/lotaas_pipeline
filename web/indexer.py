@@ -138,8 +138,11 @@ class Indexer:
                     SELECT surl,name,sap_key,beam,state,request_id,submissions,failures,locality,checked,
                            detail,fil,updated FROM st.files s
                     WHERE NOT EXISTS (SELECT 1 FROM files m WHERE m.surl=s.surl AND m.updated IS s.updated)""")
-                db.execute("""INSERT OR REPLACE INTO saps
-                    SELECT key,position,files,state,detail,sap_dir,run_name,updated FROM st.saps s
+                # Drivers before the SPIDER source kept no source column: all theirs are LTA SAPs.
+                source = ("COALESCE(source,'lta')" if 'source' in
+                          {r[1] for r in db.execute('PRAGMA st.table_info(saps)')} else "'lta'")
+                db.execute(f"""INSERT OR REPLACE INTO saps(key,position,files,state,detail,sap_dir,run_name,updated,source)
+                    SELECT key,position,files,state,detail,sap_dir,run_name,updated,{source} FROM st.saps s
                     WHERE NOT EXISTS (SELECT 1 FROM saps m WHERE m.key=s.key AND m.updated IS s.updated)""")
                 db.execute('DELETE FROM requests')
                 db.execute('INSERT INTO requests SELECT id,sap_key,submitted,files,status,checked,final_seen '

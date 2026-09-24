@@ -26,6 +26,16 @@
     <div class="sub">{{ pulsars.unseen_open }} within reach not found · {{ pulsars.unseen_out }} millisecond or scattered<br><a href="/pulsars">Not seen by LOFAR →</a></div></div>{% endif %}
 </div>
 {% endif %}
+{% if early and not (scope and scope.key == 'ec') %}
+<div class="tiles">
+  <div class="tile"><div class="label">Early cycles from SPIDER (2012–15)</div>
+    <div class="value">{{ '{:,}'.format(early.searched_files) }} <span class="muted small">/ {{ '{:,}'.format(early.files) }} beams</span></div>
+    <div class="bar"><span style="width: {{ 100 * early.searched_files / early.files if early.files else 0 }}%"></span></div>
+    <div class="sub">{{ early.searched_saps }} of {{ early.saps }} SAPs searched · no tape: searched when a GPU has no LT5_004 SAP
+      {% if early_day.search_days is not none %}· {{ '{:,.0f}'.format(early_day.search_days) }} days at the 24-hour pace{% endif %}<br>
+      <a href="/?project=EC_LOTAAS">Early-cycle progress →</a></div></div>
+</div>
+{% endif %}
 {% if scope %}
 <div class="tiles">
   <div class="tile"><div class="label">SAPs searched</div>

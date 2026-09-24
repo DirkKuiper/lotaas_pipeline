@@ -13,7 +13,7 @@ INDEX = '''
 CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT);
 
 CREATE TABLE IF NOT EXISTS saps (key TEXT PRIMARY KEY, position INTEGER, files INTEGER, state TEXT,
-    detail TEXT, sap_dir TEXT, run_name TEXT, updated REAL);
+    detail TEXT, sap_dir TEXT, run_name TEXT, updated REAL, source TEXT DEFAULT 'lta');
 CREATE TABLE IF NOT EXISTS files (surl TEXT PRIMARY KEY, name TEXT, sap_key TEXT, beam INTEGER,
     state TEXT, request_id INTEGER, submissions INTEGER, failures INTEGER, locality TEXT,
     checked REAL, detail TEXT, fil TEXT, updated REAL);
@@ -130,6 +130,9 @@ LABELS = {'rfi': 'RFI', 'noise': 'Noise', 'known': 'Known source', 'astro': 'Ast
 
 # Columns of the retired Slack notifier, dropped from databases made before it went.
 RETIRED = {'candidates': ('slack_sent',), 'reviews': ('slack_ts',)}
+# Columns added since, given to databases made before them: a SAP's source is 'lta' or
+# 'spider' (early-cycle beams fetched from SPIDER, euroflash.spider).
+ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),)}
 
 
 def _connect(path, schema):
@@ -144,6 +147,11 @@ def _connect(path, schema):
         for column in columns:
             if column in present:
                 db.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
+    for table, columns in ADDED.items():
+        present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+        for column, kind in columns:
+            if present and column not in present:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
     return db
 
 

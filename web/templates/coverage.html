@@ -4,8 +4,8 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>Coverage</h1>
-    <div class="muted">Every SAP in the inventory. Positions come from the searched beams' headers, so a SAP appears on the sky once its data has been searched.</div>
+    <h1>{{ 'Early-cycle coverage (SPIDER)' if early else 'Coverage' }}</h1>
+    <div class="muted">{{ 'Every early-cycle SAP fetched from SPIDER.' if early else 'Every SAP in the inventory.' }} Positions come from the searched beams' headers, so a SAP appears on the sky once its data has been searched.</div>
   </div>
 </div>
 <div class="card">
