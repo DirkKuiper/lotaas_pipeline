@@ -195,6 +195,32 @@ def test_lt5_keeps_first_claim_and_spider_saps_do_not_block_its_staging(tmp_path
     assert levelled == {'spider': 'auto', 'lta': None}, 'only early-cycle beams are levelled'
 
 
+def test_spider_saps_are_dispatched_alone_with_their_own_settings(tmp_path, monkeypatch, fake_ssh):
+    campaign, api, where = spider_campaign(tmp_path, monkeypatch, [('261129', 0, FULL)],
+                                           lta=[('1000001', 0, FULL)], dispatch_saps=2)
+    campaign.o.spider_settings = tmp_path/'ec.yaml'
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    campaign.tick()
+    settle(campaign)
+    launched = []
+
+    class FakeProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(command)
+        def poll(self):
+            return None
+    monkeypatch.setattr(C.subprocess, 'Popen', FakeProcess)
+    campaign.o.dispatch_nodes = ['efc-gpu-00', 'efc-gpu-01']
+    campaign.dispatch()
+    settings = [c[c.index('--settings') + 1] for c in launched]
+    batches = [sorted(p.name[:24] for p in Path(c[c.index('--input') + 1]).glob('*_ff.fil'))[0] for c in launched]
+    assert len(launched) == 2, 'an LTA and a SPIDER SAP are never one run'
+    assert settings[batches.index('downsampled_L261129_SAP0')] == str(tmp_path/'ec.yaml')
+    assert settings[1 - batches.index('downsampled_L261129_SAP0')] == str(campaign.o.settings)
+
+
 def test_a_broken_connection_pauses_spider_without_striking_its_files(tmp_path, monkeypatch, fake_ssh):
     campaign, _, _ = spider_campaign(tmp_path, monkeypatch, [('261129', 0, FULL)])
     fake_ssh.touch()

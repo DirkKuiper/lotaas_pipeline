@@ -723,6 +723,8 @@ class Campaign:
                                     self.o.dispatch_saps)
             if not ready:
                 break
+            # One source per run: SPIDER SAPs are searched with their own settings.
+            ready = [s for s in ready if s.get('source') == ready[0].get('source')]
             started.append(self.start_dispatch(node, ready))
         return started or ('running' if self.dispatches else None)
 
@@ -743,7 +745,7 @@ class Campaign:
                    '--work', str(self.root/'results'/run_name), '--ledger', str(Path(self.o.ledger).resolve()),
                    '--nodes', node, '--run-name', run_name, '--gpus', self.o.gpus,
                    '--workers-per-gpu', str(self.o.workers_per_gpu), '--cpu-workers', str(self.o.cpu_workers),
-                   '--image', str(self.o.image), '--settings', str(self.o.settings),
+                   '--image', str(self.o.image), '--settings', str(self.settings_for(ready)),
                    '--exclude-beams', *map(str, self.o.exclude_beams), '--skip-trials', '--cleanup-remote']
         if getattr(self.o, 'remote_root', None):
             command += ['--remote-root', self.o.remote_root]
@@ -762,6 +764,11 @@ class Campaign:
             self.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
         self.state.event('dispatched', run_name, f'{node}: ' + ','.join(s['key'] for s in ready))
         return run_name
+
+    def settings_for(self, saps):
+        """Early-cycle SAPs use --spider-settings when given (their own FETCH gate)."""
+        spider = getattr(self.o, 'spider_settings', None)
+        return spider if spider and any(s.get('source') == 'spider' for s in saps) else self.o.settings
 
     def searched_items(self, run_name):
         succeeded, seen = set(), False
@@ -1047,6 +1054,9 @@ def parser():
     run.add_argument('--spider-destination', help="ssh destination for SPIDER (default: each URL's host)")
     run.add_argument('--spider-max-missing-central', type=int, default=3,
                      help='Search a SPIDER SAP lacking up to this many central beams')
+    run.add_argument('--spider-settings', type=Path,
+                     help='Pipeline settings for searching SPIDER SAPs (default: --settings); '
+                          'ops/production-settings-ec.yaml raises their FETCH gate to S/N 8')
     run.add_argument('--spider-backoff-seconds', type=float, default=600,
                      help='Pause SPIDER fetches this long after ssh itself fails')
     run.add_argument('--ledger', type=Path, required=True)

@@ -1,0 +1,96 @@
+# LT5_004 production settings with the early-cycle FETCH gate; used for SPIDER SAPs only
+# (euroflash.campaign --spider-settings). Keep in step with production-settings.yaml.
+# Channels masked in every beam regardless of the RFI statistics, by index
+# into the filterbank's own channel ordering. Empty is allowed.
+bad_channels:
+  - 138
+rfi_block_size: 1000
+rfi_averaging_factor: 128
+persistent_channel_threshold: 4.0
+single_pulse:
+  max_width_seconds: 1.0
+  # One crossing per event per trial (strongest width and sample) instead of
+  # one per sample and width: identical clusters, 40-180x fewer rows, and RFI
+  # beams no longer stop at the 25 million-crossing guard.
+  merge_events: true
+dedispersion_plan:
+  - low_dm: 0.000
+    high_dm: 150.600
+    ddm: 0.10
+    downsample: 1
+  - low_dm: 150.600
+    high_dm: 289.800
+    ddm: 0.30
+    downsample: 2
+  - low_dm: 289.800
+    high_dm: 511.800
+    ddm: 0.50
+    downsample: 4
+  - low_dm: 511.800
+    high_dm: 1010.800
+    ddm: 1.00
+    downsample: 8
+  - low_dm: 1010.800
+    high_dm: 2014.800
+    ddm: 2.00
+    downsample: 16
+  - low_dm: 2014.800
+    high_dm: 3020.000
+    ddm: 5.00
+    downsample: 32
+periodicity:
+  enabled: true
+  period_min_seconds: 0.016
+  period_max_seconds: 300.0
+  harmonics: [1, 2, 4, 8, 16]
+  threshold: 12.0  # nominal -log10 Gamma tail; not Gaussian sigma
+  red_noise_window_bins: 257
+  rfi_frequencies_hz: [1.0, 50.0, 60.0]
+  rfi_tolerance_bins: 2
+  sift_dm_tolerance: 2.0
+  sift_period_fraction: 0.001
+  # Retention, not coverage: every template is searched. A crowded trial keeps
+  # its strongest distinct peaks and a crowded beam sifts its strongest; the
+  # numbers dropped are recorded in the coverage report and summary.
+  max_candidates_per_trial: 100
+  max_candidates_per_beam: 20000
+  max_sift_comparisons: 200000000
+  max_folds: 16
+  fold_bins: 64
+  fold_subintegrations: 32
+  catalogue_match: true
+  # Zero-pad each trial to a 7-smooth FFT length instead of letting prime-factor
+  # lengths fall back to a several-times slower FFT. No samples are dropped.
+  fft_fast_lengths: true
+  # Periodicity uses a dedicated grid.  The transient plan becomes too coarse
+  # at high DM for narrow pulses once its downsampling is included.
+  # It stops at DM 1000. At 135 MHz the median scatter broadening (Bhat et al.
+  # 2004) is ~0.8 s at DM 200, ~7 s at DM 300 and minutes by DM 500, and ATNF
+  # lists no LOTAAS detection above DM 217. Under the uncapped grid 735 of the
+  # 814 unflagged folds of the first 371 beams of 23 September lay above DM 1000,
+  # and they alone made 80 beams keep their 1.2 GB filterbank.
+  dm_plan:
+    - {low_dm: 0.000, high_dm: 150.600, ddm: 0.10, downsample: 1}
+    - {low_dm: 150.600, high_dm: 300.000, ddm: 0.20, downsample: 2}
+    - {low_dm: 300.000, high_dm: 600.000, ddm: 0.40, downsample: 4}
+    - {low_dm: 600.000, high_dm: 1000.000, ddm: 0.50, downsample: 8}
+  # A period found in several beams of one observation is RFI: a pulsar lies
+  # in one beam or a few neighbours, at one DM. Sifted peaks of a batch are
+  # compared across beams before folding, so RFI cannot take the fold slots.
+  multibeam_veto: true
+  veto_bins: 1.1
+  veto_beams: 4
+
+# Single-pulse review: one-second templates, local noise check, then FETCH.
+classification:
+  # B0950+08 (DM 2.97) and 17 other LOTAAS pulsars sit below DM 10; from DM 2
+  # they are recorded as redetections, the pipeline's own sensitivity check.
+  min_dm: 2.0
+  # Early-cycle (SPIDER) beams, levelled per 2-bit row, are whiter than LT5_004's:
+  # at S/N 7 FETCH accepted 25 noise-level events per 2013 SAP (LT5_004: 0-3) and
+  # row-edge seams in 2015 ones, all below S/N 8.6 (pilot, 24 September 2026).
+  min_snr: 8.0
+  max_width_seconds: 1.0
+  min_local_snr: 5.0
+  # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
+  max_fetch_candidates: 200
