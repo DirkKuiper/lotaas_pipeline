@@ -1,4 +1,5 @@
-// Saving a verdict: one key (R, N, K, A, U) or click saves it; ',' and '.' move through the queue.
+// Saving a verdict: one key (R, N, K, A, U) or click saves it and, with 'next to review after
+// saving', opens the next candidate without a verdict; ',' and '.' step through the list itself.
 (() => {
   const C = JSON.parse(document.getElementById('candidate').textContent);
   const $ = id => document.getElementById(id);
@@ -33,8 +34,13 @@
       `${r.note ? '<div class="small">' + escape(r.note) + '</div>' : ''}</li>`).join('');
     $('note').value = '';
     $('review-status').textContent = 'Saved.';
-    const next = $('next');
-    if ($('advance').checked && next) setTimeout(() => { location.href = next.href; }, 350);
+    // Onwards to the next candidate still without a verdict, never to one already classified.
+    if (!$('advance').checked) return;
+    const next = $('next-unreviewed');
+    if (next) { setTimeout(() => { location.href = next.href; }, 350); return; }
+    const back = $('review-panel').dataset.back;
+    $('review-status').innerHTML = 'Saved. Everything in this queue has a verdict: ' +
+      `<a href="${back}">back to the list</a>.`;
   }
 
   function escape(text) { const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }

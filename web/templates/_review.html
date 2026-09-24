@@ -1,4 +1,4 @@
-<div class="card" id="review-panel">
+<div class="card" id="review-panel" data-back="{{ back }}{{ '?' ~ query if query }}">
   <h2>Verdict</h2>
   {% set latest = reviews[0] if reviews else None %}
   <div class="labels">
@@ -9,7 +9,7 @@
   <label class="small muted">Note (optional, saved with the verdict)<textarea id="note" placeholder="What decided it: sweep, spectrum, S/N against DM…"></textarea></label>
   <div class="controls" style="margin-top: 8px">
     <label>Reviewer<input id="reviewer" placeholder="your name" style="width: 140px"></label>
-    <label class="check"><input type="checkbox" id="advance" checked> next after saving</label>
+    <label class="check" title="After saving, open the next candidate without a verdict"><input type="checkbox" id="advance" checked> next to review after saving</label>
     {% if slack_threads and candidate.slack_sent %}<label class="check"><input type="checkbox" id="slack"> reply in the Slack thread</label>{% endif %}
   </div>
   <div class="status-line" id="review-status"></div>

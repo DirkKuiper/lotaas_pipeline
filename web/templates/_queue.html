@@ -1,6 +1,7 @@
 <div class="nav-queue">
-  {% if neighbours.previous %}<a class="button" id="previous" href="/verify/{{ neighbours.previous }}{{ '?' ~ query if query }}">← <kbd>,</kbd></a>{% endif %}
+  {% if neighbours.previous %}<a class="button" id="previous" href="/verify/{{ neighbours.previous }}{{ '?' ~ query if query }}" title="Previous in the list (,)">← <kbd>,</kbd></a>{% endif %}
   {% if neighbours.position %}<span class="muted small">{{ neighbours.position }} of {{ neighbours.total }}</span>{% endif %}
-  {% if neighbours.next %}<a class="button" id="next" href="/verify/{{ neighbours.next }}{{ '?' ~ query if query }}"><kbd>.</kbd> →</a>{% endif %}
-  <a class="button" href="/verify?kind={{ candidate.kind }}&review=unreviewed">next unreviewed</a>
+  {% if neighbours.next %}<a class="button" id="next" href="/verify/{{ neighbours.next }}{{ '?' ~ query if query }}" title="Next in the list (.)"><kbd>.</kbd> →</a>{% endif %}
+  {% if neighbours.next_unreviewed %}<a class="button primary" id="next-unreviewed" href="/verify/{{ neighbours.next_unreviewed }}{{ '?' ~ query if query }}" title="The next candidate without a verdict (Enter after saving)">next to review · {{ neighbours.unreviewed }} left</a>
+  {% else %}<span class="flag ok small" id="all-reviewed">nothing else to review here</span>{% endif %}
 </div>

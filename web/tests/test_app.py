@@ -213,3 +213,57 @@ def test_known_pulsars_near_the_beams_are_listed_with_what_was_found(cfg, campai
     j0850 = page.split('J0850+6800')[1].split('</tr>')[0]
     assert 'flag bad">missed' in j0850 and '>53<' in j0850      # bright (S150 45 mJy, 53 at 135 MHz) and near
     assert 'P below the search' in page.split('J0846+6820')[1].split('</tr>')[0]
+
+
+def test_unreviewed_candidates_come_first_and_saving_moves_to_the_next_unreviewed(cfg, campaign):
+    # Four FETCH positives in other beams; the strongest two get verdicts.
+    add_detections(campaign, [(30 + i, 40.0 + i, 20.0 - i, 2, 'candidate', None, 500.0 + 300 * i) for i in range(4)])
+    Indexer(cfg).run_pass()
+    client = client_for(cfg)
+    listing = client.get('/single-pulse?sort=snr').text
+    ids = [chunk.split('?')[0] for chunk in listing.split('href="/verify/')[1:] if 'B03' in chunk.split('</a>')[0]]
+    for cid in ids[:2]:
+        assert client.post('/api/review', json={'id': cid, 'label': 'noise', 'reviewer': 'Dirk'}).status_code == 200
+    Indexer(cfg).run_pass()
+    listing = client.get('/single-pulse?sort=snr').text
+    rows = listing.split('<tbody>')[1].split('</tr>')
+    labels = ['to review' in row for row in rows if 'href="/verify/' in row]
+    assert labels == sorted(labels, reverse=True) and labels.count(True) >= 3     # unreviewed first
+    # On a reviewed candidate the page offers the next one without a verdict.
+    page = client.get(f'/verify/{ids[0]}?kind=sp&sort=snr').text
+    target = page.split('id="next-unreviewed" href="/verify/')[1].split('?')[0]
+    assert target not in ids[:2]
+    assert 'left</a>' in page
+    # With every candidate reviewed, nothing is offered.
+    for chunk in listing.split('href="/verify/')[1:]:
+        client.post('/api/review', json={'id': chunk.split('?')[0], 'label': 'noise', 'reviewer': 'Dirk'})
+    page = client.get(f'/verify/{ids[0]}?kind=sp').text
+    assert 'id="next-unreviewed"' not in page and 'nothing else to review here' in page
+
+
+def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, campaign, monkeypatch, tmp_path):
+    catalogue = tmp_path/'psrcat.db'
+    catalogue.write_text(
+        'PSRJ     J0847+6830                    sbc+19\nRAJ      08:47:30.0\nDECJ     +68:30:00\nDM       30.0\n'
+        'P0       0.5\nS150     40\nSURVEY   lotaas\n@----\n'
+        'PSRJ     J0850+6800                    kkl+15\nRAJ      08:50:00.0\nDECJ     +68:00:00\nDM       55.0\n'
+        'P0       1.2\nSURVEY   gbncc,lotaas\nTYPE     RRAT\n@----\n'
+        'PSRJ     J1200+4500                    sbc+19\nRAJ      12:00:00.0\nDECJ     +45:00:00\nDM       20.0\n'
+        'P0       0.9\nSURVEY   lotaas\n@----\n'
+        'PSRJ     J0845+6900\nRAJ      08:45:00.0\nDECJ     +69:00:00\nDM       10.0\nP0       0.7\nSURVEY   gbncc\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0)])
+    fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 80.0, 'half')
+    Indexer(cfg).run_pass()
+    client = client_for(cfg)
+    page = client.get('/lotaas').text
+    assert 'J0845+6900' not in page and 'J1200+4500' not in page         # not LOTAAS; not searched yet
+    row = page.split('J0847+6830')[1].split('</tr>')[0]
+    assert 'discovery' in row and 'flag ok">both' in row and '(1/2)' in row and 'best S/N 14.0' in row
+    row = page.split('J0850+6800')[1].split('</tr>')[0]
+    assert 'RRAT' in row and 'single pulse' in row and 'not found' in row
+    everything = client.get('/lotaas?show=all').text
+    assert 'J1200+4500' in everything.split('<tbody>')[1] and 'not searched yet' in everything
+    assert '>2 <span class="muted small">/ 3</span>' in page.replace('\n', '')   # searched of published
+    overview = client.get('/').text
+    assert 'Published LOTAAS sources redetected' in overview and 'LOTAAS sources →' in overview

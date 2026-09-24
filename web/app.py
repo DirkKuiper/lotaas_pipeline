@@ -395,9 +395,10 @@ def create_app(cfg, run_background=True):
             review = rows(db, """SELECT c.*, (SELECT label FROM r.reviews v WHERE v.key=c.key
                 ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.type='candidate'
                 ORDER BY COALESCE(c.slack_sent, 0) DESC, c.found DESC LIMIT 8""")
+            _, lotaas = lotaas_summary(db)
         total = sum(saps.values())
         remaining = sum(v for k, v in saps.items() if k not in ('searched', 'incomplete'))
-        return page(request, 'overview.html', saps=saps, files=files, total=total, remaining=remaining,
+        return page(request, 'overview.html', lotaas=lotaas, saps=saps, files=files, total=total, remaining=remaining,
                     beams_searched=beams_searched, campaign_beams=campaign_beams,
                     eta_days=estimate.get('pace_days'), forecast=forecast, inventory=inventory,
                     scope=scope, selected_project=selected_project, estimate=estimate,
@@ -625,14 +626,30 @@ def create_app(cfg, run_background=True):
               'snr': 'c.snr DESC', 'dm': 'c.dm', 'probability': 'c.probability DESC', 'period': 'c.period',
               'evidence': '(SELECT score FROM periodic_triage t WHERE t.key=c.key) DESC, c.snr DESC'}
 
+    LATEST = '(SELECT label FROM r.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
+
     def ordering(params):
+        """Candidates without a verdict first, then the chosen order, in every list and queue."""
         kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
-        return ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']])
+        return f'({LATEST} IS NOT NULL), ' + ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']])
+
+    def queue_rows(db, params):
+        """[(id, reviewed)] of a queue, in its order."""
+        where, args, _ = candidate_filter(params)
+        return [(r[0], r[1] is not None) for r in db.execute(
+            f'SELECT c.id, {LATEST} FROM candidates c WHERE {where} ORDER BY {ordering(params)}', args)]
 
     def queue_ids(db, params):
-        where, args, _ = candidate_filter(params)
-        return [r[0] for r in db.execute(f'SELECT c.id FROM candidates c WHERE {where} ORDER BY {ordering(params)}',
-                                         args)]
+        return [cid for cid, _ in queue_rows(db, params)]
+
+    def next_unreviewed(queue, cid):
+        """The first candidate without a verdict after this one in the queue, wrapping round."""
+        ids = [q[0] for q in queue]
+        start = ids.index(cid) + 1 if cid in ids else 0
+        for other, reviewed in queue[start:] + queue[:start]:
+            if not reviewed and other != cid:
+                return other
+        return None
 
     def listing(request, kind, template):
         params = dict(request.query_params, kind=kind)
@@ -721,7 +738,8 @@ def create_app(cfg, run_background=True):
             candidate = dict(row)
             # Previous/next stay among candidates of the same kind.
             params['kind'] = candidate['kind'] if candidate['kind'] in KINDS else 'sp'
-            queue = queue_ids(db, dict(params, review=params.get('review', 'all')))
+            rows_ = queue_rows(db, dict(params, review=params.get('review', 'all')))
+            queue = [q[0] for q in rows_]
             reviews = rows(db, 'SELECT * FROM r.reviews WHERE key=? ORDER BY created DESC', candidate['key'])
             snippet = db.execute('SELECT meta FROM snippets WHERE key=?', (candidate['key'],)).fetchone()
             plots = rows(db, 'SELECT id, kind, name FROM plots WHERE key=? OR (dir=? AND kind IN '
@@ -770,7 +788,9 @@ def create_app(cfg, run_background=True):
         position = queue.index(cid) if cid in queue else None
         neighbours = {'previous': queue[position - 1] if position else None,
                       'next': queue[position + 1] if position is not None and position + 1 < len(queue) else None,
-                      'position': None if position is None else position + 1, 'total': len(queue)}
+                      'position': None if position is None else position + 1, 'total': len(queue),
+                      'next_unreviewed': next_unreviewed(rows_, cid),
+                      'unreviewed': sum(1 for other, reviewed in rows_ if not reviewed and other != cid)}
         query = urlencode(params)
         context = dict(candidate=candidate, reviews=reviews, plots=plots, neighbours=neighbours, query=query,
                        snippet=json.loads(snippet['meta']) if snippet else None, others=others,
@@ -806,6 +826,57 @@ def create_app(cfg, run_background=True):
                    'observations': len({k['observation'] for k in found})}
         return page(request, 'pulsars.html', found=found, summary=summary, beam_radius=BEAM_RADIUS_DEG,
                     radius=KNOWN_PULSAR_RADIUS_DEG, bright_mjy=BRIGHT_MJY, min_period=MIN_PERIOD_SECONDS)
+
+    # ------------------------------------------------------ LOTAAS sources
+    LOTAAS_SHOWS = {'searched': 'In fields searched so far', 'all': 'All published LOTAAS sources',
+                    'discoveries': 'LOTAAS discoveries', 'single': 'Found by LOTAAS in single pulses',
+                    'missed': 'Searched but not found', 'found': 'Redetected'}
+
+    def lotaas_summary(db):
+        rows_ = rows(db, 'SELECT * FROM lotaas_sources')
+        for k in rows_:
+            k['searched'] = k['observation'] is not None
+            k['status'] = ('not searched yet' if not k['searched'] else
+                           'both' if k['sp_count'] and k['periodic_count'] else
+                           'single pulses' if k['sp_count'] else 'periodic' if k['periodic_count'] else 'missed')
+            k['lotaas_single'] = k['lotaas_mode'] != 'periodic'
+            k['lotaas_periodic'] = k['lotaas_mode'] != 'single pulse'
+        searched = [k for k in rows_ if k['searched']]
+        found = [k for k in searched if k['status'] != 'missed']
+        summary = {
+            'total': len(rows_), 'discoveries': sum(k['discovery'] for k in rows_),
+            'single': sum(k['lotaas_single'] for k in rows_), 'searched': len(searched), 'found': len(found),
+            'periodic_expected': sum(k['lotaas_periodic'] for k in searched),
+            'periodic_found': sum(1 for k in searched if k['lotaas_periodic'] and k['periodic_count']),
+            'single_expected': sum(k['lotaas_single'] for k in searched),
+            'single_found': sum(1 for k in searched if k['lotaas_single'] and k['sp_count']),
+            'sp_any': sum(1 for k in searched if k['sp_count']),
+            'periodic_any': sum(1 for k in searched if k['periodic_count']),
+            'missed': len(searched) - len(found),
+            'missed_near': sum(1 for k in searched if k['status'] == 'missed' and (k['beams_near'] or 0) > 0)}
+        return rows_, summary
+
+    @app.get('/lotaas', response_class=HTMLResponse)
+    def lotaas_sources(request: Request):
+        from web.indexer import BEAM_RADIUS_DEG, SEARCHED_RADIUS_DEG
+        show = request.query_params.get('show', 'searched')
+        show = show if show in LOTAAS_SHOWS else 'searched'
+        with store.reading(cfg) as db:
+            found, summary = lotaas_summary(db)
+            ids = {(r['kind'], r['item']): r['id'] for r in rows(db, """SELECT c.kind, c.item, MIN(c.id) AS id
+                FROM candidates c JOIN lotaas_sources l ON c.item IN (l.sp_item, l.periodic_item)
+                GROUP BY c.kind, c.item""")}
+        chosen = {'searched': lambda k: k['searched'], 'all': lambda k: True,
+                  'discoveries': lambda k: k['discovery'], 'single': lambda k: k['lotaas_single'],
+                  'missed': lambda k: k['status'] == 'missed', 'found': lambda k: k['searched'] and k['status'] != 'missed'}[show]
+        order = {'missed': 0, 'single pulses': 1, 'periodic': 2, 'both': 3, 'not searched yet': 4}
+        shown = sorted((k for k in found if chosen(k)),
+                       key=lambda k: (order[k['status']], k['separation_deg'] if k['searched'] else 0, k['psrj']))
+        for k in shown:
+            k['sp_id'] = ids.get(('sp', k['sp_item']))
+            k['periodic_id'] = ids.get(('periodic', k['periodic_item']))
+        return page(request, 'lotaas.html', found=shown, summary=summary, show=show, shows=LOTAAS_SHOWS,
+                    searched_radius=SEARCHED_RADIUS_DEG, beam_radius=BEAM_RADIUS_DEG)
 
     # --------------------------------------------------------------- API
     def load_snippet(cid):

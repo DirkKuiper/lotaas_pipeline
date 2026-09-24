@@ -79,7 +79,7 @@
           <td class="num" title="{% if c.family_beams %}{{ c.family_saps }} SAP(s); DM {{ '%.1f'|format(c.family_dm_min) }}–{{ '%.1f'|format(c.family_dm_max) }}{% endif %}">{{ c.family_beams or 1 }}</td>
           <td>{{ c.catalogue }}</td>
           <td class="nowrap">{% if c.multibeam %}<span class="flag bad small">multi-beam</span> {% endif %}{% if c.type == 'periodic_rfi' %}<span class="flag bad small">RFI-like</span> {% endif %}{% if c.smeared %}<span class="flag small" title="Expected scattering exceeds the period">τ &gt; P</span> {% endif %}{% if c.pilot %}<span class="flag small">pilot</span>{% endif %}</td>
-          <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% endif %}</td>
+          <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% else %}<span class="flag small">to review</span>{% endif %}</td>
         </tr>
       {% else %}<tr><td colspan="12" class="muted">{% if params.get('triage') == 'strong' %}No periodic candidates currently meet the strong-evidence criteria. Deferred folds remain available under “All retained folds”.{% else %}No periodic candidates match.{% endif %}</td></tr>{% endfor %}
       </tbody>

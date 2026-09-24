@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS pulsar_recovery (observation TEXT, psrj TEXT, bname T
     sp_count INTEGER, sp_best_snr REAL, sp_item TEXT, periodic_count INTEGER, periodic_best REAL,
     periodic_item TEXT, periodic_relation TEXT, PRIMARY KEY(observation, psrj));
 DROP TABLE IF EXISTS known_pulsars;
+-- Every published LOTAAS source (web.lotaas), how LOTAAS found it, and what this campaign found of it.
+CREATE TABLE IF NOT EXISTS lotaas_sources (psrj TEXT PRIMARY KEY, bname TEXT, dm REAL, period REAL,
+    flux_mjy REAL, flux_source TEXT, discovery INTEGER, reference TEXT, rrat INTEGER, lotaas_mode TEXT,
+    lotaas_note TEXT, observation TEXT, beam_item TEXT, separation_deg REAL, beams_near INTEGER,
+    sp_count INTEGER, sp_best_snr REAL, sp_item TEXT, periodic_count INTEGER, periodic_best REAL,
+    periodic_item TEXT, periodic_relation TEXT);
 '''
 
 REVIEWS = '''

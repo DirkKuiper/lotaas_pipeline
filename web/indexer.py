@@ -50,6 +50,8 @@ COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is inte
 # BEAM_RADIUS_DEG of one the search should see a bright one.
 KNOWN_PULSAR_RADIUS_DEG = 2.0
 BEAM_RADIUS_DEG = 0.5
+# A published source counts as searched once a campaign beam lies this close.
+SEARCHED_RADIUS_DEG = 1.0
 
 
 def uri(path):
@@ -418,6 +420,7 @@ class Indexer:
             self.derive_families()
             self.derive_coincidence()
             self.derive_known_pulsars()
+            self.derive_lotaas()
             from web.periodic_quality import sync
             sync(db)
 
@@ -501,21 +504,16 @@ class Indexer:
             self.db.execute('DELETE FROM sp_coincidence')
             self.db.executemany('INSERT OR REPLACE INTO sp_coincidence VALUES (?,?,?,?,?,?)', rows)
 
-    def derive_known_pulsars(self):
-        """Every catalogued pulsar within reach of a campaign-searched beam, and what the search found of it.
+    def campaign_evidence(self):
+        """What the campaign's own (non-pilot) search holds, for judging catalogued sources.
 
-        The first night's cross-beam veto removed J0323+3944 from the periodic
-        results of its own observation; only a check against the catalogue
-        shows a loss like that. Single pulses count through the classifier's
-        redetections, unless a reviewer called them noise or RFI or they
-        coincide across beams at scattered DMs (the start of L603674 was
-        announced nine times as J0152+0948); periods count through harmonic
-        matching of every fold of the observation (euroflash.psrcat). Pilot and
-        validation runs (pilot) are left out: the campaign's own search is judged.
+        beams: {observation: {item: (ra, dec)}}; folds: {observation: [rows]};
+        singles: {(observation, pulsar): [(snr, item)]} of the classifier's
+        redetections, less those a reviewer called noise or RFI and those seen
+        across beams at scattered DMs (the start of L603674 was announced nine
+        times as J0152+0948); known: {observation: [(dm, snr, item)]} of FETCH
+        positives a reviewer called a known source.
         """
-        from euroflash import psrcat
-        pulsars = psrcat.load()
-        rows = []
         beams = {}
         for r in self.db.execute("""SELECT item, observation, ra_deg, dec_deg FROM beams WHERE ra_deg IS NOT NULL
                 AND COALESCE(pilot, 0)=0"""):
@@ -526,25 +524,54 @@ class Indexer:
             parsed = parse_item(r['item'])
             if parsed:
                 folds.setdefault(parsed[0], []).append(r)
+        latest = "(SELECT label FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)"
         singles = {}
         for r in self.db.execute(f"""SELECT c.item, c.pulsar, c.snr FROM candidates c
                 WHERE c.kind='sp' AND c.type='known_pulsar' AND COALESCE(c.pilot, 0)=0
-                AND COALESCE((SELECT label FROM review_state.reviews v WHERE v.key=c.key
-                              ORDER BY created DESC LIMIT 1), '') NOT IN ('noise', 'rfi')
+                AND COALESCE({latest}, '') NOT IN ('noise', 'rfi')
                 AND NOT EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key
                                 AND x.beams >= {COINCIDENT_BEAMS} AND NOT x.consistent)"""):
             parsed = parse_item(r['item'])
             if parsed:
                 singles.setdefault((parsed[0], r['pulsar']), []).append((r['snr'], r['item']))
-        for observation, members in beams.items() if pulsars else ():
-            # One cone around the observation's beams, then each beam against that.
+        known = {}
+        for r in self.db.execute(f"""SELECT c.item, c.dm, c.snr FROM candidates c WHERE c.kind='sp'
+                AND c.type='candidate' AND COALESCE(c.pilot, 0)=0 AND {latest}='known'"""):
+            parsed = parse_item(r['item'])
+            if parsed:
+                known.setdefault(parsed[0], []).append((r['dm'], r['snr'], r['item']))
+        return beams, folds, singles, known
+
+    @staticmethod
+    def fields(beams):
+        """{observation: (centre (ra, dec), spread in degrees)} of the searched beams."""
+        from euroflash import psrcat
+        out = {}
+        for observation, members in beams.items():
             ras = [math.radians(ra) for ra, _ in members.values()]
             centre = (math.degrees(math.atan2(sum(map(math.sin, ras)), sum(map(math.cos, ras)))) % 360,
                       sum(dec for _, dec in members.values()) / len(members))
-            spread = max(psrcat.separation(*centre, ra, dec) for ra, dec in members.values())
+            out[observation] = (centre, max(psrcat.separation(*centre, ra, dec) for ra, dec in members.values()))
+        return out
+
+    def derive_known_pulsars(self):
+        """Every catalogued pulsar within reach of a campaign-searched beam, and what the search found of it.
+
+        The first night's cross-beam veto removed J0323+3944 from the periodic
+        results of its own observation; only a check against the catalogue
+        shows a loss like that. Single pulses count through the classifier's
+        redetections (campaign_evidence), periods through harmonic matching of
+        every fold of the observation (euroflash.psrcat). Pilot and validation
+        runs (pilot) are left out: the campaign's own search is judged.
+        """
+        from euroflash import psrcat
+        pulsars = psrcat.load()
+        beams, folds, singles, _ = self.campaign_evidence()
+        rows = []
+        for observation, (centre, spread) in self.fields(beams).items() if pulsars else ():
             field = psrcat.cone(pulsars, *centre, spread + KNOWN_PULSAR_RADIUS_DEG)
             near = {}
-            for item, (ra, dec) in members.items() if field else ():
+            for item, (ra, dec) in beams[observation].items() if field else ():
                 for p in psrcat.cone(field, ra, dec, KNOWN_PULSAR_RADIUS_DEG):
                     best = near.get(p['name'])
                     count = (best[3] if best else 0) + (p['separation_deg'] <= BEAM_RADIUS_DEG)
@@ -565,6 +592,55 @@ class Indexer:
             self.db.execute('DELETE FROM pulsar_recovery')
             self.db.executemany('INSERT OR REPLACE INTO pulsar_recovery VALUES '
                                 '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
+
+    def derive_lotaas(self):
+        """Every published LOTAAS source against what this campaign has searched and found.
+
+        A source counts as searched once a campaign beam lies within
+        SEARCHED_RADIUS_DEG of it; the evidence of every observation holding
+        such a beam counts toward it. Single pulses are the classifier's
+        redetections under the catalogue name, and FETCH positives a reviewer
+        called a known source at its DM; periods any fold at its DM and period,
+        a harmonic, a multiple or a small fraction.
+        """
+        from euroflash import psrcat
+        from web import lotaas
+        sources = lotaas.sources()
+        beams, folds, singles, known = self.campaign_evidence()
+        fields = self.fields(beams)
+        rows = []
+        for src in sources:
+            best, observations, near = None, set(), 0
+            for observation, (centre, spread) in fields.items():
+                if psrcat.separation(*centre, src['ra'], src['dec']) > spread + SEARCHED_RADIUS_DEG:
+                    continue
+                for item, (ra, dec) in beams[observation].items():
+                    separation = psrcat.separation(ra, dec, src['ra'], src['dec'])
+                    if separation <= SEARCHED_RADIUS_DEG:
+                        observations.add(observation)
+                        near += separation <= BEAM_RADIUS_DEG
+                    if best is None or separation < best[0]:
+                        best = (separation, item, observation)
+            sp, matched = [], []
+            for observation in observations:
+                sp += singles.get((observation, src['name']), [])
+                sp += [(snr, item) for dm, snr, item in known.get(observation, [])
+                       if abs(dm - src['dm']) <= max(1.0, 0.05 * src['dm'])]
+                matched += [(f['statistic'] or 0, f['item'], found[1]) for f in folds.get(observation, [])
+                            for found in [psrcat.match(f['period'], f['dm'] or 0.0, [src])] if found]
+            sp.sort(reverse=True)
+            top = max(matched, default=(None, None, None))
+            flux, flux_source = psrcat.flux_at(src)
+            searched = best is not None and best[0] <= SEARCHED_RADIUS_DEG
+            rows.append((src['name'], src.get('bname'), src['dm'], src['period'], flux, flux_source,
+                         int(src['discovery']), src['reference'], int(src['rrat']), src['lotaas_mode'],
+                         src['lotaas_note'], best[2] if searched else None, best[1] if searched else None,
+                         best[0] if best else None, near, len(sp), sp[0][0] if sp else None,
+                         sp[0][1] if sp else None, len(matched), top[0], top[1], top[2]))
+        with self.db:
+            self.db.execute('DELETE FROM lotaas_sources')
+            self.db.executemany('INSERT OR REPLACE INTO lotaas_sources VALUES '
+                                '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
 
     def derive_saps(self):
         db = self.db

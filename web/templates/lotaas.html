@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block title %}LOTAAS sources{% endblock %}
+{% block page %}candidates{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>LOTAAS sources</h1>
+    <div class="muted">Every source the original LOTAAS search published, as the ATNF catalogue lists them (its SURVEY field names LOTAAS among the surveys that detected a pulsar, the discovery survey first), set against this campaign. How LOTAAS found each: single pulses for the seven discoveries of Michilli et al. 2018 (Table 4; six were also seen as periods, Sanidas et al. 2019) and for the RRATs it detected, the periodicity search for all others. A source counts as searched once a campaign beam lies within {{ searched_radius }}°; redetections count single pulses (the classifier's known-pulsar redetections and FETCH positives reviewed as a known source at its DM) and periods (any fold at its DM and period, a harmonic, a multiple or a small fraction).</div>
+  </div>
+</div>
+<div class="tiles">
+  <div class="tile"><div class="label">Published LOTAAS sources</div><div class="value">{{ summary.total }}</div>
+    <div class="sub">{{ summary.discoveries }} LOTAAS discoveries · {{ summary.single }} found in single pulses</div></div>
+  <div class="tile"><div class="label">In fields searched so far</div><div class="value">{{ summary.searched }} <span class="muted small">/ {{ summary.total }}</span></div>
+    <div class="bar"><span style="width: {{ 100 * summary.searched / summary.total if summary.total else 0 }}%"></span></div></div>
+  <div class="tile"><div class="label">Redetected</div><div class="value">{{ summary.found }} <span class="muted small">/ {{ summary.searched }}</span></div>
+    <div class="bar"><span style="width: {{ 100 * summary.found / summary.searched if summary.searched else 0 }}%"></span></div>
+    <div class="sub">{{ summary.periodic_any }} as a period · {{ summary.sp_any }} in single pulses</div></div>
+  <div class="tile"><div class="label">LOTAAS periods found again as periods</div><div class="value">{{ summary.periodic_found }} <span class="muted small">/ {{ summary.periodic_expected }}</span></div>
+    <div class="sub">of the searched sources LOTAAS found by periodicity</div></div>
+  <div class="tile"><div class="label">LOTAAS single-pulse sources found again in single pulses</div><div class="value">{{ summary.single_found }} <span class="muted small">/ {{ summary.single_expected }}</span></div>
+    <div class="sub">of the searched sources LOTAAS found in single pulses</div></div>
+  <div class="tile"><div class="label">Searched, not found</div><div class="value">{{ summary.missed }}</div>
+    <div class="sub">{{ summary.missed_near }} within {{ beam_radius }}° of a beam</div></div>
+</div>
+<div class="chips">
+  {% for key, text in shows.items() %}<a class="chip{{ ' on' if key == show }}" href="/lotaas?show={{ key }}">{{ text }}</a>{% endfor %}
+</div>
+<div class="card flush">
+  <div class="table-wrap tall">
+    <table class="sortable">
+      <thead><tr><th>Pulsar</th><th class="num">P (s)</th><th class="num">DM</th><th class="num" title="Catalogue flux scaled to 135 MHz with index -1.6">S135 (mJy)</th>
+        <th>LOTAAS found it</th><th>Nearest searched beam</th><th class="num">Separation (°)</th>
+        <th>Single pulses here</th><th>Periodic here</th><th>This campaign</th></tr></thead>
+      <tbody>
+      {% for k in found %}
+        <tr>
+          <td class="nowrap">{{ k.psrj }}{% if k.bname %} <span class="muted small">{{ k.bname }}</span>{% endif %}{% if k.discovery %} <span class="flag ok small" title="LOTAAS discovery ({{ k.reference }})">discovery</span>{% endif %}{% if k.rrat %} <span class="flag small">RRAT</span>{% endif %}</td>
+          <td class="num">{{ '%.4f'|format(k.period) }}</td>
+          <td class="num">{{ '%.2f'|format(k.dm) }}</td>
+          <td class="num" title="{{ k.flux_source or 'no catalogue flux' }}">{{ '%.0f'|format(k.flux_mjy) if k.flux_mjy is not none else '' }}</td>
+          <td class="nowrap" title="{{ k.lotaas_note }}">{{ k.lotaas_mode }}</td>
+          <td>{% if k.searched %}<a href="/beam/{{ k.beam_item }}">{{ k.beam_item|beam }}</a>{% else %}<span class="muted">not searched yet</span>{% endif %}</td>
+          <td class="num">{{ '%.2f'|format(k.separation_deg) if k.searched else '' }}</td>
+          <td class="nowrap">{% if k.sp_count %}{% if k.sp_id %}<a href="/verify/{{ k.sp_id }}">{% endif %}{{ k.sp_count }}, best S/N {{ '%.1f'|format(k.sp_best_snr) }}{% if k.sp_id %}</a>{% endif %}{% elif k.searched %}—{% endif %}</td>
+          <td class="nowrap">{% if k.periodic_count %}{% if k.periodic_id %}<a href="/verify/{{ k.periodic_id }}">{% endif %}{{ k.periodic_count }} fold{{ 's' if k.periodic_count != 1 }}, best {{ '%.0f'|format(k.periodic_best) }} ({{ k.periodic_relation }}){% if k.periodic_id %}</a>{% endif %}{% elif k.searched %}—{% endif %}</td>
+          <td class="nowrap">{% if k.status == 'missed' %}<span class="flag bad">not found</span>{% elif k.status == 'both' %}<span class="flag ok">both</span>{% elif k.status == 'not searched yet' %}<span class="muted small">not searched yet</span>{% else %}<span class="flag">{{ k.status }} only</span>{% endif %}</td>
+        </tr>
+      {% else %}<tr><td colspan="10" class="muted">No source in this selection{% if show == 'searched' %}: no campaign beam lies within {{ searched_radius }}° of a published LOTAAS source yet{% endif %}.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

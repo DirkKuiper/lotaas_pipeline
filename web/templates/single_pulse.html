@@ -46,7 +46,7 @@
           <td>{{ c.pulsar or '' }}</td>
           <td>{{ 'posted' if c.slack_sent else '' }}</td>
           <td class="small">{{ 'snippet' if c.snippet else 'plot' if c.plot_id else '—' }}</td>
-          <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% endif %}</td>
+          <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% else %}<span class="flag small">to review</span>{% endif %}</td>
         </tr>
       {% else %}<tr><td colspan="12" class="muted">No candidates match.</td></tr>{% endfor %}
       </tbody>

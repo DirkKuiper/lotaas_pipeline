@@ -12,6 +12,17 @@
   {% include '_project_filter.html' %}
 </div>
 
+{% if lotaas.total %}
+<div class="tiles">
+  <div class="tile"><div class="label">Published LOTAAS sources redetected</div>
+    <div class="value">{{ lotaas.found }} <span class="muted small">/ {{ lotaas.searched }} searched</span></div>
+    <div class="bar"><span style="width: {{ 100 * lotaas.found / lotaas.searched if lotaas.searched else 0 }}%"></span></div>
+    <div class="sub">{{ lotaas.periodic_any }} as a period, {{ lotaas.sp_any }} in single pulses · {{ lotaas.total }} published<br><a href="/lotaas">LOTAAS sources →</a></div></div>
+  <div class="tile"><div class="label">LOTAAS sources in fields searched so far</div>
+    <div class="value">{{ lotaas.searched }} <span class="muted small">/ {{ lotaas.total }}</span></div>
+    <div class="sub">{{ lotaas.missed }} searched but not found yet</div></div>
+</div>
+{% endif %}
 {% if scope %}
 <div class="tiles">
   <div class="tile"><div class="label">SAPs searched</div>
