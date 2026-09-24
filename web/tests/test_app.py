@@ -193,12 +193,23 @@ def test_an_event_in_many_beams_at_scattered_dms_leaves_the_queue(cfg, campaign)
 def test_known_pulsars_near_the_beams_are_listed_with_what_was_found(cfg, campaign, monkeypatch, tmp_path):
     catalogue = tmp_path/'psrcat.db'
     catalogue.write_text('PSRJ     J0847+6830\nRAJ      08:47:30.0\nDECJ     +68:30:00\nDM       30.0\n'
-                         'P0       0.5\n@----\nPSRJ     J0850+6800\nRAJ      08:50:00.0\nDECJ     +68:00:00\n'
-                         'DM       55.0\nP0       1.2\n@----\n')
+                         'P0       0.5\nS400     12.0\n@----\n'
+                         'PSRJ     J0850+6800\nRAJ      08:50:00.0\nDECJ     +68:00:00\n'
+                         'DM       55.0\nP0       1.2\nS150     45.0\n@----\n'
+                         'PSRJ     J0846+6820\nRAJ      08:46:00.0\nDECJ     +68:20:00\nDM       40.0\n'
+                         'P0       0.0031\n@----\n')
     monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
-    add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0)])
+    add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0),
+                              (25, 55.2, 9.0, 2, 'known_pulsar', 'J0850+6800', 1200.0)])
     fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 80.0, 'half')     # its second harmonic
     Indexer(cfg).run_pass()
-    page = client_for(cfg).get('/pulsars').text
+    client = client_for(cfg)
+    # A reviewer found the J0850+6800 'redetection' to be noise: it no longer counts.
+    cid = client.get('/single-pulse').text.split('J0850+6800')[0].rsplit('href="/verify/', 1)[1].split('?')[0]
+    assert client.post('/api/review', json={'id': cid, 'label': 'noise', 'reviewer': 'Dirk'}).status_code == 200
+    Indexer(cfg).run_pass()
+    page = client.get('/pulsars').text
     assert 'J0847+6830' in page and 'S/N 14.0' in page and '(1/2)' in page and 'flag ok">both' in page
-    assert 'J0850+6800' in page and 'missed' in page
+    j0850 = page.split('J0850+6800')[1].split('</tr>')[0]
+    assert 'flag bad">missed' in j0850 and '>53<' in j0850      # bright (S150 45 mJy, 53 at 135 MHz) and near
+    assert 'P below the search' in page.split('J0846+6820')[1].split('</tr>')[0]

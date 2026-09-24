@@ -99,11 +99,12 @@ CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, m
 -- A single-pulse candidate and the events at its moment in other beams of its observation.
 CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, saps INTEGER,
     dm_min REAL, dm_max REAL, consistent INTEGER);
--- Every catalogued pulsar near a searched beam, and what the search found of it.
-CREATE TABLE IF NOT EXISTS known_pulsars (observation TEXT, psrj TEXT, bname TEXT, dm REAL, period REAL,
-    beam_item TEXT, separation_deg REAL, beams_near INTEGER, sp_count INTEGER, sp_best_snr REAL, sp_item TEXT,
-    periodic_count INTEGER, periodic_best REAL, periodic_item TEXT, periodic_relation TEXT,
-    PRIMARY KEY(observation, psrj));
+-- Every catalogued pulsar near a campaign-searched beam, and what the search found of it.
+CREATE TABLE IF NOT EXISTS pulsar_recovery (observation TEXT, psrj TEXT, bname TEXT, dm REAL, period REAL,
+    flux_mjy REAL, flux_source TEXT, beam_item TEXT, separation_deg REAL, beams_near INTEGER,
+    sp_count INTEGER, sp_best_snr REAL, sp_item TEXT, periodic_count INTEGER, periodic_best REAL,
+    periodic_item TEXT, periodic_relation TEXT, PRIMARY KEY(observation, psrj));
+DROP TABLE IF EXISTS known_pulsars;
 '''
 
 REVIEWS = '''

@@ -45,6 +45,7 @@ FAMILY_TOLERANCE = 5e-4  # relative period difference within one periodic family
 COINCIDENCE_SECONDS = 0.5
 KINDS_QUEUED = ('candidate', 'known_pulsar')
 K_DM = 4148.808
+COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is interference
 # Catalogued pulsars this close to a searched beam are listed; within
 # BEAM_RADIUS_DEG of one the search should see a bright one.
 KNOWN_PULSAR_RADIUS_DEG = 2.0
@@ -501,26 +502,40 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO sp_coincidence VALUES (?,?,?,?,?,?)', rows)
 
     def derive_known_pulsars(self):
-        """Every catalogued pulsar within reach of a searched beam, and whether the search found it.
+        """Every catalogued pulsar within reach of a campaign-searched beam, and what the search found of it.
 
         The first night's cross-beam veto removed J0323+3944 from the periodic
         results of its own observation; only a check against the catalogue
         shows a loss like that. Single pulses count through the classifier's
-        redetections, periods through harmonic matching of every fold of the
-        observation (euroflash.psrcat).
+        redetections, unless a reviewer called them noise or RFI or they
+        coincide across beams at scattered DMs (the start of L603674 was
+        announced nine times as J0152+0948); periods count through harmonic
+        matching of every fold of the observation (euroflash.psrcat). Pilot and
+        validation runs (pilot) are left out: the campaign's own search is judged.
         """
         from euroflash import psrcat
         pulsars = psrcat.load()
         rows = []
         beams = {}
-        for r in self.db.execute('SELECT item, observation, ra_deg, dec_deg FROM beams '
-                                 'WHERE ra_deg IS NOT NULL AND COALESCE(pilot, 0)=0'):
+        for r in self.db.execute("""SELECT item, observation, ra_deg, dec_deg FROM beams WHERE ra_deg IS NOT NULL
+                AND COALESCE(pilot, 0)=0"""):
             beams.setdefault(r['observation'], {})[r['item']] = (r['ra_deg'], r['dec_deg'])
         folds = {}
-        for r in self.db.execute('SELECT item, dm, period, statistic FROM periodic WHERE period > 0'):
+        for r in self.db.execute("""SELECT item, dm, period, statistic FROM periodic
+                WHERE period > 0 AND COALESCE(pilot, 0)=0"""):
             parsed = parse_item(r['item'])
             if parsed:
                 folds.setdefault(parsed[0], []).append(r)
+        singles = {}
+        for r in self.db.execute(f"""SELECT c.item, c.pulsar, c.snr FROM candidates c
+                WHERE c.kind='sp' AND c.type='known_pulsar' AND COALESCE(c.pilot, 0)=0
+                AND COALESCE((SELECT label FROM review_state.reviews v WHERE v.key=c.key
+                              ORDER BY created DESC LIMIT 1), '') NOT IN ('noise', 'rfi')
+                AND NOT EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key
+                                AND x.beams >= {COINCIDENT_BEAMS} AND NOT x.consistent)"""):
+            parsed = parse_item(r['item'])
+            if parsed:
+                singles.setdefault((parsed[0], r['pulsar']), []).append((r['snr'], r['item']))
         for observation, members in beams.items() if pulsars else ():
             # One cone around the observation's beams, then each beam against that.
             ras = [math.radians(ra) for ra, _ in members.values()]
@@ -538,18 +553,18 @@ class Indexer:
                     else:
                         near[p['name']] = best[:3] + (count,)
             for name, (p, separation, item, count) in near.items():
-                sp = self.db.execute("""SELECT COUNT(*), MAX(snr), (SELECT item FROM candidates d WHERE d.kind='sp'
-                        AND d.type='known_pulsar' AND d.pulsar=? AND d.item LIKE ? ORDER BY d.snr DESC LIMIT 1)
-                        FROM candidates c WHERE c.kind='sp' AND c.type='known_pulsar' AND c.pulsar=? AND c.item LIKE ?""",
-                                     (name, f'%{observation}%', name, f'%{observation}%')).fetchone()
+                sp = sorted(singles.get((observation, name), []), reverse=True)
                 matched = [(f['statistic'] or 0, f['item'], found[1]) for f in folds.get(observation, [])
                            for found in [psrcat.match(f['period'], f['dm'] or 0.0, [p])] if found]
                 best = max(matched, default=(None, None, None))
-                rows.append((observation, name, p.get('bname'), p['dm'], 1 / p['f0'], item, separation, count,
-                             sp[0], sp[1], sp[2], len(matched), best[0], best[1], best[2]))
+                flux, source = psrcat.flux_at(p)
+                rows.append((observation, name, p.get('bname'), p['dm'], 1 / p['f0'], flux, source, item, separation,
+                             count, len(sp), sp[0][0] if sp else None, sp[0][1] if sp else None,
+                             len(matched), best[0], best[1], best[2]))
         with self.db:
-            self.db.execute('DELETE FROM known_pulsars')
-            self.db.executemany('INSERT OR REPLACE INTO known_pulsars VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
+            self.db.execute('DELETE FROM pulsar_recovery')
+            self.db.executemany('INSERT OR REPLACE INTO pulsar_recovery VALUES '
+                                '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
 
     def derive_saps(self):
         db = self.db

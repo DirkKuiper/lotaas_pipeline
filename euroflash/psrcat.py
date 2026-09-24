@@ -75,9 +75,26 @@ def parse(text):
             pepoch = float(r['PEPOCH']) if 'PEPOCH' in r else None
         except ValueError:
             pepoch = None
-        pulsars.append({'name': r.get('PSRJ', r.get('PSRB', '?')), 'bname': r.get('PSRB'),
-                        'ra': ra, 'dec': dec, 'dm': dm, 'f0': f0, 'f1': f1, 'pepoch': pepoch})
+        fluxes = {}
+        for key in ('S150', 'S400', 'S1400'):
+            try:
+                fluxes[key] = float(r[key]) if key in r else None
+            except ValueError:
+                fluxes[key] = None
+        pulsars.append(dict({'name': r.get('PSRJ', r.get('PSRB', '?')), 'bname': r.get('PSRB'),
+                             'ra': ra, 'dec': dec, 'dm': dm, 'f0': f0, 'f1': f1, 'pepoch': pepoch}, **fluxes))
     return pulsars
+
+
+def flux_at(pulsar, mhz=135.0, index=-1.6):
+    """(mJy, source): the catalogue flux nearest in frequency, scaled with a typical spectral index.
+
+    An indication of how bright a pulsar should look to LOTAAS, not a measurement.
+    """
+    for key, frequency in (('S150', 150.0), ('S400', 400.0), ('S1400', 1400.0)):
+        if pulsar.get(key):
+            return pulsar[key] * (mhz / frequency) ** index, key
+    return None, None
 
 
 def load(path=None):

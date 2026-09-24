@@ -58,6 +58,12 @@ MULTIBEAM_BEAMS = 4
 COINCIDENT_BEAMS = 5
 
 
+# The periodic search's shortest period; millisecond pulsars are out of its reach.
+MIN_PERIOD_SECONDS = 0.016
+# Flux at 135 MHz (catalogue, scaled) above which a pulsar near a beam should be found.
+BRIGHT_MJY = 20.0
+
+
 def coincident_sql(alias):
     return f'({alias}.beams >= {COINCIDENT_BEAMS} AND NOT {alias}.consistent)'
 
@@ -787,16 +793,19 @@ def create_app(cfg, run_background=True):
                      AND c.item=k.sp_item ORDER BY c.snr DESC LIMIT 1) AS sp_id,
                     (SELECT id FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
                      AND c.snr=k.periodic_best LIMIT 1) AS periodic_id
-                FROM known_pulsars k ORDER BY k.observation, k.separation_deg""")
+                FROM pulsar_recovery k ORDER BY k.observation, k.separation_deg""")
         for k in found:
+            k['reachable'] = k['period'] >= MIN_PERIOD_SECONDS
             k['status'] = ('both' if k['sp_count'] and k['periodic_count'] else 'single pulses' if k['sp_count']
                            else 'periodic' if k['periodic_count'] else 'missed')
-        near = [k for k in found if k['separation_deg'] <= BEAM_RADIUS_DEG]
+        near = [k for k in found if k['separation_deg'] <= BEAM_RADIUS_DEG and k['reachable']]
+        bright = [k for k in near if (k['flux_mjy'] or 0) >= BRIGHT_MJY]
         summary = {'near': len(near), 'found': sum(k['status'] != 'missed' for k in near),
                    'periodic': sum(1 for k in near if k['periodic_count']),
+                   'bright': len(bright), 'bright_periodic': sum(1 for k in bright if k['periodic_count']),
                    'observations': len({k['observation'] for k in found})}
         return page(request, 'pulsars.html', found=found, summary=summary, beam_radius=BEAM_RADIUS_DEG,
-                    radius=KNOWN_PULSAR_RADIUS_DEG)
+                    radius=KNOWN_PULSAR_RADIUS_DEG, bright_mjy=BRIGHT_MJY, min_period=MIN_PERIOD_SECONDS)
 
     # --------------------------------------------------------------- API
     def load_snippet(cid):
