@@ -56,6 +56,8 @@ MEAN = 'flatfield-mean.npy'
 OUTSTANDING = ('pending', 'requested', 'online', 'working')
 FINAL = {'success', 'failed', 'aborted', 'partial success'}
 NAME = re.compile(r'^L(\d+)_SAP(\d+)_B(\d+)_')
+# SPIDER SAPs are positioned after every LTA SAP: LT5_004 keeps first claim on the GPUs.
+SPIDER_POSITION = 10**6
 
 
 def basename(url):
@@ -63,11 +65,17 @@ def basename(url):
 
 
 def parse_inventory(path):
-    """SAP-grouped archive files from a list of SRM URLs, in a stable order."""
+    """SAP-grouped archive files from a list of SRM (LTA) or ssh:// (SPIDER) URLs, in a stable order."""
+    from euroflash import spider
     rows = []
     for line in Path(path).read_text().splitlines():
         surl = line.strip()
         if not surl or surl.startswith('#'):
+            continue
+        if spider.is_spider(surl):
+            row = spider.parse(surl)
+            if row:
+                rows.append(row)
             continue
         match = NAME.match(basename(surl))
         if not match:
@@ -105,6 +113,9 @@ class State:
                 CREATE TABLE IF NOT EXISTS events (
                     time REAL NOT NULL, kind TEXT NOT NULL, subject TEXT, detail TEXT);
             ''')
+            if 'source' not in {r['name'] for r in db.execute('PRAGMA table_info(saps)')}:
+                # 'spider': beams already converted on SPIDER, fetched without staging (euroflash.spider).
+                db.execute("ALTER TABLE saps ADD COLUMN source TEXT NOT NULL DEFAULT 'lta'")
 
     @contextmanager
     def db(self):
@@ -121,21 +132,22 @@ class State:
         with self.db() as db:
             db.execute('INSERT INTO events VALUES (?,?,?,?)', (time.time(), kind, subject, str(detail)[:2000]))
 
-    def load(self, rows, missing_central, exclude_beams=(), allowed_missing=0):
+    def load(self, rows, missing_central, exclude_beams=(), allowed_missing=0, source='lta'):
         """Queue the inventory. A SAP whose archive lacks more than allowed_missing
         central beams is 'incomplete' and never staged; one that lacks fewer is
-        searched without them."""
+        searched without them. SPIDER SAPs queue behind every LTA SAP."""
         now = time.time()
+        first = SPIDER_POSITION if source == 'spider' else 0
         with self.db() as db:
             saps = {}
             for row in rows:
                 saps.setdefault(sap_key(row['archive_obs'], row['sap']), []).append(row)
-            for position, (key, files) in enumerate(sorted(saps.items())):
+            for index, (key, files) in enumerate(sorted(saps.items())):
                 missing = missing_central(files)
                 incomplete = len(missing) > allowed_missing
-                db.execute('INSERT OR IGNORE INTO saps(key,position,files,state,detail,updated) VALUES (?,?,?,?,?,?)',
-                           (key, position, len(files), 'incomplete' if incomplete else 'pending',
-                            f'missing central beams {missing}' if missing else None, now))
+                db.execute('INSERT OR IGNORE INTO saps(key,position,files,state,detail,updated,source) VALUES (?,?,?,?,?,?,?)',
+                           (key, first + index, len(files), 'incomplete' if incomplete else 'pending',
+                            f'missing central beams {missing}' if missing else None, now, source))
                 if missing and not incomplete:
                     # Queued as incomplete under a stricter limit: stage it now.
                     db.execute("UPDATE saps SET state='pending',updated=? WHERE key=? AND state='incomplete'", (now, key))
@@ -166,8 +178,15 @@ class State:
 
     def counts(self):
         with self.db() as db:
-            return {'saps': dict(db.execute('SELECT state,COUNT(*) FROM saps GROUP BY state').fetchall()),
-                    'files': dict(db.execute('SELECT state,COUNT(*) FROM files GROUP BY state').fetchall())}
+            counts = {'saps': dict(db.execute('SELECT state,COUNT(*) FROM saps GROUP BY state').fetchall()),
+                      'files': dict(db.execute('SELECT state,COUNT(*) FROM files GROUP BY state').fetchall())}
+            spider = {'saps': dict(db.execute("SELECT state,COUNT(*) FROM saps WHERE source='spider' "
+                                              "GROUP BY state").fetchall()),
+                      'files': dict(db.execute("""SELECT f.state,COUNT(*) FROM files f JOIN saps s ON s.key=f.sap_key
+                                                  WHERE s.source='spider' GROUP BY f.state""").fetchall())}
+            if spider['saps']:
+                counts['spider'] = spider
+            return counts
 
 
 class AdoptedProcess:
@@ -269,6 +288,7 @@ class Campaign:
         self.flatfield_pool = ThreadPoolExecutor(max_workers=max(1, getattr(options, 'flatfield_workers', 2)))
         self.flatfield_jobs = {}
         self.throttle_until = 0.
+        self.spider_throttle_until = 0.
         # Cluster runs in flight by run name. Each holds one GPU node until the
         # node's own stages end (<run>/<node>.gpu-done); a CPU node may still be
         # classifying and folding the batch after that.
@@ -299,24 +319,29 @@ class Campaign:
             self.window = window
         return window[0]
 
+    def pending(self, source):
+        """The next SAP of this source to admit, honouring --only-sap."""
+        only = self.o.only_sap or []
+        return self.state.rows(
+            "SELECT key FROM saps WHERE state='pending' AND source=? %s ORDER BY position LIMIT 1"
+            % (f"AND key IN ({','.join('?' * len(only))})" if only else ''), source, *only)
+
     def admit(self):
         """Start staging further SAPs while every bound allows it."""
         free_tb = shutil.disk_usage(self.root).free / 1e12
-        staging = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state='staging'")[0]['n']
-        waiting = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state IN ('prepared','dispatched')")[0]['n']
+        staging = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state='staging' AND source='lta'")[0]['n']
+        waiting = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state IN ('prepared','dispatched') "
+                                  "AND source='lta'")[0]['n']
         limit = self.staging_limit()
         target = getattr(self.o, 'staging_files_target', 0)
         outstanding = self.state.rows("""SELECT COUNT(*) AS n FROM files f JOIN saps s ON s.key=f.sap_key
-            WHERE s.state IN ('staging','partial') AND f.state IN ('pending','requested','online','working')""")[0]['n']
+            WHERE s.state IN ('staging','partial') AND s.source='lta'
+            AND f.state IN ('pending','requested','online','working')""")[0]['n']
         admitted = []
         while (staging < limit and waiting < self.o.max_prepared_saps
                and free_tb > self.o.min_free_tb and not self.stopping
                and (not target or outstanding < target)):
-            candidates = self.state.rows("SELECT key FROM saps WHERE state='pending' ORDER BY position LIMIT 1")
-            if self.o.only_sap:
-                candidates = self.state.rows(
-                    "SELECT key FROM saps WHERE state='pending' AND key IN (%s) ORDER BY position LIMIT 1"
-                    % ','.join('?' * len(self.o.only_sap)), *self.o.only_sap)
+            candidates = self.pending('lta')
             if not candidates:
                 break
             key = candidates[0]['key']
@@ -324,12 +349,39 @@ class Campaign:
             admitted.append(key)
             staging += 1
             outstanding += self.state.rows("SELECT COUNT(*) AS n FROM files WHERE sap_key=? AND state='pending'", key)[0]['n']
+        return admitted + self.admit_spider(free_tb)
+
+    def admit_spider(self, free_tb):
+        """Take SPIDER SAPs while fewer than --spider-saps are being fetched or wait for a search.
+
+        Their beams are on disk at SPIDER, so they need no request: every file
+        is 'online' at once. They are few in flight and positioned after the
+        LTA SAPs, so they fill the GPU time LT5_004 leaves while it waits for
+        tape, rather than compete with it.
+        """
+        limit = getattr(self.o, 'spider_saps', 0)
+        active = self.state.rows("""SELECT COUNT(*) AS n FROM saps WHERE source='spider'
+                                    AND state IN ('staging','flatfielding','prepared')""")[0]['n']
+        admitted = []
+        while active < limit and free_tb > self.o.min_free_tb and not self.stopping:
+            candidates = self.pending('spider')
+            if not candidates:
+                break
+            key = candidates[0]['key']
+            self.state.set_sap(key, state='staging', detail=None)
+            with self.state.db() as db:
+                db.execute("UPDATE files SET state='online',updated=? WHERE sap_key=? AND state='pending'",
+                           (time.time(), key))
+            self.state.event('admitted', key, 'from SPIDER')
+            admitted.append(key)
+            active += 1
         return admitted
 
     def request(self):
         """Submit one StageIT request per staging SAP for its unrequested files."""
         submitted = []
-        for sap in self.state.rows("SELECT key FROM saps WHERE state IN ('staging','partial') ORDER BY position"):
+        for sap in self.state.rows("SELECT key FROM saps WHERE state IN ('staging','partial') AND source='lta' "
+                                   "ORDER BY position"):
             files = self.state.rows("SELECT surl,submissions FROM files WHERE sap_key=? AND state='pending'", sap['key'])
             if not files:
                 continue
@@ -429,21 +481,28 @@ class Campaign:
 
     # ---------------------------------------------------------- retrieval
     def retrieve(self):
-        """Download, extract, convert and delete raw data for files on disk."""
-        if time.time() < self.throttle_until:
-            return 0
-        files = self.state.rows('''SELECT f.* FROM files f JOIN saps s ON s.key=f.sap_key
-                                   WHERE f.state='online' ORDER BY s.position,f.beam LIMIT ?''',
-                                self.o.download_workers * self.o.files_per_worker)
+        """Download, extract, convert and delete raw data for files on disk; fetch SPIDER beams beside them."""
+        now, files, workers = time.time(), [], 0
+        for source, until, n in (('lta', self.throttle_until, self.o.download_workers),
+                                 ('spider', self.spider_throttle_until, getattr(self.o, 'spider_workers', 0))):
+            if now < until or n < 1:
+                continue
+            files += self.state.rows('''SELECT f.* FROM files f JOIN saps s ON s.key=f.sap_key
+                                       WHERE f.state='online' AND s.source=? ORDER BY s.position,f.beam LIMIT ?''',
+                                     source, n * self.o.files_per_worker)
+            workers += n
         if not files:
             return 0
         for f in files:
             self.state.set_file(f['surl'], state='working')
-        with ThreadPoolExecutor(max_workers=self.o.download_workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             done = sum(pool.map(self.process_file, files))
         return done
 
     def process_file(self, f):
+        from euroflash import spider
+        if spider.is_spider(f['surl']):
+            return self.process_spider(f)
         from euroflash.download import download, extract
         from euroflash.rawdata import delete_archive
         target = self.root/'downloads'/f['name']
@@ -508,6 +567,44 @@ class Campaign:
             self.state.event('retrieve_failed', f['name'], error)
             return 0
 
+    def process_spider(self, f):
+        """Stream one SPIDER beam into its SAP directory; it arrives converted."""
+        from euroflash import spider
+        row = spider.parse(f['surl'])
+        obs = 'L' + row['archive_obs']
+        directory = self.runner.root/'data'/obs/f'SAP{row["sap"]:03d}'/f'B{row["beam"]:03d}'
+        output = directory/f'downsampled_{obs}_SAP{row["sap"]:03d}_BEAM{row["beam"]:03d}_32bit.fil'
+        receipt_path = self.root/'downloads'/(f['name'] + '.receipt.json')
+        options = []
+        if self.o.control_dir:
+            # One authenticated connection carries every fetch: SPIDER sees no login storm.
+            options = ['-o', 'ControlMaster=auto', '-o', f'ControlPath={self.o.control_dir}/spider-%C',
+                       '-o', 'ControlPersist=600']
+        attempt = self.ledger.start(Path(f['name']).stem, 'retrieve', 'ssh-tar-v1', receipt_path,
+                                    ['SPIDER', f['surl']])
+        try:
+            receipt = spider.fetch(f['surl'], output, receipt_path, getattr(self.o, 'spider_destination', None),
+                                   ssh_options=options)
+        except spider.Unreachable as error:
+            # The connection or the key, not the file: back off without a strike.
+            self.ledger.finish(attempt, error=str(error))
+            self.spider_throttle_until = time.time() + getattr(self.o, 'spider_backoff_seconds', 600)
+            self.state.set_file(f['surl'], state='online', detail=str(error)[:2000])
+            self.state.event('spider_unreachable', f['name'], error)
+            return 0
+        except Exception as error:
+            self.ledger.finish(attempt, error=str(error))
+            failures = f['failures'] + 1
+            self.state.set_file(f['surl'], state='failed' if failures >= self.o.max_failures else 'online',
+                                failures=failures, detail=str(error)[:2000])
+            self.state.event('retrieve_failed', f['name'], error)
+            return 0
+        self.ledger.discover([f['surl']], 'EC_LOTAAS', 'spider')
+        self.ledger.record_archive(f['surl'], None, receipt, [output], receipt_path)
+        self.ledger.finish(attempt, [output, receipt_path])
+        self.state.set_file(f['surl'], state='converted', fil=json.dumps([str(output)]), detail=None)
+        return 1
+
     # ---------------------------------------------------------- flatfield
     def prepare(self):
         """Flatfield SAPs that are complete or given up on, those stalled a few beams short, and late beams."""
@@ -543,7 +640,8 @@ class Campaign:
                 present = {f['beam'] for f in files if f['state'] == 'converted'}
                 short = any(b not in present for b in CENTRAL)
                 job = functools.partial(self.runner.flatfield, sap_dir, allow_partial=short,
-                                        save_mean=str(sap_dir/MEAN) if outstanding else None)
+                                        save_mean=str(sap_dir/MEAN) if outstanding else None,
+                                        **self.levelling(sap))
                 # Flatfielding reads the whole SAP (~4 min); keep downloading meanwhile.
                 self.flatfield_jobs[sap['key']] = self.flatfield_pool.submit(job)
                 self.state.set_sap(sap['key'], state='flatfielding', sap_dir=str(sap_dir))
@@ -561,6 +659,11 @@ class Campaign:
                     prepared.append(key)
         return prepared
 
+    @staticmethod
+    def levelling(sap):
+        """Early-cycle SPIDER beams are also levelled per 2-bit row (preproc/flatfield_fil.py --level-rows)."""
+        return {'level_rows': 'auto'} if sap.get('source') == 'spider' else {}
+
     def stalled(self, files, outstanding, now):
         """A few beams short, with no beam of the SAP converted for --partial-after-hours."""
         hours = getattr(self.o, 'partial_after_hours', 0)
@@ -574,7 +677,7 @@ class Campaign:
         sap_dir = Path(sap['sap_dir'])
         late = [Path(p) for f in files if f['state'] == 'converted' for p in json.loads(f['fil']) if Path(p).is_file()]
         if late:
-            job = functools.partial(self.runner.flatfield, sap_dir, mean=str(sap_dir/MEAN))
+            job = functools.partial(self.runner.flatfield, sap_dir, mean=str(sap_dir/MEAN), **self.levelling(sap))
             self.flatfield_jobs[sap['key']] = self.flatfield_pool.submit(job)
             self.state.set_sap(sap['key'], state='flatfielding')
         elif not any(f['state'] in OUTSTANDING for f in files) and not self.unsearched(sap['key']):
@@ -935,7 +1038,17 @@ def parser():
     sub = p.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run', help='Run (or resume) the campaign loop')
     run.add_argument('--root', type=Path, required=True, help='Campaign directory: state, transient data, prepared beams')
-    run.add_argument('--inventory', type=Path, required=True, help='SRM URLs, one per line')
+    run.add_argument('--inventory', type=Path, help='SRM URLs, one per line')
+    run.add_argument('--spider-inventory', type=Path,
+                     help='ssh:// URLs of beam tars on SPIDER, one per line (python3 -m euroflash.spider inventory)')
+    run.add_argument('--spider-saps', type=int, default=2,
+                     help='SPIDER SAPs being fetched, flatfielded or waiting for a search at once')
+    run.add_argument('--spider-workers', type=int, default=2, help='Concurrent SPIDER fetches')
+    run.add_argument('--spider-destination', help="ssh destination for SPIDER (default: each URL's host)")
+    run.add_argument('--spider-max-missing-central', type=int, default=3,
+                     help='Search a SPIDER SAP lacking up to this many central beams')
+    run.add_argument('--spider-backoff-seconds', type=float, default=600,
+                     help='Pause SPIDER fetches this long after ssh itself fails')
     run.add_argument('--ledger', type=Path, required=True)
     run.add_argument('--image', type=Path, default=REPO/'containers/euroflash-runtime.sif')
     run.add_argument('--settings', type=Path, default=REPO/'settings.yaml')
@@ -1049,9 +1162,15 @@ def main(argv=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             p.error(f'Another campaign driver is running in {a.root}')
+        if not (a.inventory or a.spider_inventory):
+            p.error('give --inventory, --spider-inventory or both')
         campaign = Campaign(a)
-        campaign.state.load(parse_inventory(a.inventory), missing_central_beams, tuple(a.exclude_beams),
-                            a.max_missing_central)
+        if a.inventory:
+            campaign.state.load(parse_inventory(a.inventory), missing_central_beams, tuple(a.exclude_beams),
+                                a.max_missing_central)
+        if a.spider_inventory:
+            campaign.state.load(parse_inventory(a.spider_inventory), missing_central_beams, tuple(a.exclude_beams),
+                                a.spider_max_missing_central, source='spider')
         def stop(*_):
             campaign.stopping = True
         signal.signal(signal.SIGTERM, stop)

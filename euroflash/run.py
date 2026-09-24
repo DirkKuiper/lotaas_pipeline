@@ -234,7 +234,7 @@ class Runner:
             delete_converted(raw)
         return sap, output
 
-    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None):
+    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None, level_rows=None):
         """Flatfield every converted beam present in one SAP directory.
 
         allow_partial takes fewer than 61 central beams (pilots, SAPs whose
@@ -252,6 +252,9 @@ class Runner:
         if mean:
             arguments += ['--mean', mean]
             item += '_late_' + '-'.join(p.parent.name for p in paths)
+        if level_rows:
+            # Early-cycle beams: level each 2-bit row the conversion left at the requantiser's level.
+            arguments += ['--level-rows', level_rows]
         self.step(item, 'flatfield', self.command('preproc/flatfield_fil.py', arguments),
                   [p.with_name(p.stem+'_ff.fil') for p in paths])
         return [p.with_name(p.stem+'_ff.fil') for p in paths]
