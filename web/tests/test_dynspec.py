@@ -131,3 +131,36 @@ def test_masking_channels_picked_at_the_pulse_inflates_noise(tmp_path):
     lowest = np.argsort(on)[:len(on) // 8].tolist()
     view = s.view(window=2.0, mask=lowest, auto_mask=False)
     assert view['peak_snr'] > view['unmasked_peak_snr'] + 1.0
+
+
+def test_the_first_display_is_detailed():
+    # A 190 ms boxcar (12 snippet samples) opens at 54 of 648 channels' subbands and 3-sample bins,
+    # not the 8 x boxcar-width blocks the matched view uses.
+    assert dynspec.detail_view(12, 648) == (54, 3)
+    assert dynspec.detail_view(1, 648) == (54, 1)
+    assert dynspec.detail_view(3, 64) == (64, 1)
+    assert dynspec.suggested_view(7, 12, 648) == (6, 12)
+
+
+def test_smoothing_leaves_masked_subbands_masked_and_quietens_noise():
+    rng = np.random.default_rng(4)
+    image = rng.normal(size=(400, 64))
+    image[:, 10] = np.nan
+    smoothed = dynspec.smooth_image(image, 1.0)
+    assert np.isnan(smoothed[:, 10]).all() and np.isfinite(smoothed[:, 11]).all()
+    gain = np.nanstd(image) / np.nanstd(smoothed[5:-5, 15:-5])
+    assert abs(gain - dynspec.smoothing_gain(1.0)) < 0.4
+    assert dynspec.smooth_image(image, 0) is image
+
+
+def test_displayed_pixels_are_in_sigma_of_their_own_resolution(tmp_path):
+    s = snippet(tmp_path)
+    for kwargs in ({'tscrunch': 1, 'nsub': 64}, {'tscrunch': 8, 'nsub': 8}, {'tscrunch': 2, 'nsub': 16, 'smooth': 1.0}):
+        view = s.view(window=None, **kwargs)
+        image = view['image']                       # (subband, time)
+        quiet = s.off_pulse(view['times'], s.width * s.tsamp)
+        off = image[:, quiet]
+        scatter = 1.4826 * np.nanmedian(np.abs(off - np.nanmedian(off)))
+        assert abs(scatter - 1) < 0.1, kwargs
+    smooth = s.view(window=2.0, tscrunch=1, nsub=16, smooth=1.0)
+    assert smooth['smooth'] == 1.0 and smooth['smoothed_pixel_snr'] > smooth['pixel_snr']

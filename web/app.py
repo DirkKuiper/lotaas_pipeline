@@ -216,17 +216,29 @@ def kept_beams(db):
 
 
 def default_view(snippet):
-    """The display at which this candidate's pulse can be seen, if it can at all."""
-    from web.dynspec import suggested_view
-    return suggested_view(snippet.meta.get('snr'), snippet.width, snippet.data.shape[1])
+    """The first display: about 64 subbands and a quarter of the pulse per time bin, smoothed a little."""
+    from web.dynspec import detail_view
+    return detail_view(snippet.width, snippet.data.shape[1])
 
 
-def view_payload(snippet, dm=None, tscrunch=None, nsub=None, window=-1.0, mask=(), clip=99.0, auto_mask=True):
+def view_presets(snippet):
+    """The displays a reviewer switches between: {name: (nsub, tscrunch, smooth)}."""
+    from web.dynspec import SMOOTH_PIXELS, suggested_view
+    nchans = snippet.data.shape[1]
+    return {'detail': (*default_view(snippet), SMOOTH_PIXELS),
+            'matched': (*suggested_view(snippet.meta.get('snr'), snippet.width, nchans), 0.0),
+            'full': (nchans, 1, 0.0)}
+
+
+def view_payload(snippet, dm=None, tscrunch=None, nsub=None, window=-1.0, mask=(), clip=99.0, auto_mask=True,
+                 smooth=None):
+    from web.dynspec import SMOOTH_PIXELS
     suggested_nsub, suggested_tscrunch = default_view(snippet)
     nsub = nsub or suggested_nsub
     tscrunch = tscrunch or suggested_tscrunch
+    smooth = SMOOTH_PIXELS if smooth is None else max(0.0, min(float(smooth), 4.0))
     view = snippet.view(dm=dm, tscrunch=tscrunch, nsub=nsub, window=window or None, mask=mask,
-                        clip=min(max(clip, 50.0), 100.0), auto_mask=auto_mask)
+                        clip=min(max(clip, 50.0), 100.0), auto_mask=auto_mask, smooth=smooth)
     # Ascending frequency, so the heatmap's rows run up the axis.
     order = np.argsort(view['freqs'])
     return clean({
@@ -240,6 +252,7 @@ def view_payload(snippet, dm=None, tscrunch=None, nsub=None, window=-1.0, mask=(
         'coverage_seconds': view['coverage_seconds'],
         'spectrum_off': view['spectrum_off'][order], 'masked': view['masked'],
         'unmasked_peak_snr': view['unmasked_peak_snr'], 'pixel_snr': view['pixel_snr'],
+        'smooth': view['smooth'], 'smoothed_pixel_snr': view['smoothed_pixel_snr'],
         'profiles': view['profiles'], 'profile_freqs': view['profile_freqs'],
         'suggested': {'nsub': suggested_nsub, 'tscrunch': suggested_tscrunch},
         'sweep': sweep_seconds(snippet.dm, view['freqs'][order])}, 5)
@@ -773,7 +786,10 @@ def create_app(cfg, run_background=True):
             loaded = load_snippet(cid)
             initial['view'] = view_payload(loaded)
             nsub, tscrunch = default_view(loaded)
-            display = {'nsub': nsub, 'tscrunch': tscrunch, 'width': loaded.width,
+            presets = view_presets(loaded)
+            display = {'nsub': nsub, 'tscrunch': tscrunch, 'width': loaded.width, 'presets': presets,
+                       'smooth': presets['detail'][2],
+                       'scrunches': sorted({1, 2, 4, 8, 16, 32} | {p[1] for p in presets.values()}),
                        'subbands': [n for n in SUBBANDS if n <= loaded.data.shape[1] and loaded.data.shape[1] % n == 0],
                        'fch1': float(loaded.header['fch1']), 'foff': float(loaded.header['foff']),
                        'nchans': int(loaded.data.shape[1])}
@@ -892,10 +908,11 @@ def create_app(cfg, run_background=True):
 
     @app.get('/api/sp/{cid}/view')
     def sp_view(cid: str, dm: float | None = None, tscrunch: int | None = None, nsub: int | None = None,
-                window: float = -1.0, mask: str = '', clip: float = 99.0, auto_mask: bool = True):
+                window: float = -1.0, mask: str = '', clip: float = 99.0, auto_mask: bool = True,
+                smooth: float | None = None):
         snippet = load_snippet(cid)
         return JSONResponse(view_payload(snippet, dm, tscrunch, nsub, window,
-                                         parse_mask(mask, snippet.data.shape[1]), clip, auto_mask))
+                                         parse_mask(mask, snippet.data.shape[1]), clip, auto_mask, smooth))
 
     @app.get('/api/sp/{cid}/dm')
     def sp_dm(cid: str, mask: str = '', auto_mask: bool = True):

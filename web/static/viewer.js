@@ -4,10 +4,12 @@
   const C = JSON.parse(document.getElementById('candidate').textContent);
   if (!C.has_snippet) return;
   const $ = id => document.getElementById(id);
-  // The server picks the first display: bins of the boxcar width and as many
-  // subbands as keep the pulse visible (about 2.5 sigma per pixel).
+  // The server picks the first display, 'detail': about 64 subbands, a quarter
+  // of the pulse per time bin, smoothed by about a pixel. The presets switch
+  // between that, bins of the whole pulse (matched), and every channel (full).
   const state = { dm: C.dm, tscrunch: C.tscrunch || 1, nsub: C.nsub || 81, window: -1, clip: 99, mask: '',
-    auto_mask: true, raw: false, step: 0.05, maskDrag: false };
+    auto_mask: true, raw: false, step: 0.05, maskDrag: false, smooth: C.smooth || 0 };
+  const SMOOTH = (C.presets && C.presets.detail && C.presets.detail[2]) || 1;
   let last = null, curve = null, pending = null;
   window.viewerDM = () => (state.raw ? 0 : state.dm);
   window.viewerMask = () => state.mask;
@@ -26,7 +28,7 @@
 
   function params(extra) {
     const p = new URLSearchParams(Object.assign({ tscrunch: state.tscrunch, nsub: state.nsub, window: state.window,
-      clip: state.clip, mask: state.mask, auto_mask: state.auto_mask }, extra || {}));
+      clip: state.clip, mask: state.mask, auto_mask: state.auto_mask, smooth: state.smooth }, extra || {}));
     return p.toString();
   }
 
@@ -95,7 +97,8 @@
     $('status').textContent = `DM ${fmt(v.dm, 3)}${state.raw ? ' (not dedispersed)' : ''} · ${fmt(v.tsamp * 1e3, 2)} ms × ${v.nsub} subbands` +
       ` · local S/N ${fmt(v.peak_snr, 1)} at ${fmt(v.width_seconds, 3)} s width (${v.reference_windows} reference windows)` +
       (v.pixel_snr !== null && v.pixel_snr !== undefined ? ` · pulse ≈ ${fmt(v.pixel_snr, 1)}σ per pixel` +
-        (v.pixel_snr < 2 ? ' (too faint to see here: fewer subbands or wider bins)' : '') : '') +
+        (v.smooth && v.smoothed_pixel_snr !== null ? `, ≈ ${fmt(v.smoothed_pixel_snr, 1)}σ smoothed` : '') +
+        ((v.smooth ? v.smoothed_pixel_snr : v.pixel_snr) < 2 ? ' (faint at this display: try smoothing or the matched view)' : '') : '') +
       (state.auto_mask && v.automatic_bad.length ? ` · ${v.automatic_bad.length} persistently noisy channels masked` : '') +
       (v.dm !== C.dm && !state.raw ? ` · candidate DM ${fmt(C.dm, 2)}` : '');
   }
@@ -197,9 +200,34 @@
   document.querySelectorAll('[data-step]').forEach(b => b.addEventListener('click', () => setDM(state.dm + Number(b.dataset.step) * state.step)));
   $('dm-reset').addEventListener('click', () => setDM(C.dm));
   $('dm').addEventListener('change', e => setDM(parseFloat(e.target.value) || 0));
-  for (const id of ['tscrunch', 'nsub', 'window', 'clip']) {
-    $(id).addEventListener('change', e => { state[id] = Number(e.target.value); later(); });
+  function choose(select, value) {
+    // Selects the option, adding it when the preset needs a value the list lacks.
+    const el = $(select);
+    if (![...el.options].some(o => Number(o.value) === value)) el.add(new Option(String(value), String(value)));
+    el.value = String(value);
   }
+  function applyPreset(name) {
+    const preset = C.presets && C.presets[name];
+    if (!preset) return;
+    [state.nsub, state.tscrunch, state.smooth] = preset;
+    choose('nsub', state.nsub); choose('tscrunch', state.tscrunch);
+    $('smooth').checked = state.smooth > 0;
+    render();
+  }
+  $('preset').addEventListener('change', e => applyPreset(e.target.value));
+  for (const id of ['tscrunch', 'nsub', 'window', 'clip']) {
+    $(id).addEventListener('change', e => {
+      state[id] = Number(e.target.value);
+      if (id === 'tscrunch' || id === 'nsub') $('preset').value = 'custom';
+      later();
+    });
+  }
+  function setSmooth(on) {
+    state.smooth = on ? SMOOTH : 0;
+    $('smooth').checked = on;
+    render();
+  }
+  $('smooth').addEventListener('change', e => setSmooth(e.target.checked));
   $('mask').addEventListener('change', e => { state.mask = e.target.value.trim(); render(); loadCurve(); });
   $('auto-mask').addEventListener('change', e => { state.auto_mask = e.target.checked; render(); loadCurve(); });
   $('raw').addEventListener('change', e => { state.raw = e.target.checked; render(); drawCurve(); });
@@ -212,6 +240,8 @@
       setDM(state.dm + (e.key === 'ArrowLeft' ? -1 : 1) * state.step * (e.shiftKey ? 10 : 1));
     } else if (e.key === 'd' || e.key === 'D') {
       $('raw').checked = !$('raw').checked; state.raw = $('raw').checked; render(); drawCurve();
+    } else if (e.key === 's' || e.key === 'S') {
+      setSmooth(!$('smooth').checked);
     } else if (e.key === 'm' || e.key === 'M') {
       $('mask-drag').checked = !$('mask-drag').checked; state.maskDrag = $('mask-drag').checked; draw();
     }

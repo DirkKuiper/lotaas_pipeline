@@ -162,6 +162,56 @@ def suggested_view(snr, width, nchans):
     return (max(fitting) if fitting else min(choices)), tscrunch
 
 
+# The first display: fine enough to show what is in the data (narrowband streaks,
+# broadband bursts, the edges of the pulse), smoothed by about a pixel so that a
+# faint pulse still builds up for the eye.
+DETAIL_SUBBANDS = 64
+DETAIL_BINS_PER_WIDTH = 4
+SMOOTH_PIXELS = 1.0
+
+
+def detail_view(width, nchans):
+    """Subbands and time bins of the first display: about 64 subbands, a quarter of the pulse per bin.
+
+    The display used to open at bins of the whole boxcar and the fewest
+    subbands that kept an S/N 7 pulse at 2.5 sigma per pixel (suggested_view):
+    for a 190 ms candidate an 8 x 21 grid of blocks, which hid the
+    interference, sweeps and edges a reviewer judges by. That view stays
+    available as the 'matched' preset.
+    """
+    counts = set(SUBBANDS) | {nchans} | {2 ** k for k in range(2, 12)}
+    choices = sorted(n for n in counts if n <= nchans and nchans % n == 0)
+    nsub = max([n for n in choices if n <= DETAIL_SUBBANDS] or [min(choices)])
+    return nsub, max(1, int(round(int(width) / DETAIL_BINS_PER_WIDTH)))
+
+
+def smoothing_gain(sigma):
+    """How much Gaussian smoothing by sigma pixels on both axes raises the per-pixel S/N of an
+    extended signal over white noise: the noise falls by sqrt(2 sqrt(pi) sigma) on each axis."""
+    return 2 * math.sqrt(math.pi) * sigma if sigma and sigma > 0 else 1.0
+
+
+def smooth_image(image, sigma):
+    """Gaussian smoothing by sigma pixels on both axes of a (time, subband) image, ignoring NaN.
+
+    Masked subbands stay masked; their neighbours are averaged over what is left.
+    """
+    if not sigma or sigma <= 0:
+        return image
+    radius = max(1, int(math.ceil(3 * sigma)))
+    offsets = np.arange(-radius, radius + 1)
+    kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
+    valid = np.isfinite(image)
+    data, weight = np.where(valid, image, 0.0), valid.astype(float)
+    for axis in (0, 1):
+        data = np.apply_along_axis(np.convolve, axis, data, kernel, mode='same')
+        weight = np.apply_along_axis(np.convolve, axis, weight, kernel, mode='same')
+    with np.errstate(invalid='ignore', divide='ignore'):
+        smoothed = data / weight
+    smoothed[~valid] = np.nan
+    return smoothed
+
+
 class Snippet:
     """A candidate's filterbank snippet with its sidecar, normalised once per channel.
 
@@ -209,7 +259,8 @@ class Snippet:
 
     @property
     def default_window(self):
-        return max(2.0, 8 * self.width * self.tsamp, 16 * self.tsamp)
+        # Wide enough to compare the pulse with twenty times its width of data on each side.
+        return max(1.5, 20 * self.width * self.tsamp, 16 * self.tsamp)
 
     @property
     def times(self):
@@ -266,7 +317,7 @@ class Snippet:
         return best
 
     def view(self, dm=None, tscrunch=1, nsub=None, window=-1, mask=(), clip=99.0,
-             max_columns=2048, auto_mask=True):
+             max_columns=2048, auto_mask=True, smooth=0.0):
         """Measure once at saved resolution; scrunch only the displayed arrays."""
         dm = self.dm if dm is None else max(0.0, float(dm))
         nf = self.data.shape[1]
@@ -343,6 +394,15 @@ class Snippet:
             centre = np.nanmedian(reference, axis=0)
             scale = 1.4826 * np.nanmedian(np.abs(reference - centre), axis=0)
             image = (coarse - centre) / np.where(scale > 0, scale, np.nan)
+            image = smooth_image(image, smooth)
+            # Each displayed pixel in sigma of its own time bins and smoothing, measured
+            # off the pulse; the channel normalisation above is at the saved resolution.
+            quiet = self.off_pulse(display_times, self.width * self.tsamp)
+            if quiet.sum() >= 8:
+                reference = image[quiet]
+                pixel = 1.4826 * np.nanmedian(np.abs(reference - np.nanmedian(reference)))
+                if np.isfinite(pixel) and pixel > 0:
+                    image = image / pixel
         finite = image[np.isfinite(image)]
         low, high = np.percentile(finite, [100 - clip, clip]) if finite.size else (-1., 1.)
         return {'dm': dm, 'tsamp': self.tsamp * factor, 'analysis_tsamp': self.tsamp,
@@ -359,6 +419,10 @@ class Snippet:
                 'unmasked_peak_snr': unmasked, 'profiles': np.asarray(profiles, dtype=np.float32),
                 'profile_freqs': profile_freqs,
                 'pixel_snr': pixel_snr(peak, image.shape[1], factor, self.width),
+                'smooth': float(smooth or 0.0),
+                'smoothed_pixel_snr': (pixel_snr(peak, image.shape[1], factor, self.width) * smoothing_gain(smooth)
+                                       if smooth and pixel_snr(peak, image.shape[1], factor, self.width) is not None
+                                       else None),
                 'coverage_seconds': [float(times[covered][0]), float(times[covered][-1])] if covered.any() else None}
 
     def dm_response(self, points=121, mask=(), auto_mask=True):

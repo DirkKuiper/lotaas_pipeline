@@ -22,12 +22,16 @@
         <div class="group"><label>DM<input type="number" id="dm" step="0.01" value="{{ '%.3f'|format(candidate.dm) }}"></label>
           <button type="button" data-step="-10">−</button><button type="button" data-step="-1">‹</button><button type="button" data-step="1">›</button><button type="button" data-step="10">+</button>
           <button type="button" id="dm-reset" title="Back to the candidate DM">⟲</button></div>
-        {% set scrunches = ([1, 2, 4, 8, 16, 32] + ([display.tscrunch] if display else []))|unique|sort %}
-        <label>Time scrunch<select id="tscrunch">{% for f in scrunches %}<option value="{{ f }}" {{ 'selected' if display and f == display.tscrunch }}>{{ f }} × {{ '%.1f'|format(snippet.tsamp * 1000 * f) }} ms{{ ' (boxcar width)' if display and f == display.width }}</option>{% endfor %}</select></label>
+        <label title="Detail: about 64 subbands, a quarter of the pulse per bin, smoothed. Matched: bins of the whole pulse and the fewest subbands that keep an S/N 7 pulse at 2.5σ per pixel. Full: every channel at the saved resolution.">View<select id="preset">
+          <option value="detail" selected>Detail</option><option value="matched">Matched to the pulse</option>
+          <option value="full">Full resolution</option><option value="custom">Custom</option></select></label>
+        {% set scrunches = display.scrunches if display else [1, 2, 4, 8, 16, 32] %}
+        <label>Time scrunch<select id="tscrunch">{% for f in scrunches %}<option value="{{ f }}" {{ 'selected' if display and f == display.tscrunch }}>{{ f }} × {{ '%.1f'|format(snippet.tsamp * 1000 * f) }} ms{{ ' (boxcar width)' if display and f == display.width }}{{ ' (¼ width)' if display and f == display.tscrunch and f != display.width }}</option>{% endfor %}</select></label>
         <label>Subbands<select id="nsub">{% for n in (display.subbands if display else [648, 324, 162, 81, 54, 36, 27, 18, 12, 8, 4])|sort(reverse=True) %}<option value="{{ n }}" {{ 'selected' if display and n == display.nsub }}>{{ n }}</option>{% endfor %}</select></label>
         <label>Window<select id="window"><option value="-1" selected>Fit pulse width</option>{% for w in [0.5, 1, 2, 5, 10, 30, 100, 300, 0] %}<option value="{{ w }}">{{ '±%g s'|format(w) if w else 'whole usable snippet' }}</option>{% endfor %}</select></label>
         <label>Colour clip<select id="clip">{% for c in [95, 98, 99, 99.5, 99.9] %}<option value="{{ c }}" {{ 'selected' if c == 99 }}>{{ c }} %</option>{% endfor %}</select></label>
         <label>Mask channels<input id="mask" class="mask" placeholder="e.g. 100-120,509"></label>
+        <label class="check" title="Gaussian smoothing by about a pixel, on the display only: a faint pulse builds up for the eye without coarser blocks"><input type="checkbox" id="smooth" {{ 'checked' if display and display.smooth }}> smooth (<kbd>S</kbd>)</label>
         <label class="check"><input type="checkbox" id="auto-mask" checked> mask persistently noisy channels</label>
         <label class="check"><input type="checkbox" id="raw"> not dedispersed (<kbd>D</kbd>)</label>
         <label class="check" title="Drag across frequencies on the waterfall to add those channels to the mask"><input type="checkbox" id="mask-drag"> drag to mask (<kbd>M</kbd>)</label>
@@ -37,7 +41,7 @@
       <div id="profiles"></div>
       <div class="small" id="m-maskwarn"></div>
       <div class="status-line" id="status">Loading…</div>
-      <div class="muted small">Measurements use the saved resolution and a fixed local noise reference. Zoom and display averaging do not change them. The whole usable snippet excludes the incomplete-band tail caused by the dispersion delay. The display starts at time bins of the boxcar width and as many subbands as keep the pulse at about 2.5σ per pixel: at the old 81 subbands and native samples an S/N 7 pulse was 0.6σ per pixel and cannot be seen. Below the waterfall, four subband profiles at the candidate width: a real dispersed pulse rises at the same time in several.</div>
+      <div class="muted small">Measurements use the saved resolution and a fixed local noise reference. Zoom and display averaging do not change them. The whole usable snippet excludes the incomplete-band tail caused by the dispersion delay. The display opens in detail: about 64 subbands and a quarter of the pulse per time bin, over twenty pulse widths either side, smoothed by about a pixel so a faint pulse still builds up for the eye; colours are in σ of the displayed pixels, measured off the pulse. 'Matched to the pulse' shows bins of the whole pulse and the fewest subbands that keep an S/N 7 pulse at about 2.5σ per pixel; 'Full resolution' shows every channel. Below the waterfall, four subband profiles at the candidate width: a real dispersed pulse rises at the same time in several.</div>
     </div>
     <div class="card" style="margin-top: 14px">
       <h2>S/N against DM</h2>
@@ -81,5 +85,5 @@
 {% endif %}
 {% if snippet %}{% set open_plots = False %}{% include '_plots.html' %}{% endif %}
 <script id="initial" type="application/json">{{ initial|json }}</script>
-<script id="candidate" type="application/json">{{ {'id': candidate.id, 'dm': candidate.dm, 'snr': candidate.snr, 'width': candidate.width, 'has_snippet': snippet is not none, 'fch1': display.fch1 if display else None, 'foff': display.foff if display else None, 'nchans': display.nchans if display else None, 'nsub': display.nsub if display else 81, 'tscrunch': display.tscrunch if display else 1}|json }}</script>
+<script id="candidate" type="application/json">{{ {'id': candidate.id, 'dm': candidate.dm, 'snr': candidate.snr, 'width': candidate.width, 'has_snippet': snippet is not none, 'fch1': display.fch1 if display else None, 'foff': display.foff if display else None, 'nchans': display.nchans if display else None, 'nsub': display.nsub if display else 81, 'tscrunch': display.tscrunch if display else 1, 'smooth': display.smooth if display else 0, 'presets': display.presets if display else {}}|json }}</script>
 {% endblock %}

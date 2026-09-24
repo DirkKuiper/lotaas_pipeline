@@ -270,3 +270,21 @@ def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, c
     assert page.index('J0847+6830') < page.index('J0850+6800') < page.index('J0846+6820')   # found, missed, out of reach
     overview = client.get('/').text
     assert 'Published LOTAAS sources redetected' in overview and 'LOTAAS sources →' in overview
+
+
+def test_the_viewer_opens_in_detail_and_offers_the_other_views(cfg, campaign):
+    synthetic_filterbank(cfg.source_roots[0] / f'{ITEM}.fil')
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    Snippets(cfg).run_pass()
+    indexer.run_pass()
+    client = client_for(cfg)
+    cid = indexer.db.execute("SELECT id FROM candidates WHERE type='candidate'").fetchone()[0]
+    page = client.get(f'/verify/{cid}').text
+    assert 'id="preset"' in page and 'Matched to the pulse' in page and 'id="smooth"' in page
+    candidate = json.loads(page.split('<script id="candidate" type="application/json">')[1].split('</script>')[0])
+    assert candidate['smooth'] == 1.0 and set(candidate['presets']) == {'detail', 'matched', 'full'}
+    initial = json.loads(page.split('<script id="initial" type="application/json">')[1].split('</script>')[0])
+    assert initial['view']['smooth'] == 1.0 and initial['view']['nsub'] == candidate['presets']['detail'][0]
+    plain = client.get(f'/api/sp/{cid}/view?smooth=0&nsub=8&tscrunch=3').json()
+    assert plain['smooth'] == 0 and plain['nsub'] == 8 and plain['smoothed_pixel_snr'] is None
