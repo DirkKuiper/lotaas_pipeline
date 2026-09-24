@@ -690,9 +690,15 @@ class Campaign:
             self.dispatch_failures[node] = 0
             found = self.findings(run_name)
             for sap in saps:
-                done = kept = failed = 0
+                done = kept = failed = late = 0
+                mean = Path(sap['sap_dir'])/MEAN if sap['sap_dir'] else None
                 for f in self.state.rows("SELECT * FROM files WHERE sap_key=? AND state='converted'", sap['key']):
-                    beams = [flattened(p) for p in json.loads(f['fil'] or '[]')]
+                    raw = [Path(p) for p in json.loads(f['fil'] or '[]')]
+                    beams = [flattened(p) for p in raw]
+                    if mean and mean.is_file() and raw and all(p.is_file() for p in raw):
+                        # Arrived during a search without it: flatfielded with the saved flatfield next.
+                        late += 1
+                        continue
                     if not beams or any(b.stem not in succeeded for b in beams):
                         failed += 1
                         continue
@@ -708,7 +714,7 @@ class Campaign:
                         self.state.set_file(f['surl'], state='searched', detail=f'searched in {run_name}')
                 outstanding = self.state.rows(f"""SELECT COUNT(*) AS n FROM files WHERE sap_key=?
                     AND state IN ({','.join('?' * len(OUTSTANDING))})""", sap['key'], *OUTSTANDING)[0]['n']
-                if failed and not self.retried(sap['key']):
+                if failed and not self.retried(sap['key']) and self.unsearched(sap['key']):
                     # One more attempt before a person is asked: the 25 M-crossing
                     # guard and a node lost mid-run both left beams unsearched.
                     self.state.set_sap(sap['key'], state='prepared', run_name=None,
@@ -716,8 +722,8 @@ class Campaign:
                     self.state.event('retry', sap['key'], f'automatic: {failed} beams not searched in {run_name}')
                 elif failed:
                     self.state.set_sap(sap['key'], state='attention', detail=f'{failed} beams not searched in {run_name}')
-                elif outstanding:
-                    self.state.set_sap(sap['key'], state='partial', detail=f'waiting for {outstanding} late beams')
+                elif outstanding or late:
+                    self.state.set_sap(sap['key'], state='partial', detail=f'waiting for {outstanding + late} late beams')
                 else:
                     if sap['sap_dir']:
                         (Path(sap['sap_dir'])/MEAN).unlink(missing_ok=True)

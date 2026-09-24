@@ -702,3 +702,36 @@ def test_a_sap_the_archive_holds_a_few_central_beams_short_is_searched(tmp_path,
     settle(campaign)
     assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'prepared'
     assert campaign.runner.flatfielded[-1][1:] == (True, None, None)
+
+
+def test_late_beams_that_arrive_during_the_partial_search_are_not_forgotten(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)],
+                                 partial_after_hours=2.0, partial_missing=3)
+    campaign.tick()
+    late = [38, 58]
+    put_online(api, where, '1000001', 0, [b for b in FULL if b not in late])
+    campaign.tick()
+    settle(campaign)
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET updated=updated-7300 WHERE state='converted'")
+    settle(campaign)
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    sap_dir = Path(sap['sap_dir'])
+    run_name = 'campaign-partial'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    searched = sorted(sap_dir.glob('B*/*_ff.fil'))
+    # The late beams arrive and are converted while the others are being searched.
+    put_online(api, where, '1000001', 0, late)
+    campaign.refresh()
+    campaign.retrieve()
+    assert campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE beam IN (38, 58) AND state='converted'")[0]['n'] == 2
+    snapshot(tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'/'ledger-snapshot.sqlite',
+             {b.stem: 'success' for b in searched})
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    assert sap['state'] == 'partial' and (sap_dir/C.MEAN).is_file()
+    settle(campaign)
+    settle(campaign)
+    assert campaign.runner.flatfielded[-1][1:] == (False, None, str(sap_dir/C.MEAN))
+    assert [p.parent.name for p in campaign.unsearched(sap['key'])] == ['B038', 'B058']
