@@ -64,7 +64,7 @@ class FakeRunner:
             delete_converted(raw)
         return directory.parent, output
 
-    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None):
+    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None, level_rows=None):
         paths = sorted(sap.glob('B*/*_32bit.fil'))
         central = {int(p.parent.name[1:]) for p in paths} & set(C.CENTRAL)
         if len(central) < len(C.CENTRAL) and not (allow_partial or mean):
@@ -76,6 +76,7 @@ class FakeRunner:
         if save_mean:
             Path(save_mean).write_bytes(b'mean')
         self.flatfielded.append((sap, allow_partial, save_mean, mean))
+        self.levelled = getattr(self, 'levelled', []) + [(sap, level_rows)]
         return paths
 
 
