@@ -97,7 +97,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     Known pulsars never use the budget.
     """
     limits = dict(DEFAULT_LIMITS, **{k: v for k, v in (limits or {}).items() if k in DEFAULT_LIMITS})
-    from lotaas_reprocessing.single_pulse_quality import candidate_key, review_route
+    from lotaas_reprocessing.single_pulse_quality import candidate_key, evidence_route, review_route
     if limits['min_local_snr'] is not None and evidence is None:
         raise ValueError('Local S/N screening requires single_pulse_evidence.json')
     counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0}
@@ -193,8 +193,17 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             if snr > highest_snr:
                 highest_snr = snr
 
+            key = candidate_key(dm, tcand, width)
+            if limits['min_local_snr'] is not None and key not in evidence:
+                raise ValueError(f'Missing local S/N evidence for {key}')
+            local = (evidence or {}).get(key, {})
+
             matched_psr = None
-            if not known_psrs_df.empty:
+            # A catalogue DM is no evidence of a pulse by itself. The first 48 s
+            # of L603674 stepped in level, and nine edges near DM 22.6 with a
+            # local S/N of 0.2-3.8 were announced as J0152+0948 redetections.
+            # A redetection passes the local check every other event does.
+            if not known_psrs_df.empty and not evidence_route(local, limits):
                 # Nearest matching pulsar, not whichever the catalogue listed
                 # first, so the attribution names the plausible source.
                 close = known_psrs_df[(known_psrs_df["DM"] - dm).abs() <= dm_tolerance]
@@ -214,11 +223,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     }
                 continue  # Skip further processing for redetections
 
-            key = candidate_key(dm, tcand, width)
-            if limits['min_local_snr'] is not None and key not in evidence:
-                raise ValueError(f'Missing local S/N evidence for {key}')
-            reason = review_route(width * tsamp if tsamp else None, (evidence or {}).get(key, {}),
-                                  limits, counts['fetch'])
+            reason = review_route(width * tsamp if tsamp else None, local, limits, counts['fetch'])
             if reason:
                 counts[reason] += 1
                 insert_detection(

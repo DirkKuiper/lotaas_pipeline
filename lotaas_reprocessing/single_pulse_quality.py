@@ -104,8 +104,8 @@ def measure_clusters(output, metadata):
     return evidence
 
 
-def review_route(width_seconds, evidence, limits, fetch_count):
-    """Only measured low local significance demotes an event; missing noise does not."""
+def evidence_route(evidence, limits):
+    """'unconfirmed' when the measured local significance is too low; missing noise demotes nothing."""
     minimum = limits.get('min_local_snr')
     local = evidence.get('local_snr')
     if minimum is not None and local is not None and local < minimum:
@@ -114,6 +114,13 @@ def review_route(width_seconds, evidence, limits, fetch_count):
     raw_minimum = limits.get('min_raw_local_snr')
     raw = evidence.get('raw_local_snr')
     if raw_minimum is not None and raw is not None and raw < raw_minimum:
+        return 'unconfirmed'
+    return None
+
+
+def review_route(width_seconds, evidence, limits, fetch_count):
+    """Only measured low local significance demotes an event; missing noise does not."""
+    if evidence_route(evidence, limits):
         return 'unconfirmed'
     maximum = limits.get('max_width_seconds')
     if maximum is not None and width_seconds is not None and width_seconds > maximum:

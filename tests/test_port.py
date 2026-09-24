@@ -617,6 +617,37 @@ def test_a_pulsar_degrees_away_no_longer_vetoes_a_candidate(tmp_path, monkeypatc
             ('known_pulsar', 'J1200+4900')]
 
 
+def test_a_redetection_needs_the_local_evidence_every_candidate_needs(tmp_path, monkeypatch):
+    """The first 48 s of L603674 stepped in level; nine edges near DM 22.6 with a
+    local S/N of 0.2-3.8 were recorded as redetections of J0152+0948."""
+    import sqlite3
+    monkeypatch.setenv('LOTAAS_DB_PATH', str(tmp_path/'redetect.sqlite'))
+    from lotaas_reprocessing import classify
+    from lotaas_reprocessing.single_pulse_quality import candidate_key
+    from db import db_utils
+    from db.initialize_db import initialize_database
+    monkeypatch.setattr(db_utils, 'DB_PATH', str(tmp_path/'redetect.sqlite'))
+    initialize_database(db_utils.DB_PATH)
+
+    class FakeQuery:
+        def __init__(self, **kwargs):
+            import pandas as pd
+            self.table = type('T', (), {'to_pandas': lambda self: pd.DataFrame({
+                'PSRJ': ['J0152+0948'], 'RAJ': ['01:52:23.70'], 'DECJ': ['+09:48:10.0'], 'DM': [22.881]})})()
+
+    monkeypatch.setattr(classify, 'QueryATNF', FakeQuery)
+    candidates = tmp_path/'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n22.6\t35.0\t39.75\t5054\t6\n'
+                          '22.9\t9.0\t812.4\t103302\t1\n')
+    info = {'RA (J2000)': '01:52:30', 'DEC (J2000)': '+09:50:00'}
+    evidence = {candidate_key(22.6, 39.75, 6): {'local_snr': 2.5}, candidate_key(22.9, 812.4, 1): {'local_snr': 8.8}}
+    classify.classify_candidates('beam.fil', candidates, str(tmp_path/'plots'), info,
+                                 limits={'min_local_snr': 5.0}, tsamp=0.00786, evidence=evidence)
+    with sqlite3.connect(db_utils.DB_PATH) as db:
+        rows = db.execute('SELECT detection_type, pulsar_name, candidate_dm FROM detections ORDER BY candidate_dm').fetchall()
+    assert rows == [('unconfirmed', None, 22.6), ('known_pulsar', 'J0152+0948', 22.9)]
+
+
 def test_classifier_records_empty_beams_and_missing_input(tmp_path, monkeypatch):
     import sqlite3
     monkeypatch.setenv('LOTAAS_DB_PATH', str(tmp_path/'classifier.sqlite'))
