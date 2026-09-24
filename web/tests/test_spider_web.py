@@ -57,3 +57,13 @@ def test_early_cycle_saps_have_their_own_scope_and_pages(cfg, campaign, tmp_path
     assert EC in coverage and 'L1163405_SAP000' not in coverage
     sap = client.get(f'/sap/{EC}').text
     assert 'SPIDER, early cycle' in sap and '512 samples (4.03 s), levelled' in sap
+
+
+def test_saps_indexed_before_the_source_column_are_corrected(cfg, campaign, tmp_path):
+    indexer = Indexer(cfg)
+    add_spider_sap(cfg, tmp_path)
+    indexer.sync_state()
+    with indexer.db:
+        indexer.db.execute("UPDATE saps SET source='lta'")        # as an index made before the column left it
+    indexer.sync_state()
+    assert dict(indexer.db.execute('SELECT key, source FROM saps').fetchall())[EC] == 'spider'
