@@ -239,7 +239,9 @@ def stepped(rows_of, nsamp=32 * 512 * 4, nchan=16, step=3.0, seed=1):
     rng = np.random.default_rng(seed)
     data = 100 + rng.normal(size=(nchan, nsamp))
     if rows_of:
-        levels = rng.normal(scale=step, size=(nchan, nsamp // rows_of))
+        # Mostly shared by the channels, as the real steps are (they stand out at DM 0).
+        rows = nsamp // rows_of
+        levels = rng.normal(scale=step, size=(1, rows)) + rng.normal(scale=step / 4, size=(nchan, rows))
         data += np.repeat(levels, rows_of, axis=1)
     return data.astype(np.float32)
 
@@ -247,7 +249,8 @@ def stepped(rows_of, nsamp=32 * 512 * 4, nchan=16, step=3.0, seed=1):
 @pytest.mark.parametrize('row', [32, 512, 0])
 def test_the_row_length_is_found_from_the_steps(row):
     F = flatfield_module()
-    found, excess = F.detect_row_length(stepped(row).astype(np.float64))
+    beams = [stepped(row, step=0.5, seed=seed).sum(axis=0, dtype=np.float64) for seed in range(5)]
+    found, excess = F.detect_row_length(beams)
     assert found == row, excess
 
 

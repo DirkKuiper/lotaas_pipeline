@@ -33,7 +33,8 @@ def read_filterbank_data(filename):
         fb.close()
 
 
-def compute_flatfield(files):
+def compute_flatfield(files, series=None):
+    """The central beams' mean; with `series`, each central beam's sum over channels is appended to it."""
     central = [f for f in files if 13 <= extract_beam_id(f) <= 73]
     if not central:
         raise ValueError('No central beams found for flatfielding')
@@ -51,6 +52,8 @@ def compute_flatfield(files):
     # One beam at a time, instead of retaining all 61 full beam arrays.
     for path in central:
         data, _ = read_filterbank_data(path)
+        if series is not None:
+            series.append(data.sum(axis=0, dtype=np.float64))
         mean[:, :data.shape[1]] += data
         if data.shape[1] < mean.shape[1]:
             mean[:, data.shape[1]:] += data.mean(axis=1, keepdims=True)
@@ -73,21 +76,23 @@ def edge_excess(series, row):
     return float(np.median(jumps[:n].reshape(-1, row)[:, row - 1]) / typical)
 
 
-def detect_row_length(mean):
-    """(row length or 0, {row: excess}) from the central-beam mean (channels x samples).
+def detect_row_length(series):
+    """(row length or 0, {row: excess}) from the central beams' sums over channels.
 
-    Each beam's steps come from its own requantiser statistics, so the mean of
-    61 beams dilutes them: measured 49x at 512 for 2015 rows of 512, but only
-    2.0x at both 32 and 512 for 2013 rows of 32. Rows of 32 step at every
-    512th sample too; rows of 512 leave the 32-sample grid flat. Without steps
-    the excess is 1.00 +- 0.02 (a median over thousands of rows).
+    Each beam steps at its own requantiser's levels, so the steps are judged
+    beam by beam (the median over beams), not in their mean, where 61 beams
+    dilute them (2013 rows of 32: 2.0x in the mean, 2.5-4x in single beams).
+    Without steps the excess is 1.00 +- 0.02 (a median over thousands of rows).
     """
-    series = mean.sum(axis=0)
-    excess = {row: round(edge_excess(series, row), 2) for row in ROW_LENGTHS}
-    if excess[512] >= 2.0 and excess[512] >= 3 * excess[32]:
-        return 512, excess
-    if excess[32] >= 1.5:
+    excess = {row: round(float(np.median([edge_excess(s, row) for s in series])), 2) for row in ROW_LENGTHS}
+    # Rows of 512 put a real edge at only 1 in 16 of the 32-sample grid points,
+    # which leaves that median at 1.0-1.15; rows of 32 raise both. Measured on
+    # eight SAPs, Dec 2012 - Apr 2015: rows of 32 at 1.97-3.5, rows of 512 at
+    # 1.64-15.4 (a weakly stepped June 2014 SAP at 1.64), no steps at 1.00.
+    if excess[32] >= 1.3:
         return 32, excess
+    if excess[512] >= 1.3:
+        return 512, excess
     return 0, excess
 
 
@@ -164,12 +169,13 @@ def main():
         raise ValueError(f'Missing {len(missing)} central beams; --allow-partial flatfields without them')
     if missing:
         print(f'PARTIAL: flatfield uses {len(found)} of 61 central beams', flush=True)
-    mean = compute_flatfield(files)
+    series = [] if a.level_rows == 'auto' else None
+    mean = compute_flatfield(files, series)
     if a.save_mean:
         save_mean(mean, a.save_mean)
     row = 0
     if a.level_rows == 'auto':
-        row, excess = detect_row_length(mean)
+        row, excess = detect_row_length(series)
         with open(record + '.partial', 'w') as f:
             json.dump({'row': row, 'edge_excess': {str(k): v for k, v in excess.items()}}, f)
         os.replace(record + '.partial', record)
