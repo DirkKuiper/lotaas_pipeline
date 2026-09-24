@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}{{ sap.observation }} SAP{{ '%03d'|format(sap.sap) }}{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>{{ sap.project }} · {{ sap.observation }} SAP{{ '%03d'|format(sap.sap) }}</h1>
+  <div class="muted">{{ sap.kind }} · {{ sap.state|replace('_', ' ') }} · {{ sap.searched_files }} / {{ sap.files }} beam archives searched</div></div>
+  <a href="/coverage?project={{ sap.project }}">Project coverage →</a></div>
+<div class="card"><h2>Catalogue beam archives</h2>
+  <div class="table-wrap"><table><thead><tr><th>Beam</th><th>Part</th><th>Archive</th><th>Size</th><th>State</th><th>Queue details</th></tr></thead>
+    <tbody>{% for f in files %}<tr><td>{{ f.beam }}</td><td>{{ f.part }}</td><td class="mono">{{ f.name }}</td><td>{{ f.bytes|size }}</td><td>{{ f.state|replace('_', ' ') }}</td><td>{% if f.sap_key %}<a href="/sap/{{ f.sap_key }}">{{ f.sap_key }}</a>{% else %}Not yet queued{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+</div>
+{% endblock %}

@@ -67,17 +67,17 @@ def test_single_pulse_and_periodic_are_listed_and_queued_apart(cfg, campaign):
 
     sp = client.get('/single-pulse').text
     assert 'FETCH positive' in sp and 'P = ' not in sp and 'B012' not in sp
-    periodic = client.get('/periodic').text
+    periodic = client.get('/periodic?triage=all').text
     assert '3.031793' in periodic and '21.900000' in periodic
     assert '0.020000' not in periodic            # RFI-like folds are listed only when asked for
     assert 'B012' not in periodic                # the incoherent beam is out of the campaign
     assert '0.020000' in client.get('/periodic?type=periodic_rfi').text
-    assert 'B012' in client.get('/periodic?incoherent=include').text
-    assert '21.900000' not in client.get('/periodic?max_dm=1000').text
+    assert 'B012' in client.get('/periodic?incoherent=include&triage=all').text
+    assert '21.900000' not in client.get('/periodic?max_dm=1000&triage=all').text
     # At DM 4000 a pulsar would be scattered far beyond a 22 s period; at DM 26 it would not.
     assert periodic.count('τ &gt; P') == 1
 
-    first = client.get('/verify?kind=periodic', follow_redirects=False)
+    first = client.get('/verify?kind=periodic&triage=all', follow_redirects=False)
     assert first.status_code == 303 and 'kind=periodic' in first.headers['location']
     page = client.get(first.headers['location']).text
     assert 'Periodic candidate' in page and '1 of 2' in page
@@ -148,13 +148,12 @@ def test_a_period_in_many_beams_is_rfi_unless_it_keeps_one_dm(cfg, campaign):
     Indexer(cfg).run_pass()
     client = client_for(cfg)
 
-    shown = client.get('/periodic').text
+    shown = client.get('/periodic?triage=all').text
     assert '5.932' not in shown                                  # hidden as multi-beam RFI
     assert shown.count('3.031793') == 4 and '1.234500' in shown  # the pulsar and the lone fold stay
-    everything = client.get('/periodic?multibeam=include').text
+    everything = client.get('/periodic?multibeam=include&triage=all').text
     assert everything.count('multi-beam</span>') == 5
-    rfi = client.get('/periodic?multibeam=include&max_dm=1').text
+    rfi = client.get('/periodic?multibeam=include&max_dm=1&triage=all').text
     cid = rfi.split('href="/verify/')[1].split('?')[0]
     page = client.get(f'/verify/{cid}').text
     assert '5 beams in 1 SAP(s)' in page and 'multi-beam: RFI' in page and 'Same period in other beams' in page
-

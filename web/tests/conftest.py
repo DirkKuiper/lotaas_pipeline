@@ -47,6 +47,7 @@ def cfg(tmp_path):
     return config.load(path=tmp_path / 'none.toml', campaign_root=tmp_path / 'campaign',
                        ledger=tmp_path / 'campaign.sqlite', data=tmp_path / 'web',
                        result_roots=[tmp_path / 'results'], source_roots=[tmp_path / 'sources'],
+                       observation_catalogue=tmp_path / 'catalogue',
                        settings=settings, token_file=tmp_path / 'token', control_dir=tmp_path / 'control')
 
 

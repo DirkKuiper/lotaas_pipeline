@@ -40,11 +40,14 @@ def test_cut_decimates_to_the_search_resolution(tmp_path):
     assert meta['start_sample'] % 2 == 0
 
 
-def test_cut_pads_at_the_start_of_the_file(tmp_path):
+def test_cut_clips_at_the_start_without_fabricating_noise(tmp_path):
     source = synthetic_filterbank(tmp_path / f'{ITEM}.fil', t_pulse=1.0)
     path = cut(source, detection(time_seconds=1.0), tmp_path / 'out', PLAN)
     meta = json.loads(path.with_suffix('.json').read_text())
-    assert meta['start_sample'] < 0
+    assert meta['start_sample'] == 0
+    _, data = sigproc.open_data(path)
+    _, original = sigproc.open_data(source)
+    np.testing.assert_array_equal(data[:100], original[:100])
 
 
 def test_hold_cut_release(cfg, campaign):
@@ -68,7 +71,7 @@ def test_hold_cut_release(cfg, campaign):
     made = list(cfg.snippets.glob('*.fil'))
     assert len(made) == 1 and 'DM30.000' in made[0].name
     meta = json.loads(made[0].with_suffix('.json').read_text())
-    assert meta['how'] == 'held' and meta['bad_channels'] == [5, 7]
+    assert meta['how'] == 'held' and meta['bad_channels'] == [7]
 
 
 def test_backfill_finds_a_surviving_copy(cfg, campaign):

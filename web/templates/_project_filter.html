@@ -1,0 +1,9 @@
+<form method="get" class="chips">
+  <label for="project">Project</label>
+  <select id="project" name="project" onchange="this.form.submit()">
+    <option value="">All LOTAAS projects</option>
+    {% for p in forecast.get('projects', []) %}<option value="{{ p.project }}" {{ 'selected' if selected_project == p.project }}>{{ p.project }}</option>{% endfor %}
+  </select>
+  <noscript><button type="submit">Apply</button></noscript>
+  <span class="muted small">index updates every minute</span>
+</form>

@@ -17,6 +17,8 @@ import warnings
 
 import numpy as np
 
+from lotaas_reprocessing.single_pulse_quality import persistent_channels, local_boxcar_snr
+
 from web import sigproc
 
 # Dispersion constant in s MHz^2 pc^-1 cm^3; the classifier and your use 4148808 ms.
@@ -127,6 +129,38 @@ def channel_smearing_ms(dm, freq_mhz, channel_mhz):
 
 WIDTHS = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 
+# Subbands the viewer offers: divisors of LOTAAS's 648 channels.
+SUBBANDS = (4, 6, 8, 12, 18, 27, 36, 54, 81, 108, 162, 324, 648)
+# Per-pixel S/N from which a pulse stands out in a waterfall by eye.
+VISIBLE_SIGMA = 2.5
+
+
+def pixel_snr(snr, nsub, tscrunch, width):
+    """S/N a flat-spectrum pulse puts in one displayed pixel.
+
+    Its S/N is split over nsub subbands and, while the time bins are narrower
+    than the pulse, over width / tscrunch columns.
+    """
+    if snr is None or not np.isfinite(snr):
+        return None
+    return float(snr) / math.sqrt(max(1, int(nsub)) * max(1.0, float(width) / max(1, int(tscrunch))))
+
+
+def suggested_view(snr, width, nchans):
+    """Subbands and time bins at which a pulse of this S/N reaches VISIBLE_SIGMA per pixel.
+
+    At the former defaults, 81 subbands and native samples, a pulse of local
+    S/N 7 on real LOTAAS noise was 0.6 sigma per pixel and invisible; at 8
+    subbands and bins of its own width it was 3.1 (search audit, 23 September
+    2026). Bins of the boxcar width, and the most subbands, up to 81, that
+    keep the pulse visible.
+    """
+    tscrunch = max(1, int(width))
+    limit = (float(snr) / VISIBLE_SIGMA) ** 2 if snr and np.isfinite(snr) and snr > 0 else 81
+    choices = [n for n in SUBBANDS if n <= nchans and nchans % n == 0] or [nchans]
+    fitting = [n for n in choices if n <= min(limit, 81)]
+    return (max(fitting) if fitting else min(choices)), tscrunch
+
 
 class Snippet:
     """A candidate's filterbank snippet with its sidecar, normalised once per channel.
@@ -148,10 +182,18 @@ class Snippet:
         # Time of sample 0 relative to the candidate (arrival at the highest frequency).
         self.t0 = float(self.meta['t0_relative'])
         self.width = max(1, int(round(self.meta['width_samples'] / self.meta['downsample'])))
-        self.centre, self.scale = channel_scale(self.data)
+        self.guard = max(2 * self.width * self.tsamp, 3 * self.tsamp)
+        self.analysis = max(64 * self.width * self.tsamp, 10.0)
+        # Measure each channel on the same local off-pulse interval after
+        # accounting for the candidate's dispersion sweep, not on its entire
+        # (potentially 2000-second) raw snippet.
+        aligned = dedisperse(self.data, self.freqs, self.tsamp, self.dm)
+        off = self.off_pulse(self.times)
+        self.centre, self.scale = channel_scale(aligned[off])
         known = [c for c in self.meta.get('bad_channels', []) if 0 <= c < self.data.shape[1]]
         self.flat = np.isnan(self.scale)
         self.known_bad = sorted(set(known) | set(np.flatnonzero(self.flat).tolist()))
+        self.automatic_bad = persistent_channels(self.data.T)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
             self.normalised = (self.data - self.centre) / self.scale
@@ -159,21 +201,23 @@ class Snippet:
         self.bandwidth = self.channel_mhz * self.data.shape[1]
         self.centre_ghz = float(np.mean(self.freqs)) / 1e3
         self.per_dm = float(sweep_seconds(1.0, self.freqs).max())
-        self.guard = max(20 * self.width * self.tsamp, 0.5)
-        self.analysis = max(1.5, 30 * self.width * self.tsamp, self.guard + 1.0)
         # A trial above the candidate DM needs, at the far edge of the analysis
         # window, samples of the lowest channel this much later; past the
         # snippet's end there are none.
         end = self.t0 + self.data.shape[0] * self.tsamp
-        self.dm_limit = max(self.dm, (end - self.analysis - 3 * self.width * self.tsamp) / self.per_dm)
+        self.dm_limit = max(self.dm, (end - self.guard - 3 * self.width * self.tsamp) / self.per_dm)
+
+    @property
+    def default_window(self):
+        return max(2.0, 8 * self.width * self.tsamp, 16 * self.tsamp)
 
     @property
     def times(self):
         return self.t0 + np.arange(self.data.shape[0]) * self.tsamp
 
-    def masked(self, extra=()):
+    def masked(self, extra=(), auto_mask=True):
         data = self.normalised.copy()
-        data[:, sorted(set(self.known_bad) | set(extra))] = np.nan
+        data[:, sorted(set(self.known_bad) | set(extra) | (set(self.automatic_bad) if auto_mask else set()))] = np.nan
         return data
 
     def smearing_ms(self, dm=None):
@@ -198,8 +242,8 @@ class Snippet:
             return np.where(count >= coverage * usable, total / count, np.nan)
 
     def off_pulse(self, times, width_seconds=0.0):
-        guard = max(self.guard, 20 * width_seconds)
-        return (np.abs(times) > guard) & (np.abs(times) <= max(self.analysis, guard + 1.0))
+        guard = max(self.guard, 2 * width_seconds)
+        return (np.abs(times) > guard + width_seconds / 2) & (np.abs(times) <= self.analysis)
 
     def snr(self, series, times, width):
         """Boxcar S/N at this width against the scatter of boxcar sums off the pulse."""
@@ -210,84 +254,117 @@ class Snippet:
         """The boxcar width (in samples of `times`) that maximises S/N at the candidate."""
         tsamp = times[1] - times[0]
         best = (None, 1)
-        for width in WIDTHS:
+        for width in sorted(set(WIDTHS) | {self.width}):
             if width * tsamp > self.analysis / 4:
                 break
             snr = self.snr(series, times, width)
-            near = np.abs(times) <= 2 * width * tsamp + tsamp
+            near = np.abs(times) <= width * tsamp / 2 + tsamp / 2
             if np.isfinite(snr[near]).any():
                 peak = float(np.nanmax(snr[near]))
                 if best[0] is None or peak > best[0]:
                     best = (peak, width)
         return best
 
-    def view(self, dm=None, tscrunch=1, nsub=None, window=None, mask=(), clip=99.0, max_columns=2048):
-        """Everything one render of the viewer needs, at the requested DM and resolution."""
+    def view(self, dm=None, tscrunch=1, nsub=None, window=-1, mask=(), clip=99.0,
+             max_columns=2048, auto_mask=True):
+        """Measure once at saved resolution; scrunch only the displayed arrays."""
         dm = self.dm if dm is None else max(0.0, float(dm))
         nf = self.data.shape[1]
         ffactor = max(1, nf // int(nsub)) if nsub else 1
-        dedispersed = dedisperse(self.masked(mask), self.freqs, self.tsamp, dm)
+        masked = sorted(set(self.known_bad) | set(mask) | (set(self.automatic_bad) if auto_mask else set()))
+        aligned = dedisperse(self.masked(mask, auto_mask), self.freqs, self.tsamp, dm)
         times = self.times
-        tscrunch = max(1, int(tscrunch))
-        shown = np.abs(times) <= float(window) if window else np.ones(times.size, bool)
-        while shown.sum() // tscrunch > max_columns:
-            tscrunch *= 2
-        tsamp = self.tsamp * tscrunch
-        width = max(1, int(round(self.width / tscrunch)))
-        coarse = scrunch(dedispersed, tscrunch, 1)
-        times = scrunch(times[:, None], tscrunch, 1)[:, 0]
-        off = self.off_pulse(times, width * tsamp)
-        on = np.abs(times) <= max(width, 1) * tsamp / 2 + tsamp / 2
-
-        # Band-averaged series of per-channel-normalised data, as S/N per sample
-        # and as the boxcar S/N at the candidate's width.
+        off = self.off_pulse(times, self.width * self.tsamp)
+        usable = max(1, nf - len(masked))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
-            counts = np.isfinite(coarse).sum(axis=1)
-            series = np.where(counts >= 0.9 * max(1, counts.max()), np.nanmean(coarse, axis=1), np.nan)
+            counts = np.isfinite(aligned).sum(axis=1)
+            covered = counts >= usable
+            series = np.where(covered, np.nanmean(aligned, axis=1), np.nan)
         per_sample = robust_snr(series, off)
-        boxcar_snr = self.snr(series, times, width)
-        near = np.abs(times) <= max(3 * width * tsamp, 3 * tsamp)
-        peak = float(np.nanmax(boxcar_snr[near])) if np.isfinite(boxcar_snr[near]).any() else None
+        boxcar_snr = self.snr(series, times, self.width)
+        # This is a fixed event window, never a peak selected elsewhere in a
+        # large snippet. The local noise uses independent same-width windows.
+        evidence = local_boxcar_snr(series, -self.t0 / self.tsamp, self.width,
+                                   radius=round(self.analysis / self.tsamp))
+        peak = evidence['local_snr']
+        # The same measurement without the reviewer's own mask. Channels picked
+        # while looking at the pulse raise its S/N by chance alone: dropping
+        # the 10% of subbands that are lowest at the pulse lifts a 5-sigma
+        # noise event to about 6.8.
+        unmasked = peak
+        if mask:
+            plain = dedisperse(self.masked((), auto_mask), self.freqs, self.tsamp, dm)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                plain_counts = np.isfinite(plain).sum(axis=1)
+                plain_usable = max(1, nf - len(set(self.known_bad) | (set(self.automatic_bad) if auto_mask else set())))
+                plain_series = np.where(plain_counts >= plain_usable, np.nanmean(plain, axis=1), np.nan)
+            unmasked = local_boxcar_snr(plain_series, -self.t0 / self.tsamp, self.width,
+                                        radius=round(self.analysis / self.tsamp))['local_snr']
         best_snr, best_width = self.best_width(series, times)
 
-        # The spectrum over the candidate's own window against one of the same
-        # length well before it, both in S/N per channel.
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            spectrum_on = np.nanmean(coarse[on], axis=0) * math.sqrt(max(on.sum(), 1))
-            before = np.flatnonzero(off & (times < 0))
-            reference = before[:max(on.sum(), 1)] if before.size else np.array([], int)
-            spectrum_off = (np.nanmean(coarse[reference], axis=0) * math.sqrt(max(reference.size, 1))
-                            if reference.size else np.full(nf, np.nan))
-
-        keep = np.abs(times) <= float(window) if window else np.ones(times.size, bool)
-        image = scrunch(coarse[keep], 1, ffactor)
-        spectrum_on = scrunch(spectrum_on[None, :], 1, ffactor)[0] * math.sqrt(ffactor)
-        spectrum_off = scrunch(spectrum_off[None, :], 1, ffactor)[0] * math.sqrt(ffactor)
+        # On/reference spectra use the measured scatter of same-width sums in
+        # each subband, including correlated noise; sqrt(N) is not assumed.
+        subbands = scrunch(aligned, 1, ffactor)
+        on_index = int(np.argmin(np.abs(times - ((self.width - 1) % 2) * self.tsamp / 2)))
+        references = np.flatnonzero(off & (times < 0) & covered)
+        ref_index = references[-1] if references.size else None
+        spectrum_on, spectrum_off = [], []
+        for channel in subbands.T:
+            z = self.snr(channel, times, self.width)
+            spectrum_on.append(z[on_index])
+            spectrum_off.append(z[ref_index] if ref_index is not None else np.nan)
         freqs = scrunch(self.freqs[None, :], 1, ffactor)[0]
-        # Re-normalise each subband over the off-pulse samples so the colour
-        # scale means the same thing at every scrunch factor.
+        window = self.default_window if window is not None and window < 0 else window
+        keep = np.abs(times) <= float(window) if window else covered
+        # Whole snippet means the interval with the full usable band; delay
+        # padding and the curved incomplete-band tail are not a pulse profile.
+        chosen = np.flatnonzero(keep)
+        if not chosen.size:
+            chosen = np.array([int(np.argmin(np.abs(times)))])
+        first, stop = chosen[0], chosen[-1] + 1
+        factor = max(1, int(tscrunch))
+        while (stop - first) // factor > max_columns:
+            factor *= 2
+        factor = min(factor, stop - first)
+        display_times = scrunch(times[first:stop, None], factor, 1)[:, 0]
+        coarse = scrunch(subbands[first:stop], factor, 1)
+        # Four subband profiles at the candidate width: a real dispersed pulse
+        # rises at one time in several of them; interference often in one.
+        quarters = scrunch(aligned, 1, max(1, nf // 4))
+        profiles = [scrunch(self.snr(q, times, self.width)[first:stop, None], factor, 1)[:, 0]
+                    for q in quarters.T]
+        profile_freqs = scrunch(self.freqs[None, :], 1, max(1, nf // 4))[0]
+        # Colour contrast is independent of which temporal interval is shown.
+        reference = subbands[off]
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
-            reference = scrunch(coarse[off], 1, ffactor) if off.any() else image
             centre = np.nanmedian(reference, axis=0)
             scale = 1.4826 * np.nanmedian(np.abs(reference - centre), axis=0)
-            image = (image - centre) / np.where(scale > 0, scale, np.nan)
+            image = (coarse - centre) / np.where(scale > 0, scale, np.nan)
         finite = image[np.isfinite(image)]
-        low, high = np.percentile(finite, [100 - clip, clip]) if finite.size else (-1.0, 1.0)
-        return {'dm': dm, 'tsamp': tsamp, 'tscrunch': tscrunch, 'nsub': image.shape[1],
-                'times': times[keep], 'freqs': freqs, 'image': image.T.astype(np.float32),
+        low, high = np.percentile(finite, [100 - clip, clip]) if finite.size else (-1., 1.)
+        return {'dm': dm, 'tsamp': self.tsamp * factor, 'analysis_tsamp': self.tsamp,
+                'tscrunch': factor, 'nsub': image.shape[1], 'window': window,
+                'times': display_times, 'freqs': freqs, 'image': image.T.astype(np.float32),
                 'zmin': float(low), 'zmax': float(high),
-                'series': per_sample[keep], 'boxcar': boxcar_snr[keep], 'peak_snr': peak, 'width': width,
+                'series': scrunch(per_sample[first:stop, None], factor, 1)[:, 0],
+                'boxcar': scrunch(boxcar_snr[first:stop, None], factor, 1)[:, 0],
+                'peak_snr': peak, 'width': self.width, 'width_seconds': self.width * self.tsamp,
                 'best_snr': best_snr, 'best_width': best_width,
-                'spectrum_on': spectrum_on, 'spectrum_off': spectrum_off,
-                'masked': sorted(set(self.known_bad) | set(mask))}
+                'reference_windows': evidence['reference_windows'],
+                'spectrum_on': np.asarray(spectrum_on), 'spectrum_off': np.asarray(spectrum_off),
+                'masked': masked, 'automatic_bad': self.automatic_bad,
+                'unmasked_peak_snr': unmasked, 'profiles': np.asarray(profiles, dtype=np.float32),
+                'profile_freqs': profile_freqs,
+                'pixel_snr': pixel_snr(peak, image.shape[1], factor, self.width),
+                'coverage_seconds': [float(times[covered][0]), float(times[covered][-1])] if covered.any() else None}
 
-    def dm_response(self, points=121, mask=()):
+    def dm_response(self, points=121, mask=(), auto_mask=True):
         """Boxcar S/N near the candidate time over a fine grid around its DM and a
         coarse one from DM 0, with what a real dispersed pulse would keep."""
-        data = self.masked(mask)
+        data = self.masked(mask, auto_mask)
         times = self.times
         at_dm = self.band_series(data, self.dm)
         best_snr, best_width = self.best_width(at_dm, times)
@@ -301,22 +378,34 @@ class Snippet:
         fine = fine[(fine >= 0) & (fine <= self.dm_limit)]
         coarse = np.linspace(0.0, max(0.0, min(2 * self.dm, self.dm_limit)), points)
 
-        def response(dms):
+        def response(dms, track=True):
             window = np.abs(times) <= self.analysis
             plane = np.full((len(dms), int(window.sum())), np.nan)
             peaks = np.full(len(dms), np.nan)
             for row, dm in enumerate(dms):
-                snr = self.snr(self.band_series(data, dm), times, width)
+                trial_series = self.band_series(data, dm)
+                snr = self.snr(trial_series, times, width)
                 plane[row] = snr[window]
                 # The band-averaged centroid moves by half the extra sweep off the true DM.
-                drift = abs(dm - self.dm) * self.per_dm / 2
-                near = np.abs(times) <= drift + 3 * width * self.tsamp + self.tsamp
+                drift = (self.dm - dm) * float(np.mean(sweep_seconds(1., self.freqs)))
+                near = np.abs(times - drift) <= width * self.tsamp / 2 + self.tsamp
+                if not track:
+                    # A broad diagnostic of nearby undispersed interference,
+                    # explicitly not evidence that this is the same event.
+                    near = np.abs(times) <= abs(dm - self.dm) * self.per_dm + 3 * width * self.tsamp
                 if np.isfinite(snr[near]).any():
                     peaks[row] = np.nanmax(snr[near])
+                if not track:
+                    # Undispersed interference can be much narrower than the
+                    # dispersed cluster's reported width.
+                    for trial_width in sorted({1, 2, self.width} - {width}):
+                        narrow = self.snr(trial_series, times, trial_width)
+                        if np.isfinite(narrow[near]).any():
+                            peaks[row] = np.fmax(peaks[row], np.nanmax(narrow[near]))
             return plane, peaks
 
         plane, fine_peaks = response(fine)
-        _, coarse_peaks = response(coarse)
+        _, coarse_peaks = response(coarse, track=False)
         best = int(np.nanargmax(fine_peaks)) if np.isfinite(fine_peaks).any() else None
         reference = fine_peaks[np.argmin(np.abs(fine - self.dm))] if len(fine) else np.nan
         expected = expected_fraction(fine - self.dm, width_ms, self.bandwidth, self.centre_ghz) * reference

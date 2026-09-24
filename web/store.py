@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS slack (key TEXT PRIMARY KEY, kind TEXT, beam_id TEXT,
     slack_file_id TEXT, channel TEXT, sent REAL);
 CREATE TABLE IF NOT EXISTS archive_beams (uri TEXT, raw_path TEXT, item TEXT, observation TEXT,
     sap INTEGER, beam INTEGER, PRIMARY KEY(uri, raw_path));
+CREATE TABLE IF NOT EXISTS archive_receipts (uri TEXT PRIMARY KEY, item TEXT, bytes INTEGER);
+CREATE INDEX IF NOT EXISTS receipts_item ON archive_receipts(item);
+CREATE TABLE IF NOT EXISTS catalogue_files (uri TEXT PRIMARY KEY, project TEXT, observation TEXT,
+    kind TEXT, name TEXT, bytes INTEGER, sap INTEGER, beam INTEGER, part INTEGER, encoding TEXT);
+CREATE INDEX IF NOT EXISTS catalogue_scope ON catalogue_files(kind, project, beam);
+CREATE TABLE IF NOT EXISTS catalogue_observations (project TEXT, observation TEXT, kind TEXT,
+    files INTEGER, bytes INTEGER, PRIMARY KEY(project, observation));
+CREATE TABLE IF NOT EXISTS catalogue_saps (project TEXT, observation TEXT, sap INTEGER,
+    kind TEXT, files INTEGER, bytes INTEGER, retrieved_files INTEGER, searched_files INTEGER,
+    in_campaign INTEGER, state TEXT, queue_key TEXT, PRIMARY KEY(project, observation, sap));
 CREATE TABLE IF NOT EXISTS obs_sap (observation TEXT, sap INTEGER, key TEXT, PRIMARY KEY(observation, sap));
 
 CREATE TABLE IF NOT EXISTS result_dirs (path TEXT PRIMARY KEY, mtime REAL, scanned REAL);
@@ -74,6 +84,8 @@ CREATE INDEX IF NOT EXISTS periodic_item ON periodic(item);
 CREATE TABLE IF NOT EXISTS periodic_families (key TEXT PRIMARY KEY, family TEXT, beams INTEGER, saps INTEGER,
     dm_min REAL, dm_max REAL);
 CREATE INDEX IF NOT EXISTS periodic_families_family ON periodic_families(family);
+CREATE TABLE IF NOT EXISTS periodic_triage (key TEXT PRIMARY KEY, signature TEXT, score REAL,
+    status TEXT, representative TEXT, members INTEGER, evidence TEXT, reasons TEXT);
 
 CREATE TABLE IF NOT EXISTS sap_info (key TEXT PRIMARY KEY, observation TEXT, sap INTEGER, pointing TEXT,
     ra_deg REAL, dec_deg REAL, observed TEXT, beams_searched INTEGER, fingerprints TEXT,
@@ -90,6 +102,9 @@ REVIEWS = '''
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, key TEXT NOT NULL, reviewer TEXT NOT NULL,
     label TEXT NOT NULL, note TEXT, dm REAL, created REAL NOT NULL, slack_ts TEXT);
 CREATE INDEX IF NOT EXISTS reviews_key ON reviews(key, created);
+-- Explicit, audited dashboard removals. Keep these outside the rebuildable index.
+CREATE TABLE IF NOT EXISTS candidate_removals (key TEXT PRIMARY KEY, reason TEXT NOT NULL,
+    evidence TEXT NOT NULL, removed_by TEXT NOT NULL, created REAL NOT NULL);
 '''
 
 LABELS = {'rfi': 'RFI', 'noise': 'Noise', 'known': 'Known source', 'astro': 'Astrophysical',

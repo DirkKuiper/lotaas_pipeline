@@ -1,0 +1,63 @@
+{% macro days(value) -%}
+  {% if value is not none %}{{ '{:,.1f}'.format(value) }} d{% else %}<span class="muted">Not measured</span>{% endif %}
+{%- endmacro %}
+{% if scope %}
+<div class="card" style="margin-bottom: 14px">
+  <h2>Project progress</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Project</th><th class="num">Observations</th><th class="num">SAPs searched / total</th>
+      <th class="num">SAPs in queue</th><th class="num">SAPs not queued</th>
+      <th class="num">Beam archives searched / total</th><th class="num">Retrieved / total</th></tr></thead>
+    <tbody>{% for p in forecast.projects if not selected_project or p.project == selected_project %}
+      <tr><td><a href="/?project={{ p.project }}">{{ p.project }}</a></td>
+        <td class="num">{{ '{:,}'.format(p.observations) }}{% if p.unmapped_observations %}<div class="muted small">{{ p.unmapped_observations }} need SAP mapping</div>{% endif %}</td>
+        <td class="num"><a href="/coverage?project={{ p.project }}">{% if p.saps %}{{ '{:,}'.format(p.searched_saps) }} / {{ '{:,}'.format(p.saps) }}{% else %}Awaiting mapping{% endif %}</a></td>
+        <td class="num">{{ '{:,}'.format(p.queued_saps) }}</td>
+        <td class="num">{{ '{:,}'.format(p.sap_states.get('not_queued', 0)) }}</td>
+        <td class="num">{% if p.files %}{{ '{:,}'.format(p.searched_files) }} / {{ '{:,}'.format(p.files) }}{% else %}Awaiting mapping{% endif %}</td>
+        <td class="num">{% if p.files %}{{ (p.bytes - p.remaining_bytes)|size }} / {{ p.bytes|size }}{% else %}Awaiting mapping{% endif %}</td></tr>
+    {% endfor %}</tbody>
+    {% if not selected_project %}<tfoot><tr><th>All projects</th><th class="num">{{ '{:,}'.format(scope.observations) }}</th>
+      <th class="num">{{ '{:,}'.format(scope.searched_saps) }} / {{ '{:,}'.format(scope.saps) }}</th>
+      <th class="num">{{ '{:,}'.format(scope.queued_saps) }}</th><th class="num">{{ '{:,}'.format(scope.sap_states.get('not_queued', 0)) }}</th>
+      <th class="num">{{ '{:,}'.format(scope.searched_files) }} / {{ '{:,}'.format(scope.files) }}</th>
+      <th class="num">{{ (scope.bytes - scope.remaining_bytes)|size }} / {{ scope.bytes|size }}</th></tr></tfoot>{% endif %}
+  </table></div>
+</div>
+<div class="card" id="estimates" style="margin-bottom: 14px">
+  <h2>Remaining work · {{ scope.label }}</h2>
+  {% if scope.files %}<p>{{ '{:,}'.format(scope.remaining_beams) }} beam archives still to search · {{ scope.remaining_bytes|size }} still to retrieve.</p>
+  {% else %}<p>No beam archives mapped yet. Retrieval and search durations are unknown.</p>{% endif %}
+  <div class="chips">{% for rate in forecast.rates %}
+    <span class="chip">Campaign pace, last {{ rate.hours }} h:
+      <strong>{{ '%.2f'|format(rate.bytes_per_day / 1e12) }} TB/day</strong> retrieved ·
+      <strong>{{ '{:,.0f}'.format(rate.beams_per_day) }} beams/day</strong> searched</span>
+  {% endfor %}</div>
+  {% if scope.files %}<p class="small">At the 24-hour pace: retrieval {{ days(estimate.download_days) }} · search {{ days(estimate.search_days) }}.
+    {% set recent = scope.projections|selectattr('hours', 'equalto', 6)|first %}
+    Combined at the six-hour pace: {{ days(recent.pace_days) }}.</p>{% endif %}
+  {% set recent_rate = forecast.rates|selectattr('hours', 'equalto', 6)|first %}
+  {% if recent_rate.beams == 0 and scope.remaining_beams %}<p class="small flag">No new successful production searches in the last six hours.
+    Active or uncollected work is not counted as complete.</p>{% endif %}
+  {% if now() - forecast.time > 300 %}<p class="notice warn">Estimates last refreshed {{ (now() - forecast.time)|duration }} ago.</p>{% endif %}
+  <details><summary>How progress and time estimates are calculated</summary>
+    <p class="small muted">The goal includes all survey, confirmation and unclassified observations in
+      <a href="https://github.com/cbassa/lotaas_observations">Cees Bassa’s catalogue</a>.
+      A SAP is one project/observation/SAP identity, regardless of archive processing version.
+      It is complete only when every included beam archive has successful production searches.
+      “In queue” means at least one archive is in the campaign inventory, including completed work;
+      {{ '{:,}'.format(scope.in_campaign) }} of this scope’s {{ '{:,}'.format(scope.files) }} archives are in that inventory.</p>
+    <p class="small muted">These are conditional projections for mapped beam archives, not finish dates.
+      Retrieval and search overlap, so the headline takes the slower duration. Project estimates assume the full measured campaign capacity is devoted to that project.
+      Rates include downtime; pilots, failed searches and repeat completions add no progress.
+      Different observing lengths and older formats may change the search cost per archive.</p>
+    <p class="small muted">The complete catalogue volume for this scope is {{ scope.all_archive_bytes|size }}.
+      Beam progress excludes summary/legacy files without beam identities and beam numbers {{ forecast.exclude_beams|join(', ') if forecast.exclude_beams else '(none)' }}.
+      {{ '{:,}'.format(scope.gzip_files) }} gzip beam archives and {{ scope.duplicate_beam_keys }} additional products sharing an observation/SAP/beam/part identity remain in the mapped workload;
+      they require format validation or reconciliation. Unmapped observations remain in the observation total.</p>
+    <p class="small muted">Catalogue revision <code>{{ (forecast.catalogue.commit or 'unversioned')[:12] }}</code>
+      {% if forecast.catalogue.date %} · {{ forecast.catalogue.date }}{% endif %}.
+      Progress updated {{ forecast.time|when }} UTC. Showing a project here does not enqueue its data.</p>
+  </details>
+</div>
+{% endif %}

@@ -20,9 +20,9 @@ pages.overview = (d) => {
   const start = d.now - d.hours * 3600;
   const x = hourAxis(start, d.hours);
   plot('throughput', [
-    { type: 'bar', x, y: d.converted, name: 'files converted', marker: { color: stateColor('converted') },
-      hovertemplate: '%{x|%d %b %H:00}<br>%{y} files converted<extra></extra>' },
-    { type: 'bar', x, y: d.searched, name: 'beams searched', marker: { color: stateColor('searched') },
+    { type: 'bar', x, y: d.retrieved, name: 'archive files retrieved', marker: { color: stateColor('converted') },
+      hovertemplate: '%{x|%d %b %H:00}<br>%{y} archive files retrieved<extra></extra>' },
+    { type: 'bar', x, y: d.searched, name: 'production beams searched', marker: { color: stateColor('searched') },
       hovertemplate: '%{x|%d %b %H:00}<br>%{y} beams searched<extra></extra>' },
   ], { barmode: 'group', showlegend: true, bargap: 0.15, yaxis: { title: titled('per hour') } });
 };

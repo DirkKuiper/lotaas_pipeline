@@ -28,22 +28,23 @@ from markupsafe import Markup
 
 from euroflash.beams import INCOHERENT_BEAMS
 from web import store
-from web.dynspec import Snippet, parse_mask, sweep_seconds
+from web.dynspec import SUBBANDS, Snippet, parse_mask, sweep_seconds
 from web.keys import beam_label, parse_item
 from web.store import LABELS
 
 logger = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 COOKIE = 'lotaas_web'
-STATE_ORDER = ['pending', 'staging', 'flatfielding', 'prepared', 'dispatched', 'searched', 'attention',
+STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding', 'prepared', 'dispatched', 'searched', 'attention',
                'incomplete']
-FILE_ORDER = ['pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
+FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
 # Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
 # what waits for a person; the other types can be listed but are not queued.
-KINDS = {'sp': {'types': ('candidate', 'known_pulsar', 'rejected', 'unclassified'), 'queue': ('candidate', 'known_pulsar'),
+KINDS = {'sp': {'types': ('candidate', 'known_pulsar', 'rejected', 'unclassified', 'unconfirmed'),
+                'queue': ('candidate', 'known_pulsar'),
                 'page': '/single-pulse', 'sort': 'recent'},
          'periodic': {'types': ('periodic', 'periodic_rfi'), 'queue': ('periodic',),
-                      'page': '/periodic', 'sort': 'snr'}}
+                      'page': '/periodic', 'sort': 'evidence'}}
 CENTRE_MHZ = 135.25  # LOTAAS band centre, when a beam's own band is unknown
 # A period found in several beams, or in two SAPs, of one observation is RFI,
 # unless every fold of it sits at one DM above zero, as a bright pulsar seen in
@@ -153,9 +154,9 @@ def when(value):
 
 def size(value):
     value = float(value or 0)
-    for unit in ('B', 'kB', 'MB', 'GB', 'TB'):
-        if value < 1000 or unit == 'TB':
-            return f'{value:.0f} {unit}' if unit == 'B' else f'{value:.1f} {unit}'
+    for unit in ('B', 'kB', 'MB', 'GB', 'TB', 'PB'):
+        if value < 1000 or unit == 'PB':
+            return f'{value:.0f} {unit}' if unit == 'B' else f'{value:.2f} {unit}' if unit == 'PB' else f'{value:.1f} {unit}'
         value /= 1000
 
 
@@ -198,9 +199,18 @@ def kept_beams(db):
     return found
 
 
-def view_payload(snippet, dm=None, tscrunch=1, nsub=81, window=2.0, mask=(), clip=99.0):
+def default_view(snippet):
+    """The display at which this candidate's pulse can be seen, if it can at all."""
+    from web.dynspec import suggested_view
+    return suggested_view(snippet.meta.get('snr'), snippet.width, snippet.data.shape[1])
+
+
+def view_payload(snippet, dm=None, tscrunch=None, nsub=None, window=-1.0, mask=(), clip=99.0, auto_mask=True):
+    suggested_nsub, suggested_tscrunch = default_view(snippet)
+    nsub = nsub or suggested_nsub
+    tscrunch = tscrunch or suggested_tscrunch
     view = snippet.view(dm=dm, tscrunch=tscrunch, nsub=nsub, window=window or None, mask=mask,
-                        clip=min(max(clip, 50.0), 100.0))
+                        clip=min(max(clip, 50.0), 100.0), auto_mask=auto_mask)
     # Ascending frequency, so the heatmap's rows run up the axis.
     order = np.argsort(view['freqs'])
     return clean({
@@ -209,12 +219,18 @@ def view_payload(snippet, dm=None, tscrunch=1, nsub=81, window=2.0, mask=(), cli
         'zmin': view['zmin'], 'zmax': view['zmax'], 'series': view['series'], 'boxcar': view['boxcar'],
         'peak_snr': view['peak_snr'], 'width': view['width'], 'best_snr': view['best_snr'],
         'best_width': view['best_width'], 'spectrum_on': view['spectrum_on'][order],
+        'analysis_tsamp': view['analysis_tsamp'], 'width_seconds': view['width_seconds'],
+        'reference_windows': view['reference_windows'], 'automatic_bad': view['automatic_bad'],
+        'coverage_seconds': view['coverage_seconds'],
         'spectrum_off': view['spectrum_off'][order], 'masked': view['masked'],
+        'unmasked_peak_snr': view['unmasked_peak_snr'], 'pixel_snr': view['pixel_snr'],
+        'profiles': view['profiles'], 'profile_freqs': view['profile_freqs'],
+        'suggested': {'nsub': suggested_nsub, 'tscrunch': suggested_tscrunch},
         'sweep': sweep_seconds(snippet.dm, view['freqs'][order])}, 5)
 
 
-def dm_payload(snippet, channels=()):
-    r = snippet.dm_response(mask=list(channels))
+def dm_payload(snippet, channels=(), auto_mask=True):
+    r = snippet.dm_response(mask=list(channels), auto_mask=auto_mask)
     return clean(dict(r, plane=encode_image(r['plane']), smearing=r['smearing_ms'],
                       meta={k: snippet.meta.get(k) for k in ('dm', 'snr', 'width_samples', 'tsamp',
                                                              'downsample', 'source', 'how')}), 5)
@@ -292,6 +308,7 @@ def create_app(cfg, run_background=True):
                        kind=lambda t: {'candidate': 'FETCH positive', 'known_pulsar': 'known pulsar',
                                        'rejected': 'FETCH reject', 'periodic': 'periodic',
                                        'unclassified': 'not sent to FETCH',
+                                       'unconfirmed': 'low local significance',
                                        'periodic_rfi': 'periodic, RFI-like'}.get(t, t),
                        json=lambda v: Markup(json.dumps(clean(v)).replace('</', '<\\/')))
     env.globals.update(LABELS=LABELS, now=time.time)
@@ -325,6 +342,15 @@ def create_app(cfg, run_background=True):
             context, health=health, last_index=last, waiting=waiting, path=request.url.path))
 
     # ---------------------------------------------------------- overview
+    def catalogue_scope(request, forecast):
+        project = request.query_params.get('project', '')
+        if project:
+            scope = next((p for p in forecast.get('projects', []) if p['project'] == project), None)
+            if scope is None:
+                raise HTTPException(404, 'Project not available in the catalogue')
+            return scope, project
+        return next((s for s in forecast.get('scopes', []) if s['key'] == 'all'), None), ''
+
     @app.get('/', response_class=HTMLResponse)
     def overview(request: Request):
         now = time.time()
@@ -337,16 +363,15 @@ def create_app(cfg, run_background=True):
                 JOIN runs r ON r.fingerprint=a.fingerprint
                 WHERE a.stage='classify' AND a.status='success' AND r.pilot=0""").fetchone()[0]
             hours = 48
-            since = now - hours * 3600
-            converted = hourly(db, "SELECT updated FROM files WHERE state='converted' AND updated>?", since, hours)
-            searched = hourly(db, """SELECT finished FROM attempts WHERE stage='classify' AND status='success'
-                AND finished>?""", since, hours)
-            day = now - 86400
-            beams_day = db.execute("""SELECT COUNT(DISTINCT item) FROM attempts WHERE stage='classify'
-                AND status='success' AND finished>?""", (day,)).fetchone()[0]
+            forecast = meta(db, 'forecast', {})
+            rate = next((r for r in forecast.get('rates', []) if r['hours'] == 24), {})
+            inventory = next((s for s in forecast.get('scopes', []) if s['key'] == 'inventory'), {})
+            scope, selected_project = catalogue_scope(request, forecast)
+            if scope:
+                saps, files = scope['sap_states'], scope['file_states']
+            estimate = next((p for p in (scope or inventory).get('projections', []) if p['hours'] == 24), {})
+            beams_day, files_day = rate.get('beams'), rate.get('files')
             kept = kept_beams(db)
-            files_day = db.execute("SELECT COUNT(*) FROM files WHERE state='converted' AND updated>?",
-                                   (day,)).fetchone()[0]
             attention = rows(db, "SELECT key, detail, run_name, updated FROM saps WHERE state='attention' "
                                  "ORDER BY updated DESC")
             events = rows(db, 'SELECT * FROM events ORDER BY time DESC LIMIT 40')
@@ -356,19 +381,17 @@ def create_app(cfg, run_background=True):
                 ORDER BY COALESCE(c.slack_sent, 0) DESC, c.found DESC LIMIT 8""")
         total = sum(saps.values())
         remaining = sum(v for k, v in saps.items() if k not in ('searched', 'incomplete'))
-        # Whichever is slower, bringing files off tape or searching them, sets the pace.
-        to_convert = sum(files.get(k, 0) for k in ('pending', 'requested', 'online', 'working'))
-        to_search = to_convert + files.get('converted', 0)
-        paces = [n / rate for n, rate in ((to_convert, files_day), (to_search, beams_day)) if rate]
-        eta_days = max(paces) if len(paces) == 2 else None
-        pending_files = to_convert
         return page(request, 'overview.html', saps=saps, files=files, total=total, remaining=remaining,
-                    beams_searched=beams_searched, campaign_beams=campaign_beams, eta_days=eta_days,
-                    beams_day=beams_day, files_day=files_day, pending_files=pending_files, to_search=to_search,
+                    beams_searched=beams_searched, campaign_beams=campaign_beams,
+                    eta_days=estimate.get('pace_days'), forecast=forecast, inventory=inventory,
+                    scope=scope, selected_project=selected_project, estimate=estimate,
+                    beams_day=beams_day, files_day=files_day, to_search=inventory.get('remaining_beams'),
                     kept=kept, kept_bytes=sum(k['bytes'] or 0 for k in kept),
                     state_order=STATE_ORDER, file_order=FILE_ORDER, attention=attention, events=events,
                     dispatched=dispatched, review=review,
-                    charts={'hours': hours, 'converted': converted, 'searched': searched, 'now': now,
+                    charts={'hours': hours, 'retrieved': forecast.get('charts', {}).get('retrieved', [0] * hours),
+                            'searched': forecast.get('charts', {}).get('searched', [0] * hours),
+                            'now': forecast.get('time', now),
                             'saps': [[k, saps.get(k, 0)] for k in STATE_ORDER],
                             'files': [[k, files.get(k, 0)] for k in FILE_ORDER]})
 
@@ -409,6 +432,23 @@ def create_app(cfg, run_background=True):
     @app.get('/coverage', response_class=HTMLResponse)
     def coverage(request: Request):
         with store.reading(cfg) as db:
+            forecast = meta(db, 'forecast', {})
+            scope, selected_project = catalogue_scope(request, forecast)
+            if scope:
+                condition, args = ('c.project=?', (selected_project,)) if selected_project else ('1', ())
+                catalogue_saps = rows(db, f"""SELECT c.*, i.ra_deg, i.dec_deg, i.pointing
+                    FROM catalogue_saps c LEFT JOIN sap_info i ON i.key=c.queue_key
+                    WHERE {condition} ORDER BY c.project, c.observation, c.sap""", *args)
+                unmapped = rows(db, f"""SELECT c.* FROM catalogue_observations c
+                    WHERE {condition} AND NOT EXISTS (SELECT 1 FROM catalogue_saps s
+                        WHERE s.project=c.project AND s.observation=c.observation)
+                    ORDER BY c.project, c.observation""", *args)
+                sky = [{'key': s['queue_key'], 'ra': s['ra_deg'], 'dec': s['dec_deg'], 'state': s['state'],
+                        'pointing': s['pointing'], 'searched': s['searched_files']}
+                       for s in catalogue_saps if s['ra_deg'] is not None]
+                return page(request, 'catalogue_coverage.html', saps=catalogue_saps, unmapped=unmapped,
+                            scope=scope, forecast=forecast, selected_project=selected_project,
+                            states=scope['sap_states'], state_order=STATE_ORDER, charts={'sky': sky})
             saps = rows(db, """SELECT s.key, s.position, s.files, s.state, s.detail, s.run_name, s.updated,
                     i.observation, i.sap, i.pointing, i.ra_deg, i.dec_deg, i.observed, i.beams_searched,
                     i.fingerprints, i.candidates, i.max_snr, COALESCE(x.n, 0) AS excluded
@@ -423,6 +463,23 @@ def create_app(cfg, run_background=True):
                for s in saps if s['ra_deg'] is not None]
         return page(request, 'coverage.html', saps=saps, states=states, state_order=STATE_ORDER,
                     charts={'sky': sky})
+
+    @app.get('/catalogue/{project}/{observation}/{sap}', response_class=HTMLResponse)
+    def catalogue_sap(request: Request, project: str, observation: str, sap: int):
+        with store.reading(cfg) as db:
+            row = db.execute('SELECT * FROM catalogue_saps WHERE project=? AND observation=? AND sap=?',
+                             (project, observation, sap)).fetchone()
+            if row is None:
+                raise HTTPException(404, 'SAP not found in the catalogue')
+            from web.forecast import SEARCHED_URIS, excluded_sql
+            files = rows(db, f"""SELECT c.name, c.bytes, c.beam, c.part, f.sap_key,
+                CASE WHEN s.uri IS NOT NULL THEN 'searched'
+                     WHEN f.surl IS NULL THEN 'not_queued' ELSE f.state END AS state
+                FROM catalogue_files c LEFT JOIN files f ON f.surl=c.uri
+                LEFT JOIN ({SEARCHED_URIS}) s ON s.uri=c.uri
+                WHERE c.project=? AND c.observation=? AND c.sap=? AND {excluded_sql(cfg, 'c.beam')}
+                ORDER BY c.beam, c.part, c.name""", project, observation, sap)
+        return page(request, 'catalogue_sap.html', sap=dict(row), files=files)
 
     @app.get('/sap/{key}', response_class=HTMLResponse)
     def sap(request: Request, key: str):
@@ -529,6 +586,11 @@ def create_app(cfg, run_background=True):
         if kind == 'periodic' and params.get('multibeam') != 'include':
             clauses.append(f'NOT EXISTS (SELECT 1 FROM periodic_families pf WHERE pf.key=c.key '
                            f'AND {multibeam_sql("pf")})')
+        if kind == 'periodic':
+            triage = params.get('triage', 'strong' if chosen == 'queue' else 'all')
+            if triage in ('strong', 'deferred', 'related'):
+                clauses.append('EXISTS (SELECT 1 FROM periodic_triage t WHERE t.key=c.key AND t.status=?)')
+                args.append(triage)
         review = params.get('review', 'all')
         latest = '(SELECT label FROM r.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
         if review == 'unreviewed':
@@ -542,7 +604,8 @@ def create_app(cfg, run_background=True):
 
     # A periodic candidate's snr column holds its search statistic.
     ORDERS = {'recent': 'COALESCE(c.slack_sent, 0) DESC, c.found DESC, c.snr DESC',
-              'snr': 'c.snr DESC', 'dm': 'c.dm', 'probability': 'c.probability DESC', 'period': 'c.period'}
+              'snr': 'c.snr DESC', 'dm': 'c.dm', 'probability': 'c.probability DESC', 'period': 'c.period',
+              'evidence': '(SELECT score FROM periodic_triage t WHERE t.key=c.key) DESC, c.snr DESC'}
 
     def ordering(params):
         kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
@@ -556,6 +619,8 @@ def create_app(cfg, run_background=True):
     def listing(request, kind, template):
         params = dict(request.query_params, kind=kind)
         params.setdefault('type', 'queue')
+        if kind == 'periodic':
+            params.setdefault('triage', 'strong' if params['type'] == 'queue' else 'all')
         where, args, latest = candidate_filter(params)
         try:
             number_ = max(1, int(params.get('page') or 1))
@@ -567,20 +632,31 @@ def create_app(cfg, run_background=True):
                     (SELECT COUNT(*) FROM r.reviews v WHERE v.key=c.key) AS reviews, p.row AS fold_row,
                     (SELECT (b.nu_min + b.nu_max) / 2 FROM beams b WHERE b.item=c.item LIMIT 1) AS centre_mhz,
                     f.beams AS family_beams, f.saps AS family_saps, f.dm_min AS family_dm_min,
-                    f.dm_max AS family_dm_max, COALESCE({multibeam_sql('f')}, 0) AS multibeam
+                    f.dm_max AS family_dm_max, COALESCE({multibeam_sql('f')}, 0) AS multibeam,
+                    t.status AS triage_status, t.score AS repeatability, t.members AS group_members,
+                    t.reasons AS triage_reasons
                 FROM candidates c LEFT JOIN periodic p ON p.key=c.key
-                LEFT JOIN periodic_families f ON f.key=c.key WHERE {where}
+                LEFT JOIN periodic_families f ON f.key=c.key
+                LEFT JOIN periodic_triage t ON t.key=c.key WHERE {where}
                 ORDER BY {ordering(params)} LIMIT 100 OFFSET ?""", *args, (number_ - 1) * 100)
             # Counts per type under the other filters, for the type selector.
             every, every_args, _ = candidate_filter(dict(params, type='all'))
             types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
                                     every_args).fetchall())
+            triage_counts = {}
+            if kind == 'periodic':
+                all_where, all_args, _ = candidate_filter(dict(params, triage='all'))
+                triage_counts = dict(db.execute(f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)
+                    FROM candidates c LEFT JOIN periodic_triage t ON t.key=c.key
+                    WHERE {all_where} GROUP BY t.status''', all_args).fetchall())
         if kind == 'periodic':
             for c in found:
                 c.update(fold_summary(c))
+                c['triage_reasons'] = json.loads(c['triage_reasons'] or '[]')
         query = urlencode({k: v for k, v in params.items() if k not in ('page', 'kind')})
         return page(request, template, found=found, count=count, params=params, number=number_,
-                    pages=max(1, math.ceil(count / 100)), types=types, query=query, kind=kind)
+                    pages=max(1, math.ceil(count / 100)), types=types, query=query, kind=kind,
+                    triage_counts=triage_counts)
 
     @app.get('/single-pulse', response_class=HTMLResponse)
     def single_pulse(request: Request):
@@ -629,6 +705,13 @@ def create_app(cfg, run_background=True):
                 ORDER BY id DESC LIMIT 1""", (candidate['item'],)).fetchone()
             periodic = db.execute('SELECT row, fold_data FROM periodic WHERE key=?', (candidate['key'],)).fetchone()
             periodic = dict(periodic) if periodic else None
+            triage = db.execute('SELECT * FROM periodic_triage WHERE key=?', (candidate['key'],)).fetchone()
+            triage = dict(triage) if triage else None
+            if triage:
+                triage['evidence'] = json.loads(triage['evidence'])
+                triage['reasons'] = json.loads(triage['reasons'])
+                triage['representative_id'] = db.execute('SELECT id FROM candidates WHERE key=?',
+                                                       (triage['representative'],)).fetchone()[0]
             family = db.execute(f"""SELECT f.*, {multibeam_sql('f')} AS multibeam FROM periodic_families f
                 WHERE f.key=?""", (candidate['key'],)).fetchone()
             family = dict(family) if family else None
@@ -639,10 +722,16 @@ def create_app(cfg, run_background=True):
             others = rows(db, """SELECT id, type, dm, snr, time FROM candidates WHERE item=? AND id<>?
                 AND kind=? ORDER BY snr DESC LIMIT 12""", candidate['item'], cid, candidate['kind'])
         initial = {}
+        display = None
         if snippet and candidate['kind'] == 'sp':
             loaded = load_snippet(cid)
             initial['view'] = view_payload(loaded)
-            cached = responses.peek((str(loaded.path), ()))
+            nsub, tscrunch = default_view(loaded)
+            display = {'nsub': nsub, 'tscrunch': tscrunch, 'width': loaded.width,
+                       'subbands': [n for n in SUBBANDS if n <= loaded.data.shape[1] and loaded.data.shape[1] % n == 0],
+                       'fch1': float(loaded.header['fch1']), 'foff': float(loaded.header['foff']),
+                       'nchans': int(loaded.data.shape[1])}
+            cached = responses.peek((str(loaded.path), (), True))
             if cached is not None:
                 initial['dm'] = cached
         if candidate['kind'] == 'periodic' and periodic and periodic['fold_data']:
@@ -658,11 +747,11 @@ def create_app(cfg, run_background=True):
         context = dict(candidate=candidate, reviews=reviews, plots=plots, neighbours=neighbours, query=query,
                        snippet=json.loads(snippet['meta']) if snippet else None, others=others,
                        observed=beam_run['observation_date'] if beam_run else None,
-                       slack_threads=cfg.slack_threads, labels=LABELS, kept=kept, initial=initial,
+                       slack_threads=cfg.slack_threads, labels=LABELS, kept=kept, initial=initial, display=display,
                        section=params['kind'], back=KINDS[params['kind']]['page'])
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
-            context.update(family=family, relatives=relatives)
+            context.update(family=family, relatives=relatives, triage=triage)
             return page(request, 'verify_periodic.html', **context)
         return page(request, 'verify_sp.html', **context)
 
@@ -675,17 +764,18 @@ def create_app(cfg, run_background=True):
         return snippets.get(row['path'], lambda: Snippet(row['path']))
 
     @app.get('/api/sp/{cid}/view')
-    def sp_view(cid: str, dm: float | None = None, tscrunch: int = 1, nsub: int = 81, window: float = 2.0,
-                mask: str = '', clip: float = 99.0):
+    def sp_view(cid: str, dm: float | None = None, tscrunch: int | None = None, nsub: int | None = None,
+                window: float = -1.0, mask: str = '', clip: float = 99.0, auto_mask: bool = True):
         snippet = load_snippet(cid)
         return JSONResponse(view_payload(snippet, dm, tscrunch, nsub, window,
-                                         parse_mask(mask, snippet.data.shape[1]), clip))
+                                         parse_mask(mask, snippet.data.shape[1]), clip, auto_mask))
 
     @app.get('/api/sp/{cid}/dm')
-    def sp_dm(cid: str, mask: str = ''):
+    def sp_dm(cid: str, mask: str = '', auto_mask: bool = True):
         snippet = load_snippet(cid)
         channels = tuple(parse_mask(mask, snippet.data.shape[1]))
-        return JSONResponse(responses.get((str(snippet.path), channels), lambda: dm_payload(snippet, channels)))
+        return JSONResponse(responses.get((str(snippet.path), channels, auto_mask),
+                                         lambda: dm_payload(snippet, channels, auto_mask)))
 
     @app.get('/api/periodic/{cid}')
     def periodic_fold(cid: str):
@@ -709,6 +799,10 @@ def create_app(cfg, run_background=True):
             raise HTTPException(404, 'No such candidate')
         note = (body.get('note') or '').strip()[:4000]
         dm = body.get('dm')
+        mask = (body.get('mask') or '').strip()[:500]
+        if mask:
+            # A verdict reached with channels removed by hand must say which.
+            note = (note + '\n' if note else '') + f'[reviewer mask: {mask}]'
         slack_ts = None
         if body.get('slack') and cfg.slack_threads:
             from web.slackthread import post_verdict
@@ -747,6 +841,11 @@ def create_app(cfg, run_background=True):
     def api_health():
         with store.reading(cfg) as db:
             return JSONResponse(clean({'health': meta(db, 'health', {}), 'index': meta(db, 'last_index', {})}))
+
+    @app.get('/api/forecast')
+    def api_forecast():
+        with store.reading(cfg) as db:
+            return JSONResponse(clean(meta(db, 'forecast', {})))
 
     @app.get('/assets/plotly.min.js')
     def plotly_js():

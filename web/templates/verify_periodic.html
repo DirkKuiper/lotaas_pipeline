@@ -26,6 +26,20 @@
     </div>
   </div>
   <aside class="grid" style="align-content: start">
+    {% if triage %}<div class="card small">
+      <h2>{{ {'strong': 'Strong fold evidence', 'deferred': 'Deferred for follow-up', 'related': 'Related fold'}.get(triage.status) }}</h2>
+      {% if triage.reasons %}<ul>{% for reason in triage.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+      {% if triage.evidence.repeatability is defined %}
+      <dl class="kv">
+        <dt>Repeatability</dt><dd>{{ '%.2f'|format(triage.evidence.repeatability) }} (diagnostic score)</dd>
+        <dt>Time support</dt><dd>{{ '%.0f'|format(100 * triage.evidence.persistence) }}% in the least-supported split</dd>
+        <dt>DM trials</dt><dd>{{ triage.evidence.dm_trials }}</dd>
+        <dt>Frequency support</dt><dd>{% if triage.evidence.band_support is not none %}{{ '%.0f'|format(100 * triage.evidence.band_support) }}%{% else %}Diagnostic unavailable{% endif %}</dd>
+      </dl>{% endif %}
+      {% if triage.members > 1 %}<p>{{ triage.members }} folds share this period or a harmonic at a consistent DM.
+        {% if triage.status == 'related' %}<a href="/verify/{{ triage.representative_id }}">Open the review representative →</a>{% endif %}</p>{% endif %}
+      <div class="muted">This prioritises review; it does not establish whether a source is real. Deferred folds remain available.</div>
+    </div>{% endif %}
     <div class="card small">
       <h2>Search record</h2>
       <dl class="kv">

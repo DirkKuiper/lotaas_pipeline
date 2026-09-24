@@ -98,8 +98,10 @@ class Indexer:
         self.cfg = cfg.prepare()
         self.db = store.index(cfg)
         store.reviews(cfg).close()
+        self.db.execute('ATTACH DATABASE ? AS review_state', (uri(cfg.reviews_db),))
         for name, arity, function in [('item_of', 1, item_of), ('run_of', 1, run_of), ('fp16_of', 1, fp16_of),
                                       ('observation_of', 1, observation_of), ('sap_of', 1, sap_of),
+                                      ('archive_item', 1, lambda u: Path(u).stem),
                                       ('key_of', 5, key_of), ('short_id', 1, short_id)]:
             self.db.create_function(name, arity, function, deterministic=True)
 
@@ -184,6 +186,10 @@ class Indexer:
                                'FROM lg.archive_beams WHERE rowid>?', (last,))
                     meta_set(db, 'archive_rowid',
                              db.execute('SELECT COALESCE(MAX(rowid),0) FROM lg.archive_beams').fetchone()[0])
+                if 'archive_receipts' in tables:
+                    db.execute('DELETE FROM archive_receipts')
+                    db.execute('INSERT INTO archive_receipts SELECT uri,archive_item(uri),bytes '
+                               'FROM lg.archive_receipts')
         finally:
             db.execute('DETACH DATABASE lg')
         self.map_saps()
@@ -382,6 +388,9 @@ class Indexer:
                        CASE WHEN p.rfi_like THEN 'periodic_rfi' ELSE 'periodic' END,
                        p.item, p.dm, p.statistic, p.period, p.statistic, p.fp16, b.run_name, p.pilot, p.dir, 1
                 FROM periodic p LEFT JOIN beams b ON b.dir=p.dir""")
+            # The retained folds still provide cross-beam evidence, but explicitly
+            # removed candidates must not return to the dashboard after a refresh.
+            db.execute('DELETE FROM candidates WHERE key IN (SELECT key FROM review_state.candidate_removals)')
             db.execute("""UPDATE candidates SET dir=(SELECT dir FROM beams WHERE beams.item=candidates.item
                     AND beams.fp16=candidates.fp16 ORDER BY mtime DESC LIMIT 1) WHERE kind='sp'""")
             db.execute("""UPDATE candidates SET pilot=(SELECT pilot FROM beams WHERE beams.dir=candidates.dir)
@@ -394,6 +403,8 @@ class Indexer:
                     WHERE o.observation=observation_of(candidates.item) AND o.sap=sap_of(candidates.item))""")
             self.derive_saps()
             self.derive_families()
+            from web.periodic_quality import sync
+            sync(db)
 
     def derive_families(self):
         """Group the periodic folds of each observation that share a period.
@@ -477,7 +488,7 @@ class Indexer:
         timings = {}
         for name, step in (('state', self.sync_state), ('ledger', self.sync_ledger),
                            ('results', lambda: self.scan_results(full)), ('snippets', self.sync_snippets),
-                           ('derive', self.derive), ('health', self.health)):
+                           ('derive', self.derive), ('forecast', self.forecast), ('health', self.health)):
             begun = time.time()
             try:
                 step()
@@ -488,5 +499,9 @@ class Indexer:
             meta_set(self.db, 'last_index', {'time': time.time(), 'seconds': round(time.time() - started, 3),
                                              'steps': timings})
         # Keeps the planner's statistics current as the tables grow.
-        self.db.execute('PRAGMA optimize')
+        self.db.execute('PRAGMA main.optimize')
         return timings
+
+    def forecast(self):
+        from web.forecast import update
+        update(self.db, self.cfg)

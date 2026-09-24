@@ -5,10 +5,22 @@
 <div class="page-head">
   <div>
     <h1>Periodic candidates</h1>
-    <div class="muted">Folds of the strongest sifted peaks in each beam (zero acceleration, topocentric periods). The search statistic is a nominal −log₁₀ p, not a Gaussian S/N.</div>
+    <div class="muted">Review candidates with strong, repeated fold evidence. All retained folds remain available below.</div>
   </div>
 </div>
 <div class="card small muted" style="margin-bottom: 12px">
+  <strong>Review shortlist:</strong> {{ triage_counts.get('strong', 0) }} signal groups ·
+  {{ triage_counts.get('deferred', 0) }} deferred · {{ triage_counts.get('related', 0) }} related folds under these filters.<br>
+  A pulse window must repeat in alternating time intervals and in both halves of the observation,
+  with supporting DM trials. Frequency agreement is checked when that diagnostic exists.
+  Repeated periods and harmonics at a consistent DM share one review entry.
+  Deferred folds are retained for follow-up; they have not been labelled false.
+  <a href="/periodic?triage=all">Browse all retained folds →</a>
+  <details><summary>How the evidence is assessed</summary>
+  Repeatability is a diagnostic score, not Gaussian significance: every time split must score at least 5,
+  with support in at least 75% of its intervals. At least three DM trials and eight samples per period are required.
+  Near-zero DM, a strong DM-zero response, and disagreement across the band defer a fold.
+  Missing or invalid time diagnostics also defer it. This conservative shortlist can defer weak or intermittent sources.<br>
   <strong>Hidden by default: periods found in several beams.</strong> A period that shows up in 4 or more beams, or in two SAPs, of one observation is RFI.
   The exception is when every fold of it sits at one DM above zero, as a bright pulsar in neighbouring beams would.
   Tick <em>multi-beam</em> to see them.<br>
@@ -17,8 +29,13 @@
   <strong>τ<sub>scat</sub></strong> is the median scatter broadening expected at this DM at 135 MHz (Bhat et al. 2004). Real lines of sight vary about tenfold either way.
   When τ<sub>scat</sub> exceeds the period, a real pulsar would fold to a flat line.
   <strong>Fold χ²/dof</strong> uses the whole trial's variance: red noise pushes it below 1 at short periods and far above 1 at long ones. Compare it only between candidates of similar period.
+  </details>
 </div>
 <form class="filters" method="get">
+  <label>Evidence <select name="triage">
+    {% for value, text in [('strong', 'Strong evidence'), ('all', 'All retained folds'), ('deferred', 'Deferred for follow-up'), ('related', 'Related folds')] %}
+      <option value="{{ value }}" {{ 'selected' if params.get('triage', 'strong') == value }}>{{ text }}</option>
+    {% endfor %}</select></label>
   <label>Type <select name="type">
     {% for value, text in [('queue', 'Periodic'), ('periodic_rfi', 'RFI-like (mains, 1 Hz)'), ('all', 'Everything')] %}
       <option value="{{ value }}" {{ 'selected' if params.get('type') == value }}>{{ text }}{% if value == 'queue' and types.get('periodic') %} ({{ types['periodic'] }}){% elif types.get(value) %} ({{ types[value] }}){% endif %}</option>
@@ -33,8 +50,8 @@
   <label>to <input type="number" step="any" name="max_period" value="{{ params.get('max_period', '') }}" style="width: 80px"></label>
   <label>Min −log₁₀ p <input type="number" step="0.5" name="min_snr" value="{{ params.get('min_snr', '') }}" style="width: 80px"></label>
   <label>Beam contains <input name="q" value="{{ params.get('q', '') }}" placeholder="L559289_SAP000"></label>
-  <label>Sort <select name="sort">{% for value, text in [('snr', '−log₁₀ p'), ('dm', 'DM'), ('period', 'Period')] %}
-    <option value="{{ value }}" {{ 'selected' if params.get('sort', 'snr') == value }}>{{ text }}</option>{% endfor %}</select></label>
+  <label>Sort <select name="sort">{% for value, text in [('evidence', 'Repeatability'), ('snr', '−log₁₀ p'), ('dm', 'DM'), ('period', 'Period')] %}
+    <option value="{{ value }}" {{ 'selected' if params.get('sort', 'evidence') == value }}>{{ text }}</option>{% endfor %}</select></label>
   <label class="check" style="flex-direction: row; align-items: center; gap: 6px"><input type="checkbox" name="pilot" value="include" {{ 'checked' if params.get('pilot') == 'include' }}> pilot runs</label>
   <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Periods found in 4 or more beams or in two SAPs of one observation"><input type="checkbox" name="multibeam" value="include" {{ 'checked' if params.get('multibeam') == 'include' }}> multi-beam</label>
   <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Beam 12 is the incoherent sum; the campaign no longer searches it"><input type="checkbox" name="incoherent" value="include" {{ 'checked' if params.get('incoherent') == 'include' }}> incoherent beam</label>
@@ -44,12 +61,15 @@
 <div class="card flush">
   <div class="table-wrap tall">
     <table class="sortable">
-      <thead><tr><th>Beam</th><th class="num">DM</th><th class="num">Period (s)</th><th class="num">−log₁₀ p</th><th class="num">Harmonics</th>
+      <thead><tr><th>Beam</th><th>Evidence</th><th class="num">DM</th><th class="num">Period (s)</th><th class="num">−log₁₀ p</th><th class="num">Harmonics</th>
         <th class="num">Fold χ²/dof</th><th class="num">τ<sub>scat</sub> (s)</th><th class="num" title="Beams of this observation with a fold at the same period">Beams</th><th>Catalogue</th><th>Flags</th><th>Review</th></tr></thead>
       <tbody>
       {% for c in found %}
         <tr>
           <td><a href="/verify/{{ c.id }}?{{ query }}">{{ c.item|beam }}</a></td>
+          <td title="{{ c.triage_reasons|join('; ') }}">{{ {'strong': 'Strong', 'deferred': 'Deferred', 'related': 'Related'}.get(c.triage_status, 'Pending') }}
+            {% if c.repeatability is not none %}<span class="muted small">{{ '%.1f'|format(c.repeatability) }}</span>{% endif %}
+            {% if c.group_members and c.group_members > 1 %}<span class="muted small">· {{ c.group_members }} folds</span>{% endif %}</td>
           <td class="num">{{ '%.1f'|format(c.dm) if c.dm is not none }}</td>
           <td class="num">{{ '%.6f'|format(c.period) if c.period }}</td>
           <td class="num">{{ '%.1f'|format(c.snr) if c.snr is not none }}</td>
@@ -61,7 +81,7 @@
           <td class="nowrap">{% if c.multibeam %}<span class="flag bad small">multi-beam</span> {% endif %}{% if c.type == 'periodic_rfi' %}<span class="flag bad small">RFI-like</span> {% endif %}{% if c.smeared %}<span class="flag small" title="Expected scattering exceeds the period">τ &gt; P</span> {% endif %}{% if c.pilot %}<span class="flag small">pilot</span>{% endif %}</td>
           <td>{% if c.label %}<span class="label-tag {{ c.label }}">{{ LABELS[c.label] }}</span>{% if c.reviews > 1 %} <span class="muted small">×{{ c.reviews }}</span>{% endif %}{% endif %}</td>
         </tr>
-      {% else %}<tr><td colspan="11" class="muted">No periodic candidates match.</td></tr>{% endfor %}
+      {% else %}<tr><td colspan="12" class="muted">{% if params.get('triage') == 'strong' %}No periodic candidates currently meet the strong-evidence criteria. Deferred folds remain available under “All retained folds”.{% else %}No periodic candidates match.{% endif %}</td></tr>{% endfor %}
       </tbody>
     </table>
   </div>

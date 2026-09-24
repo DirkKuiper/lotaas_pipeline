@@ -24,6 +24,8 @@ class Config:
     campaign_root: Path = LOTAAS / 'campaign'
     ledger: Path = LOTAAS / 'campaign.sqlite'
     data: Path = LOTAAS / 'web'
+    # Cees Bassa's local archive catalogue; used for estimates, never staging.
+    observation_catalogue: Path = LOTAAS / 'lotaas_observations'
     # Searched beams are found below these as .../processed/<beam>/<fingerprint>/.
     result_roots: list = field(default_factory=lambda: [LOTAAS])
     # Searched for flatfielded filterbanks of candidates found before snippets were kept.
@@ -78,7 +80,7 @@ class Config:
         return self
 
 
-PATHS = {'campaign_root', 'ledger', 'data', 'settings', 'control_dir', 'token_file'}
+PATHS = {'campaign_root', 'ledger', 'data', 'settings', 'control_dir', 'token_file', 'observation_catalogue'}
 PATH_LISTS = {'result_roots', 'source_roots'}
 
 

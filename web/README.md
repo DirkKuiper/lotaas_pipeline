@@ -16,8 +16,9 @@ token cookie on every request. VS Code's port forwarding (or
 ## Pages
 
 - **Overview** — driver, dispatch, SSH master and disk health; SAPs and beam
-  files by state; hourly throughput; the pace the slower of staging and search
-  sets; search processes running on the GPU node, flagged past an hour; SAPs
+  files by state; hourly throughput; catalogue volumes and remaining-time
+  projections for the current inventory, LT5_004 survey and all catalogued
+  survey observations; search processes running on the GPU node, flagged past an hour; SAPs
   needing attention; beams kept for review; the latest FETCH positives.
 - **Staging** — StageIT requests with their age against the restage and
   timeout limits, files on tape, on disk and failing, time on tape once the
@@ -29,7 +30,26 @@ token cookie on every request. VS Code's port forwarding (or
 - **Single pulse** — FETCH positives, known-pulsar redetections and FETCH
   rejects, filtered by type, S/N, review and beam.
 - **Periodic** — folded periodic candidates, filtered by DM, period, statistic,
-  review and beam. A period found in 4 or more beams, or in two SAPs, of one
+  review and beam. The default list and dashboard count include only signal
+  groups with strong fold evidence. A pulse window selected in one subset
+  must repeat in the other: alternating subintegrations and first/second
+  halves, each tested in both directions. Every split needs a repeatability
+  score of at least 5 and positive support in at least 75% of its intervals.
+  This score is a heuristic, not Gaussian significance: the period was fitted
+  using the whole observation. There must also be at least three supporting
+  DM trials within max(0.5, twice the DM step), at least eight samples per
+  period, a best DM of at least 2, and no near-zero-DM response reaching 90%
+  of the peak statistic. Where frequency diagnostics exist, at least 60%
+  of valid subbands must support the same pulse phase; missing frequency
+  diagnostics are explicitly shown and do not substitute for a band check.
+  Consistent-DM repeats and integer harmonics share one representative per
+  observation/SAP, with pilot and incoherent beams grouped separately.
+  **All retained folds** and **Deferred for follow-up** remain available;
+  failing the shortlist never labels a candidate false or deletes its data.
+  Weak or intermittent sources can be deferred. This policy is checked against
+  synthetic noise/pulses and the saved J0323+3944 recovery, and is not a
+  survey sensitivity or completeness measurement.
+  A period found in 4 or more beams, or in two SAPs, of one
   observation is hidden as RFI unless all its folds share one DM above zero;
   the indexer groups folds whose periods agree within 5×10⁻⁴. Each row shows
   how many beams share its period and the median scatter broadening expected
@@ -62,8 +82,13 @@ never writes to them. Everything it owns is under its data directory
 - `web.sqlite` — an index rebuilt from those sources every minute. It records
   each state change it sees, which is how staging latency is measured. It can
   be deleted at any time.
-- `reviews.sqlite` — verdicts, the one record here nothing else can rebuild.
+- `reviews.sqlite` — verdicts and audited candidate removals, which nothing else can rebuild.
   Back it up.
+  Its `candidate_removals` table records explicitly removed dashboard candidates
+  with the reason, evidence and audit identity. These remain absent after an
+  index rebuild. Their original pipeline products and cross-beam evidence stay
+  intact; removing the corresponding removal record restores the candidate
+  on the next index pass.
 - `snippets/` — for each FETCH positive and known-pulsar redetection, the
   stretch the classifier read around it (the dispersion sweep either side, as
   `your` reads it, plus 5 s), as a SIGPROC file at the search's resolution for
@@ -106,6 +131,52 @@ the same credentials. It is sent only when the reviewer ticks the box.
 
 `python -m web index` and `python -m web snippets` run one pass by hand.
 
+## Catalogue and estimates
+
+`observation_catalogue` defaults to
+`/shared/results/dkuiper/lotaas/lotaas_observations`, the local clone of
+[cbassa/lotaas_observations](https://github.com/cbassa/lotaas_observations).
+The indexer checks `observations.csv` against each project's CSV row counts
+and exact byte totals, then caches individual beam products in `web.sqlite`.
+Changed files are reloaded on the next index pass. The displayed revision
+identifies the source snapshot; it is not a live archive-availability check.
+
+The overview and authenticated `/api/forecast` expose separate retrieval and
+search projections using the last 24 and six wall-clock hours. Remaining
+download bytes use catalogue sizes and recorded receipts. Search progress
+uses the first successful production completion per beam; pilots, retries,
+and completions under another code version do not add new progress. Counts
+remain across production versions and do not establish uniform science
+coverage. Receipt history stays counted when a file becomes searched or kept.
+Missing rates or file sizes yield an unknown projection, never zero work.
+
+The overview and Coverage page default to all catalogue projects and observation
+types (survey, confirmation and unclassified). Their project selector changes
+SAP counts, archive counts, progress bars, volume and remaining-time estimates
+together. Project totals reconcile to the all-project goal. Operational throughput,
+cluster health and review queues remain explicitly campaign-wide.
+
+SAPs are grouped by project, scientific observation ID and SAP number, not the
+archive processing version. Completed production searches are matched by archive
+URI. A SAP is complete only when all included archives have successful searches;
+an archive containing multiple mapped beams requires all of them to finish.
+Files outside the active inventory remain visible as `not_queued`. Observations
+without parsable SAP identifiers stay in the observation total and are listed
+separately in Coverage; their unknown SAP count and search cost are not zero.
+
+Beam totals exclude summary/legacy products without beam identities and configured
+excluded beam numbers. Filenames with Stokes identifiers and older gzip products
+are included. Duplicate archive products sharing an observation, SAP, beam and part
+are retained and flagged for reconciliation. Format compatibility and per-archive
+search cost outside the current campaign remain unverified. The full source volume
+(including auxiliary products) is shown separately in the estimate details.
+
+The combined pace is the larger of the retrieval and search durations,
+assuming overlap; it is a conditional projection, not a finish date or a
+hardware-capacity benchmark. Other projects inherit the measured campaign
+rate. Catalogue import changes only the web index and never admits new
+archive work or changes the running campaign.
+
 ## Tests
 
 ```bash
@@ -114,3 +185,31 @@ the same credentials. It is sent only when the reviewer ticks the box.
 
 They build a throwaway campaign, ledger and results tree with the pipeline's
 own schema code, and synthetic filterbanks with an injected dispersed pulse.
+
+## Single-pulse diagnostic changes, 23 September
+
+The viewer defaults to a window covering eight candidate widths on each side.
+The whole usable snippet excludes the dedispersed tail where the full usable
+band is absent. The curved edge in older whole-snippet plots was missing data
+from the dispersion delay, not a pulse feature.
+
+Local candidate S/N and best-width measurements use saved sampling, independent
+of display averaging or zoom. The local score is evaluated at the candidate
+time against at least 32 non-overlapping same-width reference windows. Unknown
+means insufficient reference data. Per-channel normalisation uses local
+off-pulse samples at the candidate DM. The spectrum uses the measured scatter
+of boxcar sums rather than assuming independent samples. Persistent noisy
+channels are masked by default; the checkbox allows comparison without that
+automatic mask. The search score remains visible as historical provenance.
+
+The fine DM response follows the candidate's expected time shift. The coarse
+DM scan can peak on other nearby events and is labelled accordingly. The
+Gaussian full-band reference curve and instrumental broadening estimate are
+diagnostics, not automatic astrophysical vetoes.
+
+New snippets retain a wider off-pulse margin, use bounded-memory averaging,
+and clip at actual observation boundaries instead of inventing constant noise.
+The beam's own mask is authoritative when available. `unconfirmed` candidates
+remain accessible through the type filter. Production searches stop at one
+second and DM 3020; in-range survivors still use FETCH. Historical snippets
+and recorded classifier decisions are unchanged.

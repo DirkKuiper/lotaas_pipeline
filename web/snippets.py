@@ -67,24 +67,27 @@ def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None):
     dm = float(detection['dm'])
     tcand = float(detection['time_seconds'])
     width = max(1, int(detection['width_samples']))
-    k = downsample_for(dm, plan)
+    search_downsample = downsample_for(dm, plan)
+    # Retain at least eight samples across broad events, aligned to the search grid.
+    k = search_downsample * max(1, width // (8 * search_downsample))
     delay = K_DM * dm * (1 / freqs.min() ** 2 - 1 / freqs.max() ** 2)
     # Off-pulse room on both sides, and data for trial DMs above the candidate's.
-    margin = max(5.0, 10 * width * tsamp)
+    margin = max(10.0, 64 * width * tsamp)
     # Blocks of k native samples on the search's own grid, so a decimated
     # sample means what it meant to the search.
     start = int(math.floor((tcand - delay - margin) / (tsamp * k))) * k
     stop = int(math.ceil((tcand + delay + margin) / (tsamp * k))) * k
     total = data.shape[0]
-    block = np.array(data[max(start, 0):min(stop, total)], dtype=np.float32)
-    if block.shape[0] == 0:
+    # Do not manufacture constant off-pulse noise beyond the observation.
+    start, stop = max(start, 0), min(stop, total // k * k)
+    if stop <= start:
         raise ValueError(f'{source} holds no samples near t={tcand:.3f} s')
-    before, after = max(0, -start), max(0, stop - total)
-    if before or after:
-        # Padded with each channel's median, as your pads a chunk at the file edges.
-        fill = np.median(block, axis=0)
-        block = np.concatenate([np.repeat(fill[None], before, 0), block, np.repeat(fill[None], after, 0)])
-    block = block.reshape(-1, k, block.shape[1]).mean(axis=1)
+    block = np.empty(((stop - start) // k, data.shape[1]), dtype=np.float32)
+    batch = max(1, 262144 // (k * data.shape[1]))
+    for out_start in range(0, len(block), batch):
+        out_stop = min(len(block), out_start + batch)
+        raw = np.asarray(data[start + out_start * k:start + out_stop * k])
+        block[out_start:out_stop] = raw.reshape(-1, k, data.shape[1]).mean(axis=1)
 
     obs, sap, beam = parse_item(detection['item'])
     key = detection['key']
@@ -101,7 +104,8 @@ def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None):
             'dm': dm, 'snr': detection.get('snr'), 'width_samples': width,
             'time_seconds': tcand, 'sample_number': detection.get('sample_number'),
             'probability': detection.get('probability'), 'pulsar': detection.get('pulsar'),
-            'downsample': k, 'tsamp_native': tsamp, 'tsamp': tsamp * k,
+            'downsample': k, 'search_downsample': search_downsample,
+            'tsamp_native': tsamp, 'tsamp': tsamp * k,
             'start_sample': start, 't0_relative': start * tsamp - tcand, 'samples': int(block.shape[0]),
             'sweep_seconds': delay, 'margin_seconds': margin,
             'bad_channels': sorted({int(c) for c in bad_channels}),
@@ -207,7 +211,7 @@ class Snippets:
                 continue
             meta = self._beam_meta(index, detection['item'], detection['fp16'])
             plan = meta.get('dedispersion_plan') or self.plan
-            bad = set(meta.get('bad_channels') or []) | set(self.bad_channels)
+            bad = set(meta.get('bad_channels', self.bad_channels))
             try:
                 cut(source, detection, self.cfg.snippets, plan, bad,
                     {'how': how, 'run_name': detection['run_name'], 'fp16': detection['fp16'],

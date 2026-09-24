@@ -16,11 +16,11 @@
 {% set ssh = health.get('ssh') or {} %}
 {% set disk = health.get('disk') or {} %}
 <header class="top">
-  <a class="brand" href="/">LOTAAS · LT5_004</a>
+  <a class="brand" href="/">LOTAAS</a>
   <nav>
     <a href="/" class="{{ 'active' if path == '/' }}">Overview</a>
     <a href="/staging" class="{{ 'active' if path.startswith('/staging') }}">Staging</a>
-    <a href="/coverage" class="{{ 'active' if path.startswith('/coverage') or path.startswith('/sap') or path.startswith('/beam') }}">Coverage</a>
+    <a href="/coverage" class="{{ 'active' if path.startswith('/coverage') or path.startswith('/catalogue') or path.startswith('/sap') or path.startswith('/beam') }}">Coverage</a>
     <a href="/single-pulse" class="{{ 'active' if path.startswith('/single-pulse') or section == 'sp' }}" title="FETCH positives and known pulsars waiting for review">Single pulse{% if waiting.sp %}<span class="badge-count">{{ waiting.sp }}</span>{% endif %}</a>
     <a href="/periodic" class="{{ 'active' if path.startswith('/periodic') or section == 'periodic' }}" title="Periodic folds waiting for review">Periodic{% if waiting.periodic %}<span class="badge-count">{{ waiting.periodic }}</span>{% endif %}</a>
   </nav>

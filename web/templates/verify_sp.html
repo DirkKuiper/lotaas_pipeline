@@ -3,7 +3,7 @@
 {% block page %}verify{% endblock %}
 {% block head %}<script src="/static/review.js" defer></script><script src="/static/viewer.js" defer></script>{% endblock %}
 {% block content %}
-{% set kinds = {'candidate': 'FETCH positive', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject'} %}
+{% set kinds = {'candidate': 'FETCH positive', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject', 'unconfirmed': 'Low local significance'} %}
 <div class="page-head">
   <div>
     <div class="muted small"><a href="/single-pulse">Single-pulse candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>
@@ -21,31 +21,38 @@
         <div class="group"><label>DM<input type="number" id="dm" step="0.01" value="{{ '%.3f'|format(candidate.dm) }}"></label>
           <button type="button" data-step="-10">−</button><button type="button" data-step="-1">‹</button><button type="button" data-step="1">›</button><button type="button" data-step="10">+</button>
           <button type="button" id="dm-reset" title="Back to the candidate DM">⟲</button></div>
-        <label>Time scrunch<select id="tscrunch">{% for f in [1, 2, 4, 8, 16, 32] %}<option value="{{ f }}">{{ f }} × {{ '%.1f'|format(snippet.tsamp * 1000 * f) }} ms</option>{% endfor %}</select></label>
-        <label>Subbands<select id="nsub">{% for n in [648, 324, 216, 162, 108, 81, 54, 36, 27, 18] %}<option value="{{ n }}" {{ 'selected' if n == 81 }}>{{ n }}</option>{% endfor %}</select></label>
-        <label>Window<select id="window">{% for w in [0.5, 1, 2, 5, 10, 30, 0] %}<option value="{{ w }}" {{ 'selected' if w == 2 }}>{{ '±%g s'|format(w) if w else 'whole snippet' }}</option>{% endfor %}</select></label>
+        {% set scrunches = ([1, 2, 4, 8, 16, 32] + ([display.tscrunch] if display else []))|unique|sort %}
+        <label>Time scrunch<select id="tscrunch">{% for f in scrunches %}<option value="{{ f }}" {{ 'selected' if display and f == display.tscrunch }}>{{ f }} × {{ '%.1f'|format(snippet.tsamp * 1000 * f) }} ms{{ ' (boxcar width)' if display and f == display.width }}</option>{% endfor %}</select></label>
+        <label>Subbands<select id="nsub">{% for n in (display.subbands if display else [648, 324, 162, 81, 54, 36, 27, 18, 12, 8, 4])|sort(reverse=True) %}<option value="{{ n }}" {{ 'selected' if display and n == display.nsub }}>{{ n }}</option>{% endfor %}</select></label>
+        <label>Window<select id="window"><option value="-1" selected>Fit pulse width</option>{% for w in [0.5, 1, 2, 5, 10, 30, 100, 300, 0] %}<option value="{{ w }}">{{ '±%g s'|format(w) if w else 'whole usable snippet' }}</option>{% endfor %}</select></label>
         <label>Colour clip<select id="clip">{% for c in [95, 98, 99, 99.5, 99.9] %}<option value="{{ c }}" {{ 'selected' if c == 99 }}>{{ c }} %</option>{% endfor %}</select></label>
         <label>Mask channels<input id="mask" class="mask" placeholder="e.g. 100-120,509"></label>
+        <label class="check"><input type="checkbox" id="auto-mask" checked> mask persistently noisy channels</label>
         <label class="check"><input type="checkbox" id="raw"> not dedispersed (<kbd>D</kbd>)</label>
+        <label class="check" title="Drag across frequencies on the waterfall to add those channels to the mask"><input type="checkbox" id="mask-drag"> drag to mask (<kbd>M</kbd>)</label>
+        <button type="button" id="mask-clear" title="Remove the channels you masked by hand">clear mask</button>
       </div>
       <div id="dynamic"></div>
+      <div id="profiles"></div>
+      <div class="small" id="m-maskwarn"></div>
       <div class="status-line" id="status">Loading…</div>
+      <div class="muted small">Measurements use the saved resolution and a fixed local noise reference. Zoom and display averaging do not change them. The whole usable snippet excludes the incomplete-band tail caused by the dispersion delay. The display starts at time bins of the boxcar width and as many subbands as keep the pulse at about 2.5σ per pixel: at the old 81 subbands and native samples an S/N 7 pulse was 0.6σ per pixel and cannot be seen. Below the waterfall, four subband profiles at the candidate width: a real dispersed pulse rises at the same time in several.</div>
     </div>
     <div class="card" style="margin-top: 14px">
       <h2>S/N against DM</h2>
       <div id="dmplots"><div class="muted">Dedispersing at every trial DM…</div></div>
-      <div class="muted small">Left: close to the candidate DM, with the fall-off a real pulse of the fitted width would show (Cordes &amp; McLaughlin 2003). Middle: from DM 0, where undispersed RFI peaks. Right: S/N against DM and time (the bowtie). Click either curve to view at that DM.</div>
+      <div class="muted small">Left: response tracking the candidate near its DM; the dashed line assumes an ideal Gaussian pulse across the band (Cordes &amp; McLaughlin 2003). Scattered or band-limited bursts can differ. Middle: strongest nearby signal from DM 0; peaks can belong to different events. Right: DM and time. Click either curve to view at that DM.</div>
     </div>
   </div>
   <aside class="grid" style="align-content: start">
     <div class="card">
       <h2>Measured on this snippet</h2>
-      <div class="stat"><span>Boxcar S/N at the search width</span><span class="v" id="m-peak">—</span></div>
+      <div class="stat"><span>Local S/N at candidate time</span><span class="v" id="m-peak">—</span></div>
       <div class="stat"><span>Best width</span><span class="v" id="m-width">—</span></div>
       <div class="stat"><span>Search S/N</span><span class="v">{{ '%.2f'|format(candidate.snr) }}</span></div>
       <div class="stat"><span>Best DM</span><span class="v" id="m-dm">—</span></div>
       <div class="stat"><span>Channel smearing (bottom / top)</span><span class="v" id="m-smear">—</span></div>
-      <div class="stat"><span>Narrowest a real pulse can be</span><span class="v" id="m-min">—</span></div>
+      <div class="stat"><span>Estimated instrumental broadening</span><span class="v" id="m-min">—</span></div>
       <div class="small" id="m-verdict" style="margin-top: 6px"></div>
     </div>
     {% include '_review.html' %}
@@ -73,5 +80,5 @@
 {% endif %}
 {% if snippet %}{% set open_plots = False %}{% include '_plots.html' %}{% endif %}
 <script id="initial" type="application/json">{{ initial|json }}</script>
-<script id="candidate" type="application/json">{{ {'id': candidate.id, 'dm': candidate.dm, 'snr': candidate.snr, 'width': candidate.width, 'has_snippet': snippet is not none, 'fch1': snippet.get('fch1') if snippet else None}|json }}</script>
+<script id="candidate" type="application/json">{{ {'id': candidate.id, 'dm': candidate.dm, 'snr': candidate.snr, 'width': candidate.width, 'has_snippet': snippet is not none, 'fch1': display.fch1 if display else None, 'foff': display.foff if display else None, 'nchans': display.nchans if display else None, 'nsub': display.nsub if display else 81, 'tscrunch': display.tscrunch if display else 1}|json }}</script>
 {% endblock %}

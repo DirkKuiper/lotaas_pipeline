@@ -2,7 +2,7 @@
   --bg: #f5f6f8; --panel: #ffffff; --panel-2: #f0f2f5; --text: #1c2230; --muted: #5f6878;
   --border: #dde1e8; --grid: #e6e9ef; --accent: #2563eb; --accent-soft: #e6eefc;
   --ok: #15803d; --warn: #b45309; --bad: #c2410c; --err: #b91c1c;
-  --s-pending: #94a3b8; --s-staging: #3b82f6; --s-requested: #3b82f6; --s-online: #0891b2;
+  --s-not_queued: #cbd5e1; --s-processing: #0e7490; --s-pending: #94a3b8; --s-staging: #3b82f6; --s-requested: #3b82f6; --s-online: #0891b2;
   --s-working: #0e7490; --s-flatfielding: #7c3aed; --s-prepared: #a855f7; --s-converted: #0d9488;
   --s-dispatched: #4f46e5; --s-searched: #16a34a; --s-attention: #dc2626; --s-failed: #dc2626;
   --s-incomplete: #d97706; --s-excluded: #cbd5e1; --s-kept: #db2777;
@@ -90,7 +90,7 @@ td.detail { max-width: 520px; color: var(--muted); font-size: 12.5px; word-break
 
 .state { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
   color: #fff; background: var(--s-pending); white-space: nowrap; }
-.state.excluded { color: var(--text); }
+.state[data-state="not_queued"], .state.excluded { color: var(--text); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px;
   border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
 .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }

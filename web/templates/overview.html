@@ -2,40 +2,47 @@
 {% block title %}Overview{% endblock %}
 {% block page %}overview{% endblock %}
 {% block content %}
-{% set searched = saps.get('searched', 0) %}
-{% set nfiles = files.values()|sum - files.get('excluded', 0) %}
 <div class="page-head">
-  <div>
-    <h1>Campaign overview</h1>
-    <div class="muted">{{ total }} SAPs and {{ nfiles }} beam files in the LT5_004 inventory (the incoherent beam 12 excluded)</div>
+  <div><h1>{{ scope.label if scope else 'LOTAAS overview' }}</h1>
+    {% if scope %}<div class="muted">{{ '{:,}'.format(scope.observations) }} observations ·
+      {{ scope.kinds.get('survey', 0) }} survey · {{ scope.kinds.get('confirmation', 0) }} confirmation ·
+      {{ scope.kinds.get('unknown', 0) }} unclassified</div>
+    {% else %}<div class="muted">Current queue only — full catalogue totals are unavailable.</div>{% endif %}
   </div>
-  <div class="muted small">refreshes every minute</div>
+  {% include '_project_filter.html' %}
 </div>
 
+{% if scope %}
 <div class="tiles">
   <div class="tile"><div class="label">SAPs searched</div>
-    <div class="value">{{ searched }} <span class="muted small">/ {{ total }}</span></div>
-    <div class="bar"><span style="width: {{ (100 * searched / total) if total else 0 }}%"></span></div></div>
-  <div class="tile"><div class="label">Beams searched (production)</div>
-    <div class="value">{{ campaign_beams }}</div>
-    <div class="sub">{{ beams_searched }} including pilot runs</div></div>
-  <div class="tile"><div class="label">Files converted</div>
-    <div class="value">{{ files.get('converted', 0) }} <span class="muted small">/ {{ nfiles }}</span></div>
-    <div class="bar"><span style="width: {{ (100 * files.get('converted', 0) / nfiles) if nfiles else 0 }}%; background: var(--s-converted)"></span></div></div>
-  <div class="tile"><div class="label">Last 24 hours</div>
-    <div class="value">{{ beams_day }} <span class="muted small">beams searched</span></div>
-    <div class="sub">{{ files_day }} files off tape and converted</div></div>
-  <div class="tile"><div class="label">Remaining at that pace</div>
-    <div class="value">{% if eta_days %}{{ '%.0f'|format(eta_days) }} <span class="muted small">days</span>{% else %}—{% endif %}</div>
-    <div class="sub">{{ to_search }} beams to search; the slower of staging and search</div></div>
-  <div class="tile"><div class="label">Kept for review</div>
-    <div class="value">{{ kept|length }} <span class="muted small">beams</span></div>
-    <div class="sub">{{ kept_bytes|size }} of flatfielded data the campaign keeps</div></div>
-  <div class="tile"><div class="label">Waiting for review</div>
-    <div class="value"><a href="/verify?kind=sp" style="color: inherit">{{ waiting.sp }}</a> <span class="muted small">single pulse</span> ·
-      <a href="/verify?kind=periodic" style="color: inherit">{{ waiting.periodic }}</a> <span class="muted small">periodic</span></div>
-    <div class="sub">FETCH positives and known pulsars; periodic folds →</div></div>
+    <div class="value">{{ '{:,}'.format(scope.searched_saps) }} <span class="muted small">/ {{ '{:,}'.format(scope.saps) }}</span></div>
+    <div class="bar"><span style="width: {{ 100 * scope.searched_saps / scope.saps if scope.saps else 0 }}%"></span></div>
+    <div class="sub">{{ '{:,}'.format(scope.queued_saps) }} SAPs in the processing queue</div></div>
+  <div class="tile"><div class="label">SAPs not yet queued</div>
+    <div class="value">{{ '{:,}'.format(scope.sap_states.get('not_queued', 0)) }}</div>
+    <div class="sub"><a href="/coverage?project={{ selected_project }}#not_queued">Explore remaining SAPs →</a></div></div>
+  <div class="tile"><div class="label">Beam archives searched</div>
+    <div class="value">{{ '{:,}'.format(scope.searched_files) }} <span class="muted small">/ {{ '{:,}'.format(scope.files) }}</span></div>
+    <div class="bar"><span style="width: {{ 100 * scope.searched_files / scope.files if scope.files else 0 }}%"></span></div>
+    <div class="sub">{{ '{:,}'.format(scope.file_states.get('converted', 0)) }} converted, awaiting search</div></div>
+  <div class="tile"><div class="label">Data retrieved</div>
+    <div class="value">{{ (scope.bytes - scope.remaining_bytes)|size }}</div>
+    <div class="sub">of {{ scope.bytes|size }} in mapped beam archives</div>
+    <div class="bar"><span style="width: {{ 100 * (scope.bytes - scope.remaining_bytes) / scope.bytes if scope.bytes else 0 }}%"></span></div></div>
+  <div class="tile"><div class="label">Remaining at current pace</div>
+    <div class="value">{% if eta_days is not none and scope.files %}{{ '{:,.0f}'.format(eta_days) }} <span class="muted small">days</span>{% else %}—{% endif %}</div>
+    <div class="sub">{{ 'All projects' if not selected_project else selected_project }} · mapped archives at 24-hour campaign pace<br><a href="#estimates">Estimate details</a></div></div>
 </div>
+{% if scope.unmapped_observations %}
+<p class="notice warn">{{ scope.unmapped_observations }} additional observation{{ 's' if scope.unmapped_observations != 1 }} need SAP mapping.
+  They are included in the observation total; their SAPs and search time are still unknown.
+  <a href="/coverage?project={{ selected_project }}#unmapped">View observations →</a></p>
+{% endif %}
+{% else %}
+<p class="notice warn">The catalogue is unavailable or has not finished indexing. The queue currently contains {{ total }} SAPs;
+  this is not the total LOTAAS workload.</p>
+{% endif %}
+{% include '_estimates.html' %}
 
 {% for run in health.get('dispatch') or [] %}
   {% for node, stages in (run.get('stages') or {}).items() %}
@@ -58,20 +65,25 @@
   <div class="card">
     <h2>SAPs by state</h2>
     <div id="sap-bar" style="height: 54px"></div>
-    <div class="chips">{% for s in state_order if saps.get(s) %}<a class="chip" href="/coverage#{{ s }}"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s }} {{ saps[s] }}</a>{% endfor %}</div>
+    <div class="chips">{% for s in state_order if saps.get(s) %}<a class="chip" href="/coverage?project={{ selected_project }}#{{ s }}"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s|replace('_', ' ') }} {{ '{:,}'.format(saps[s]) }}</a>{% endfor %}</div>
   </div>
   <div class="card">
     <h2>Beam files by state</h2>
     <div id="file-bar" style="height: 54px"></div>
-    <div class="chips">{% for s in file_order if files.get(s) %}<span class="chip"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s }} {{ files[s] }}</span>{% endfor %}</div>
+    <div class="chips">{% for s in file_order if files.get(s) %}<span class="chip"><span class="dot" style="background: var(--s-{{ s }})"></span>{{ s|replace('_', ' ') }} {{ '{:,}'.format(files[s]) }}</span>{% endfor %}</div>
   </div>
 </div>
 
 <div class="card" style="margin-top: 14px">
-  <h2>Throughput, last {{ charts.hours }} hours</h2>
+  <h2>Campaign throughput, last {{ charts.hours }} hours</h2>
+  <p class="muted small">All active work · {{ beams_day if beams_day is not none else '—' }} new beams searched and {{ files_day if files_day is not none else '—' }} archive files retrieved in the last 24 hours.</p>
   <div id="throughput" class="chart"></div>
 </div>
 
+<div class="card" style="margin-top: 14px"><h2>Campaign review</h2>
+  <div>{{ kept|length }} beams kept ({{ kept_bytes|size }}) ·
+    <a href="/verify?kind=sp">{{ waiting.sp }} single pulse</a> and
+    <a href="/verify?kind=periodic">{{ waiting.periodic }} periodic</a> candidates waiting for review</div></div>
 <div class="grid cols-main" style="margin-top: 14px">
   <div class="card flush">
     <h2>Recent events</h2>
