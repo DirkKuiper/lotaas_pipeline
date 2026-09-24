@@ -250,6 +250,7 @@ def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, c
         'P0       1.2\nSURVEY   gbncc,lotaas\nTYPE     RRAT\n@----\n'
         'PSRJ     J1200+4500                    sbc+19\nRAJ      12:00:00.0\nDECJ     +45:00:00\nDM       20.0\n'
         'P0       0.9\nSURVEY   lotaas\n@----\n'
+        'PSRJ     J0846+6820\nRAJ      08:46:00.0\nDECJ     +68:20:00\nDM       40.0\nP0       0.0031\nSURVEY   lotaas\n@----\n'
         'PSRJ     J0845+6900\nRAJ      08:45:00.0\nDECJ     +69:00:00\nDM       10.0\nP0       0.7\nSURVEY   gbncc\n@----\n')
     monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
     add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0)])
@@ -264,6 +265,8 @@ def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, c
     assert 'RRAT' in row and 'single pulse' in row and 'not found' in row
     everything = client.get('/lotaas?show=all').text
     assert 'J1200+4500' in everything.split('<tbody>')[1] and 'not searched yet' in everything
-    assert '>2 <span class="muted small">/ 3</span>' in page.replace('\n', '')   # searched of published
+    assert '>3 <span class="muted small">/ 4</span>' in page.replace('\n', '')   # searched of published
+    assert 'P below the search' in page.split('J0846+6820')[1].split('</tr>')[0]
+    assert page.index('J0847+6830') < page.index('J0850+6800') < page.index('J0846+6820')   # found, missed, out of reach
     overview = client.get('/').text
     assert 'Published LOTAAS sources redetected' in overview and 'LOTAAS sources →' in overview

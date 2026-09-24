@@ -21,7 +21,7 @@
   <div class="tile"><div class="label">LOTAAS single-pulse sources found again in single pulses</div><div class="value">{{ summary.single_found }} <span class="muted small">/ {{ summary.single_expected }}</span></div>
     <div class="sub">of the searched sources LOTAAS found in single pulses</div></div>
   <div class="tile"><div class="label">Searched, not found</div><div class="value">{{ summary.missed }}</div>
-    <div class="sub">{{ summary.missed_near }} within {{ beam_radius }}° of a beam</div></div>
+    <div class="sub">{{ summary.missed_near }} within {{ beam_radius }}° of a beam{% if summary.out_of_reach %} · {{ summary.out_of_reach }} more faster than the periodic search's 16 ms{% endif %}</div></div>
 </div>
 <div class="chips">
   {% for key, text in shows.items() %}<a class="chip{{ ' on' if key == show }}" href="/lotaas?show={{ key }}">{{ text }}</a>{% endfor %}
@@ -44,7 +44,7 @@
           <td class="num">{{ '%.2f'|format(k.separation_deg) if k.searched else '' }}</td>
           <td class="nowrap">{% if k.sp_count %}{% if k.sp_id %}<a href="/verify/{{ k.sp_id }}">{% endif %}{{ k.sp_count }}, best S/N {{ '%.1f'|format(k.sp_best_snr) }}{% if k.sp_id %}</a>{% endif %}{% elif k.searched %}—{% endif %}</td>
           <td class="nowrap">{% if k.periodic_count %}{% if k.periodic_id %}<a href="/verify/{{ k.periodic_id }}">{% endif %}{{ k.periodic_count }} fold{{ 's' if k.periodic_count != 1 }}, best {{ '%.0f'|format(k.periodic_best) }} ({{ k.periodic_relation }}){% if k.periodic_id %}</a>{% endif %}{% elif k.searched %}—{% endif %}</td>
-          <td class="nowrap">{% if k.status == 'missed' %}<span class="flag bad">not found</span>{% elif k.status == 'both' %}<span class="flag ok">both</span>{% elif k.status == 'not searched yet' %}<span class="muted small">not searched yet</span>{% else %}<span class="flag">{{ k.status }} only</span>{% endif %}</td>
+          <td class="nowrap">{% if k.status == 'missed' %}<span class="flag bad">not found</span>{% elif k.status == 'both' %}<span class="flag ok">both</span>{% elif k.status == 'not searched yet' %}<span class="muted small">not searched yet</span>{% elif k.status == 'out of reach' %}<span class="muted small" title="The periodic search starts at 16 ms">P below the search</span>{% else %}<span class="flag">{{ k.status }} only</span>{% endif %}</td>
         </tr>
       {% else %}<tr><td colspan="10" class="muted">No source in this selection{% if show == 'searched' %}: no campaign beam lies within {{ searched_radius }}° of a published LOTAAS source yet{% endif %}.</td></tr>{% endfor %}
       </tbody>

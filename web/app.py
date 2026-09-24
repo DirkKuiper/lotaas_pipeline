@@ -838,11 +838,12 @@ def create_app(cfg, run_background=True):
             k['searched'] = k['observation'] is not None
             k['status'] = ('not searched yet' if not k['searched'] else
                            'both' if k['sp_count'] and k['periodic_count'] else
-                           'single pulses' if k['sp_count'] else 'periodic' if k['periodic_count'] else 'missed')
+                           'single pulses' if k['sp_count'] else 'periodic' if k['periodic_count'] else
+                           'out of reach' if k['period'] < MIN_PERIOD_SECONDS else 'missed')
             k['lotaas_single'] = k['lotaas_mode'] != 'periodic'
             k['lotaas_periodic'] = k['lotaas_mode'] != 'single pulse'
         searched = [k for k in rows_ if k['searched']]
-        found = [k for k in searched if k['status'] != 'missed']
+        found = [k for k in searched if k['status'] not in ('missed', 'out of reach')]
         summary = {
             'total': len(rows_), 'discoveries': sum(k['discovery'] for k in rows_),
             'single': sum(k['lotaas_single'] for k in rows_), 'searched': len(searched), 'found': len(found),
@@ -852,7 +853,8 @@ def create_app(cfg, run_background=True):
             'single_found': sum(1 for k in searched if k['lotaas_single'] and k['sp_count']),
             'sp_any': sum(1 for k in searched if k['sp_count']),
             'periodic_any': sum(1 for k in searched if k['periodic_count']),
-            'missed': len(searched) - len(found),
+            'missed': sum(1 for k in searched if k['status'] == 'missed'),
+            'out_of_reach': sum(1 for k in searched if k['status'] == 'out of reach'),
             'missed_near': sum(1 for k in searched if k['status'] == 'missed' and (k['beams_near'] or 0) > 0)}
         return rows_, summary
 
@@ -868,8 +870,10 @@ def create_app(cfg, run_background=True):
                 GROUP BY c.kind, c.item""")}
         chosen = {'searched': lambda k: k['searched'], 'all': lambda k: True,
                   'discoveries': lambda k: k['discovery'], 'single': lambda k: k['lotaas_single'],
-                  'missed': lambda k: k['status'] == 'missed', 'found': lambda k: k['searched'] and k['status'] != 'missed'}[show]
-        order = {'missed': 0, 'single pulses': 1, 'periodic': 2, 'both': 3, 'not searched yet': 4}
+                  'missed': lambda k: k['status'] == 'missed',
+                  'found': lambda k: k['status'] in ('both', 'periodic', 'single pulses')}[show]
+        # What was redetected first, then what was missed, then what the search cannot see or has not reached.
+        order = {'both': 0, 'periodic': 1, 'single pulses': 2, 'missed': 3, 'out of reach': 4, 'not searched yet': 5}
         shown = sorted((k for k in found if chosen(k)),
                        key=lambda k: (order[k['status']], k['separation_deg'] if k['searched'] else 0, k['psrj']))
         for k in shown:
