@@ -23,6 +23,7 @@
     <option value="{{ value }}" {{ 'selected' if params.get('sort', 'recent') == value }}>{{ text }}</option>{% endfor %}</select></label>
   <label class="check" style="flex-direction: row; align-items: center; gap: 6px"><input type="checkbox" name="pilot" value="include" {{ 'checked' if params.get('pilot') == 'include' }}> pilot runs</label>
   <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Beam 12 is the incoherent sum; the campaign no longer searches it"><input type="checkbox" name="incoherent" value="include" {{ 'checked' if params.get('incoherent') == 'include' }}> incoherent beam</label>
+  <label class="check" style="flex-direction: row; align-items: center; gap: 6px" title="Events at the same moment in 5 or more beams of one observation, at scattered DMs"><input type="checkbox" name="coincident" value="include" {{ 'checked' if params.get('coincident') == 'include' }}> across beams{% if coincident_hidden %} ({{ coincident_hidden }} hidden){% endif %}</label>
   <button class="primary" type="submit">Apply</button>
   <a class="button" href="/verify?{{ query }}&kind=sp">Review these →</a>
 </form>
@@ -36,7 +37,7 @@
         <tr>
           <td class="small">{{ (c.found or '')[:16] }}</td>
           <td><a href="/verify/{{ c.id }}?{{ query }}">{{ c.item|beam }}</a></td>
-          <td class="nowrap">{{ c.type|kind }}{% if c.pilot %} <span class="flag small">pilot</span>{% endif %}</td>
+          <td class="nowrap">{{ c.type|kind }}{% if c.pilot %} <span class="flag small">pilot</span>{% endif %}{% if c.coincident_beams %} <span class="flag small{{ ' bad' if c.coincident }}" title="Same moment in {{ c.coincident_beams }} beams of {{ c.coincident_saps }} SAP(s), DM {{ '%.1f'|format(c.coincident_dm_min) }}–{{ '%.1f'|format(c.coincident_dm_max) }}">{{ c.coincident_beams }} beams</span>{% endif %}</td>
           <td class="num">{{ '%.2f'|format(c.dm) if c.dm is not none }}</td>
           <td class="num">{{ '%.2f'|format(c.snr) if c.snr is not none }}</td>
           <td class="num">{{ c.width if c.width is not none }}</td>

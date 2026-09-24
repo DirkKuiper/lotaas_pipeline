@@ -36,6 +36,12 @@ def synthetic_filterbank(path, dm=30.0, t_pulse=15.0, amplitude=1.2, width=3, ns
     return path
 
 
+@pytest.fixture(autouse=True)
+def no_catalogue(tmp_path, monkeypatch):
+    """Tests bring their own pulsar catalogue, never the one psrqpy cached on the head."""
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(tmp_path / 'no-psrcat.db'))
+
+
 @pytest.fixture
 def cfg(tmp_path):
     for name in ('campaign', 'results', 'sources', 'control'):

@@ -35,8 +35,8 @@ from web.store import LABELS
 logger = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 COOKIE = 'lotaas_web'
-STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding', 'prepared', 'dispatched', 'searched', 'attention',
-               'incomplete']
+STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding', 'prepared', 'dispatched', 'partial',
+               'searched', 'attention', 'incomplete']
 FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
 # Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
 # what waits for a person; the other types can be listed but are not queued.
@@ -50,6 +50,16 @@ CENTRE_MHZ = 135.25  # LOTAAS band centre, when a beam's own band is unknown
 # unless every fold of it sits at one DM above zero, as a bright pulsar seen in
 # neighbouring beams would. The indexer groups the folds (periodic_families).
 MULTIBEAM_BEAMS = 4
+
+
+# A single-pulse event at the same (DM-aligned) moment in this many beams of its
+# observation, at scattered DMs, is interference: hidden from the queue and list
+# unless asked for (?coincident=include), like multi-beam periods.
+COINCIDENT_BEAMS = 5
+
+
+def coincident_sql(alias):
+    return f'({alias}.beams >= {COINCIDENT_BEAMS} AND NOT {alias}.consistent)'
 
 
 def multibeam_sql(alias):
@@ -583,6 +593,8 @@ def create_app(cfg, run_background=True):
         if params.get('q'):
             clauses.append('c.item LIKE ?')
             args.append('%' + params['q'] + '%')
+        if kind == 'sp' and params.get('coincident') != 'include':
+            clauses.append(f'NOT EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key AND {coincident_sql("x")})')
         if kind == 'periodic' and params.get('multibeam') != 'include':
             clauses.append(f'NOT EXISTS (SELECT 1 FROM periodic_families pf WHERE pf.key=c.key '
                            f'AND {multibeam_sql("pf")})')
@@ -634,16 +646,23 @@ def create_app(cfg, run_background=True):
                     f.beams AS family_beams, f.saps AS family_saps, f.dm_min AS family_dm_min,
                     f.dm_max AS family_dm_max, COALESCE({multibeam_sql('f')}, 0) AS multibeam,
                     t.status AS triage_status, t.score AS repeatability, t.members AS group_members,
-                    t.reasons AS triage_reasons
+                    t.reasons AS triage_reasons, x.beams AS coincident_beams, x.saps AS coincident_saps,
+                    x.dm_min AS coincident_dm_min, x.dm_max AS coincident_dm_max,
+                    COALESCE({coincident_sql('x')}, 0) AS coincident
                 FROM candidates c LEFT JOIN periodic p ON p.key=c.key
                 LEFT JOIN periodic_families f ON f.key=c.key
-                LEFT JOIN periodic_triage t ON t.key=c.key WHERE {where}
+                LEFT JOIN periodic_triage t ON t.key=c.key
+                LEFT JOIN sp_coincidence x ON x.key=c.key WHERE {where}
                 ORDER BY {ordering(params)} LIMIT 100 OFFSET ?""", *args, (number_ - 1) * 100)
             # Counts per type under the other filters, for the type selector.
             every, every_args, _ = candidate_filter(dict(params, type='all'))
             types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
                                     every_args).fetchall())
             triage_counts = {}
+            hidden = 0
+            if kind == 'sp' and params.get('coincident') != 'include':
+                shown, shown_args, _ = candidate_filter(dict(params, coincident='include'))
+                hidden = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0] - count
             if kind == 'periodic':
                 all_where, all_args, _ = candidate_filter(dict(params, triage='all'))
                 triage_counts = dict(db.execute(f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)
@@ -656,7 +675,7 @@ def create_app(cfg, run_background=True):
         query = urlencode({k: v for k, v in params.items() if k not in ('page', 'kind')})
         return page(request, template, found=found, count=count, params=params, number=number_,
                     pages=max(1, math.ceil(count / 100)), types=types, query=query, kind=kind,
-                    triage_counts=triage_counts)
+                    triage_counts=triage_counts, coincident_hidden=hidden)
 
     @app.get('/single-pulse', response_class=HTMLResponse)
     def single_pulse(request: Request):
@@ -719,6 +738,9 @@ def create_app(cfg, run_background=True):
                 JOIN candidates c ON c.key=f.key WHERE f.family=? AND f.key<>? ORDER BY c.snr DESC LIMIT 40""",
                 family['family'], candidate['key']) if family else []
             kept = next((k for k in kept_beams(db) if k['item'] == candidate['item']), None)
+            coincidence = db.execute(f'SELECT x.*, {coincident_sql("x")} AS rfi FROM sp_coincidence x WHERE x.key=?',
+                                     (candidate['key'],)).fetchone()
+            coincidence = dict(coincidence) if coincidence else None
             others = rows(db, """SELECT id, type, dm, snr, time FROM candidates WHERE item=? AND id<>?
                 AND kind=? ORDER BY snr DESC LIMIT 12""", candidate['item'], cid, candidate['kind'])
         initial = {}
@@ -748,12 +770,33 @@ def create_app(cfg, run_background=True):
                        snippet=json.loads(snippet['meta']) if snippet else None, others=others,
                        observed=beam_run['observation_date'] if beam_run else None,
                        slack_threads=cfg.slack_threads, labels=LABELS, kept=kept, initial=initial, display=display,
-                       section=params['kind'], back=KINDS[params['kind']]['page'])
+                       section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence)
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
             context.update(family=family, relatives=relatives, triage=triage)
             return page(request, 'verify_periodic.html', **context)
         return page(request, 'verify_sp.html', **context)
+
+    # ------------------------------------------------------- known pulsars
+    @app.get('/pulsars', response_class=HTMLResponse)
+    def known_pulsars(request: Request):
+        from web.indexer import BEAM_RADIUS_DEG, KNOWN_PULSAR_RADIUS_DEG
+        with store.reading(cfg) as db:
+            found = rows(db, """SELECT k.*,
+                    (SELECT id FROM candidates c WHERE c.kind='sp' AND c.type='known_pulsar' AND c.pulsar=k.psrj
+                     AND c.item=k.sp_item ORDER BY c.snr DESC LIMIT 1) AS sp_id,
+                    (SELECT id FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
+                     AND c.snr=k.periodic_best LIMIT 1) AS periodic_id
+                FROM known_pulsars k ORDER BY k.observation, k.separation_deg""")
+        for k in found:
+            k['status'] = ('both' if k['sp_count'] and k['periodic_count'] else 'single pulses' if k['sp_count']
+                           else 'periodic' if k['periodic_count'] else 'missed')
+        near = [k for k in found if k['separation_deg'] <= BEAM_RADIUS_DEG]
+        summary = {'near': len(near), 'found': sum(k['status'] != 'missed' for k in near),
+                   'periodic': sum(1 for k in near if k['periodic_count']),
+                   'observations': len({k['observation'] for k in found})}
+        return page(request, 'pulsars.html', found=found, summary=summary, beam_radius=BEAM_RADIUS_DEG,
+                    radius=KNOWN_PULSAR_RADIUS_DEG)
 
     # --------------------------------------------------------------- API
     def load_snippet(cid):

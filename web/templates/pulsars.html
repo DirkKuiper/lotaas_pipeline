@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block title %}Known pulsars{% endblock %}
+{% block page %}candidates{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Known pulsars</h1>
+    <div class="muted">Every catalogued pulsar within {{ radius }}° of a searched beam, and what the search found of it: single pulses through the classifier's redetections, periods through any fold of the observation at the pulsar's DM and period, a harmonic 1/2–1/32, a multiple or a small fraction. A bright pulsar within {{ beam_radius }}° of a beam that is found neither way is the search losing something.</div>
+  </div>
+</div>
+<div class="tiles">
+  <div class="tile"><div class="label">Within {{ beam_radius }}° of a searched beam</div><div class="value">{{ summary.near }}</div></div>
+  <div class="tile"><div class="label">Of those, found</div><div class="value">{{ summary.found }}</div></div>
+  <div class="tile"><div class="label">Of those, found as a period</div><div class="value">{{ summary.periodic }}</div></div>
+  <div class="tile"><div class="label">Observations</div><div class="value">{{ summary.observations }}</div></div>
+</div>
+<div class="card flush">
+  <div class="table-wrap tall">
+    <table class="sortable">
+      <thead><tr><th>Observation</th><th>Pulsar</th><th class="num">DM</th><th class="num">P (s)</th><th>Nearest beam</th>
+        <th class="num">Separation (°)</th><th class="num" title="Searched beams within {{ beam_radius }}°">Beams near</th>
+        <th>Single pulses</th><th>Periodic</th><th>Found</th></tr></thead>
+      <tbody>
+      {% for k in found %}
+        <tr>
+          <td>{{ k.observation }}</td>
+          <td class="nowrap">{{ k.psrj }}{% if k.bname %} <span class="muted small">{{ k.bname }}</span>{% endif %}</td>
+          <td class="num">{{ '%.2f'|format(k.dm) }}</td>
+          <td class="num">{{ '%.6f'|format(k.period) }}</td>
+          <td><a href="/beam/{{ k.beam_item }}">{{ k.beam_item|beam }}</a></td>
+          <td class="num">{{ '%.2f'|format(k.separation_deg) }}</td>
+          <td class="num">{{ k.beams_near }}</td>
+          <td class="nowrap">{% if k.sp_count %}{% if k.sp_id %}<a href="/verify/{{ k.sp_id }}">{% endif %}{{ k.sp_count }} beam{{ 's' if k.sp_count != 1 }}, S/N {{ '%.1f'|format(k.sp_best_snr) }}{% if k.sp_id %}</a>{% endif %}{% else %}—{% endif %}</td>
+          <td class="nowrap">{% if k.periodic_count %}{% if k.periodic_id %}<a href="/verify/{{ k.periodic_id }}">{% endif %}{{ k.periodic_count }} fold{{ 's' if k.periodic_count != 1 }}, best {{ '%.0f'|format(k.periodic_best) }} ({{ k.periodic_relation }}){% if k.periodic_id %}</a>{% endif %}{% else %}—{% endif %}</td>
+          <td>{% if k.status == 'missed' %}<span class="flag{{ ' bad' if k.separation_deg <= beam_radius }}">missed</span>{% elif k.status == 'both' %}<span class="flag ok">both</span>{% else %}<span class="flag">{{ k.status }}</span>{% endif %}</td>
+        </tr>
+      {% else %}<tr><td colspan="10" class="muted">No catalogued pulsar near a searched beam, or no catalogue on this host.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

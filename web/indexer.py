@@ -13,6 +13,7 @@ Sources are attached read-only and each statement against them is short, so
 the driver, which writes them in rollback-journal mode, is held up for no
 more than a single query.
 """
+import bisect
 import hashlib
 import json
 import logging
@@ -37,6 +38,17 @@ PRUNE = {'downloads', 'extracted', 'prepared', 'dispatch', 'data', 'logs', 'stag
          'held', 'snippets', 'containers', 'trials', '__pycache__', 'input', 'source'}
 STALE_SECONDS = 2 * 86400
 FAMILY_TOLERANCE = 5e-4  # relative period difference within one periodic family
+# Single-pulse coincidence: events within this many seconds (or 1.5 widths), once
+# aligned for their DM, are one moment. With the ~0.85 events a second of an
+# RFI-rich observation, four other beams fall inside +-0.5 s by chance 1.2% of
+# the time, five 0.25%.
+COINCIDENCE_SECONDS = 0.5
+KINDS_QUEUED = ('candidate', 'known_pulsar')
+K_DM = 4148.808
+# Catalogued pulsars this close to a searched beam are listed; within
+# BEAM_RADIUS_DEG of one the search should see a bright one.
+KNOWN_PULSAR_RADIUS_DEG = 2.0
+BEAM_RADIUS_DEG = 0.5
 
 
 def uri(path):
@@ -403,6 +415,8 @@ class Indexer:
                     WHERE o.observation=observation_of(candidates.item) AND o.sap=sap_of(candidates.item))""")
             self.derive_saps()
             self.derive_families()
+            self.derive_coincidence()
+            self.derive_known_pulsars()
             from web.periodic_quality import sync
             sync(db)
 
@@ -440,6 +454,102 @@ class Indexer:
         with self.db:
             self.db.execute('DELETE FROM periodic_families')
             self.db.executemany('INSERT OR REPLACE INTO periodic_families VALUES (?,?,?,?,?,?)', rows)
+
+    def derive_coincidence(self):
+        """Single-pulse events at one moment in other beams of the candidate's observation.
+
+        Interference reaches many beams at once and, being undispersed, peaks at
+        whatever trial DM suits its shape: the start of L603674 stepped in level
+        in every beam, and L603670 jumped 13% at 72-97 s in 32 of 35. Dedispersing
+        an undispersed impulse at DM X moves its band-averaged centre earlier by
+        the mean channel delay, K_DM X (1/(f_lo f_hi) - 1/f_hi^2), so events are
+        compared at their time plus that delay: one impulse lines up across DMs,
+        and a bright pulsar's pulse in neighbouring beams lines up at one DM.
+        """
+        from lotaas_reprocessing.periodicity_veto import dm_consistent
+        bands = {r['item']: (r['nu_min'], r['nu_max'], r['tsamp']) for r in self.db.execute(
+            'SELECT item, nu_min, nu_max, tsamp FROM beams WHERE nu_min > 0 AND nu_max > nu_min')}
+        by_observation = {}
+        for row in self.db.execute("SELECT key, type, item, dm, time, width FROM candidates "
+                                   "WHERE kind='sp' AND time IS NOT NULL"):
+            parsed = parse_item(row['item'])
+            if not parsed:
+                continue
+            low, high, tsamp = bands.get(row['item'], (119.45, 151.04, 0.007864))
+            dm = row['dm'] or 0.0
+            aligned = row['time'] + K_DM * dm * (1 / (low * high) - 1 / high ** 2)
+            by_observation.setdefault(parsed[0], []).append(
+                (aligned, (parsed[1], parsed[2]), dm, row['key'], row['type'], (row['width'] or 1) * (tsamp or 0.007864)))
+        rows = []
+        for events in by_observation.values():
+            events.sort()
+            times = [e[0] for e in events]
+            for t, beam, dm, key, kind, width in events:
+                if kind not in KINDS_QUEUED:
+                    continue
+                tolerance = max(COINCIDENCE_SECONDS, 1.5 * width)
+                near = events[bisect.bisect_left(times, t - tolerance):bisect.bisect_right(times, t + tolerance)]
+                others = [e for e in near if e[1] != beam]
+                beams = {e[1] for e in others} | {beam}
+                if len(beams) < 2:
+                    continue
+                dms = [dm] + [e[2] for e in others]
+                rows.append((key, len(beams), len({b[0] for b in beams}), min(dms), max(dms),
+                             int(dm_consistent(dms, home=dm))))
+        with self.db:
+            self.db.execute('DELETE FROM sp_coincidence')
+            self.db.executemany('INSERT OR REPLACE INTO sp_coincidence VALUES (?,?,?,?,?,?)', rows)
+
+    def derive_known_pulsars(self):
+        """Every catalogued pulsar within reach of a searched beam, and whether the search found it.
+
+        The first night's cross-beam veto removed J0323+3944 from the periodic
+        results of its own observation; only a check against the catalogue
+        shows a loss like that. Single pulses count through the classifier's
+        redetections, periods through harmonic matching of every fold of the
+        observation (euroflash.psrcat).
+        """
+        from euroflash import psrcat
+        pulsars = psrcat.load()
+        rows = []
+        beams = {}
+        for r in self.db.execute('SELECT item, observation, ra_deg, dec_deg FROM beams '
+                                 'WHERE ra_deg IS NOT NULL AND COALESCE(pilot, 0)=0'):
+            beams.setdefault(r['observation'], {})[r['item']] = (r['ra_deg'], r['dec_deg'])
+        folds = {}
+        for r in self.db.execute('SELECT item, dm, period, statistic FROM periodic WHERE period > 0'):
+            parsed = parse_item(r['item'])
+            if parsed:
+                folds.setdefault(parsed[0], []).append(r)
+        for observation, members in beams.items() if pulsars else ():
+            # One cone around the observation's beams, then each beam against that.
+            ras = [math.radians(ra) for ra, _ in members.values()]
+            centre = (math.degrees(math.atan2(sum(map(math.sin, ras)), sum(map(math.cos, ras)))) % 360,
+                      sum(dec for _, dec in members.values()) / len(members))
+            spread = max(psrcat.separation(*centre, ra, dec) for ra, dec in members.values())
+            field = psrcat.cone(pulsars, *centre, spread + KNOWN_PULSAR_RADIUS_DEG)
+            near = {}
+            for item, (ra, dec) in members.items() if field else ():
+                for p in psrcat.cone(field, ra, dec, KNOWN_PULSAR_RADIUS_DEG):
+                    best = near.get(p['name'])
+                    count = (best[3] if best else 0) + (p['separation_deg'] <= BEAM_RADIUS_DEG)
+                    if best is None or p['separation_deg'] < best[1]:
+                        near[p['name']] = (p, p['separation_deg'], item, count)
+                    else:
+                        near[p['name']] = best[:3] + (count,)
+            for name, (p, separation, item, count) in near.items():
+                sp = self.db.execute("""SELECT COUNT(*), MAX(snr), (SELECT item FROM candidates d WHERE d.kind='sp'
+                        AND d.type='known_pulsar' AND d.pulsar=? AND d.item LIKE ? ORDER BY d.snr DESC LIMIT 1)
+                        FROM candidates c WHERE c.kind='sp' AND c.type='known_pulsar' AND c.pulsar=? AND c.item LIKE ?""",
+                                     (name, f'%{observation}%', name, f'%{observation}%')).fetchone()
+                matched = [(f['statistic'] or 0, f['item'], found[1]) for f in folds.get(observation, [])
+                           for found in [psrcat.match(f['period'], f['dm'] or 0.0, [p])] if found]
+                best = max(matched, default=(None, None, None))
+                rows.append((observation, name, p.get('bname'), p['dm'], 1 / p['f0'], item, separation, count,
+                             sp[0], sp[1], sp[2], len(matched), best[0], best[1], best[2]))
+        with self.db:
+            self.db.execute('DELETE FROM known_pulsars')
+            self.db.executemany('INSERT OR REPLACE INTO known_pulsars VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
 
     def derive_saps(self):
         db = self.db

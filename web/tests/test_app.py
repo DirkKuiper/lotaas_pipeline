@@ -157,3 +157,48 @@ def test_a_period_in_many_beams_is_rfi_unless_it_keeps_one_dm(cfg, campaign):
     cid = rfi.split('href="/verify/')[1].split('?')[0]
     page = client.get(f'/verify/{cid}').text
     assert '5 beams in 1 SAP(s)' in page and 'multi-beam: RFI' in page and 'Same period in other beams' in page
+
+
+def add_detections(campaign, rows):
+    """(beam number, dm, snr, width, type, pulsar, time) detections of ITEM's observation in the ledger."""
+    with campaign['ledger'].connect() as db:
+        run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
+        for number, dm, snr, width, kind, pulsar, time in rows:
+            beam = ITEM.replace('BEAM025', f'BEAM{number:03d}') + '.fil'
+            db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
+                       "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
+                       "(?,?,?,?,?,?,NULL,?,?,1)", (beam, dm, snr, width, kind, pulsar, run, time))
+
+
+def test_an_event_in_many_beams_at_scattered_dms_leaves_the_queue(cfg, campaign):
+    # A level step: one moment in six beams, each at whatever DM suited it. Aligned
+    # for DM (t + 0.0489 DM), the six events fall within half a second.
+    step = [(40 + i, dm, 35.0, 6, 'unconfirmed', None, 40.0 - 0.0489 * dm) for i, dm in
+            enumerate((3.7, 22.4, 85.9, 139.9, 5.8))]
+    add_detections(campaign, step + [(45, 22.6, 36.0, 6, 'candidate', None, 40.0 - 0.0489 * 22.6)])
+    # A bright pulsar's pulse in five neighbouring beams, all at its DM.
+    add_detections(campaign, [(50 + i, 26.2, 20.0 - i, 1, 'known_pulsar', 'J0323+3944', 2465.645) for i in range(5)])
+    Indexer(cfg).run_pass()
+    client = client_for(cfg)
+    shown = client.get('/single-pulse').text
+    assert 'B045' not in shown and '(1 hidden)' in shown
+    assert shown.count('5 beams</span>') == 5                    # the pulsar's pulses stay, marked
+    everything = client.get('/single-pulse?coincident=include').text
+    assert 'B045' in everything and '6 beams</span>' in everything
+    cid = everything.split('B045')[0].rsplit('href="/verify/', 1)[1].split('?')[0]
+    page = client.get(f'/verify/{cid}').text
+    assert 'Same moment in 6 beams of 1 SAP' in page and 'scattered DMs: interference' in page
+
+
+def test_known_pulsars_near_the_beams_are_listed_with_what_was_found(cfg, campaign, monkeypatch, tmp_path):
+    catalogue = tmp_path/'psrcat.db'
+    catalogue.write_text('PSRJ     J0847+6830\nRAJ      08:47:30.0\nDECJ     +68:30:00\nDM       30.0\n'
+                         'P0       0.5\n@----\nPSRJ     J0850+6800\nRAJ      08:50:00.0\nDECJ     +68:00:00\n'
+                         'DM       55.0\nP0       1.2\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0)])
+    fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 80.0, 'half')     # its second harmonic
+    Indexer(cfg).run_pass()
+    page = client_for(cfg).get('/pulsars').text
+    assert 'J0847+6830' in page and 'S/N 14.0' in page and '(1/2)' in page and 'flag ok">both' in page
+    assert 'J0850+6800' in page and 'missed' in page
