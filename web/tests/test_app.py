@@ -422,3 +422,18 @@ def test_a_burst_in_all_three_saps_at_scattered_dms_is_interference(cfg, campaig
     recorded = verdicts(cfg)
     assert len(recorded) == 8 and {v['label'] for v in recorded} == {'rfi'}
     assert all('all three SAPs at scattered DMs' in v['note'] for v in recorded)
+
+
+def test_a_fold_at_a_catalogued_pulsars_own_period_is_settled(cfg, campaign, monkeypatch, tmp_path):
+    catalogue = tmp_path / 'psrcat.db'
+    catalogue.write_text('PSRJ     J0826+2637\nPSRB     B0823+26\nRAJ      08:40:00.0\nDECJ     +66:00:00\n'
+                         'DM       19.476\nP0       0.5306603\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    beam_dir = campaign['beam_dir']
+    fold(beam_dir, 19.5, 0.5306603 * (1 - 9e-5), 381.9, 'psr')          # its own period, Doppler shifted
+    fold(beam_dir, 19.4, 0.5306603 / 2, 60.0, 'second')                  # a harmonic: for a person
+    fold(beam_dir, 55.0, 0.5306603, 40.0, 'other')                       # its period at another DM
+    Indexer(cfg).run_pass()
+    recorded = verdicts(cfg)
+    assert [v['label'] for v in recorded] == ['known']
+    assert 'B0823+26 (J0826+2637) at its own period and DM, 2.51 deg' in recorded[0]['note']

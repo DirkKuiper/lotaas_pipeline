@@ -15,6 +15,11 @@ observation shows, not by looking at the candidate:
   enough to register at every DM, so fewer than a quarter lay below DM 1).
   Verdict 'rfi'.
 
+A periodic fold is settled too when it is a catalogued pulsar at its own
+period (not a harmonic: those stay for a person) and DM, within 5 degrees: B0823+26
+was folded in 92 beams of L611400, 3.3 degrees away in its other SAP, where the
+pipeline's own catalogue match does not reach. Verdict 'known'.
+
 Each is recorded once, by REVIEWER, with its evidence in the note. None is
 written over a verdict already given, and a person's later verdict replaces it
 (the latest counts everywhere verdicts are read).
@@ -56,9 +61,38 @@ def settled(db):
     return out
 
 
+PERIODIC_RADIUS_DEG = 5.0
+
+
+def periodic_settled(db):
+    """[(key, 'known', note, dm)] of unreviewed folds at a catalogued pulsar's own period and DM."""
+    from euroflash import psrcat
+    pulsars = psrcat.load()
+    if not pulsars:
+        return []
+    out, cones = [], {}
+    for r in db.execute(f"""SELECT c.key, c.dm, c.period, b.ra_deg, b.dec_deg, b.tstart_mjd
+            FROM candidates c JOIN periodic p ON p.key=c.key JOIN beams b ON b.dir=p.dir
+            WHERE c.kind='periodic' AND c.type='periodic' AND COALESCE(c.pilot, 0)=0 AND c.period > 0
+            AND c.dm IS NOT NULL AND b.ra_deg IS NOT NULL AND {UNREVIEWED}"""):
+        place = (round(r['ra_deg'], 2), round(r['dec_deg'], 2))
+        if place not in cones:
+            cones[place] = psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], PERIODIC_RADIUS_DEG)
+        for pulsar in cones[place]:
+            if abs(r['dm'] - pulsar['dm']) > max(2.0, 0.05 * pulsar['dm']):
+                continue
+            if abs(r['period'] / psrcat.period_at(pulsar, r['tstart_mjd']) - 1) <= psrcat.PERIOD_TOLERANCE:
+                name = pulsar.get('bname') or pulsar['name']
+                name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
+                out.append((r['key'], 'known', f"{name} at its own period and DM, {pulsar['separation_deg']:.2f} deg "
+                            f"from this beam.", r['dm']))
+                break
+    return out
+
+
 def record(cfg, db):
     """Record the verdicts settled() finds; returns how many."""
-    rows = settled(db)
+    rows = settled(db) + periodic_settled(db)
     if rows:
         reviews = store.reviews(cfg)
         try:
