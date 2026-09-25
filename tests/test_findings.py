@@ -186,6 +186,47 @@ def test_a_reviewer_verdict_holds_a_beam(tmp_path):
     assert len(campaign.release_kept({'L603686'})) == 1 and not ff.exists()
 
 
+def snapshot(results, run, detections, node='efc-cpu-00'):
+    """A run's ledger snapshot with these (beam_id, dm, width, snr, type) detections."""
+    path = results/run/node/'ledger-snapshot.sqlite'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS detections (beam_id TEXT, candidate_dm REAL, width_samples INTEGER, '
+                   'snr REAL, detection_type TEXT)')
+        db.executemany('INSERT INTO detections VALUES (?,?,?,?,?)', detections)
+
+
+def verdict(reviews, key, label, created):
+    with sqlite3.connect(reviews) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, key TEXT, reviewer TEXT, label TEXT, '
+                   'note TEXT, dm REAL, created REAL)')
+        db.execute("INSERT INTO reviews(key,reviewer,label,created) VALUES (?,?,?,?)", (key, 'auto-triage', label, created))
+
+
+def test_a_fetch_candidate_holds_its_beam_until_a_verdict_settles_it(tmp_path):
+    # L605714 at sunset: every beam kept for FETCH positives that were an undispersed burst.
+    reviews = tmp_path/'reviews.sqlite'
+    campaign, ff = campaign_with_kept(tmp_path, reviews)
+    results = campaign.root/'results'
+    run = 'campaign-20260925-072955-gpu00'
+    item = beam(results, run, 'L603686', 0, 40)
+    snapshot(results, run, [(item + '.fil', 2.8, 2, 8.139, 'candidate'), (item + '.fil', 3.3, 2, 9.957, 'candidate'),
+                            (item + '.fil', 60.0, 3, 7.5, 'rejected')])
+    first, second = (findings.candidate_key(item + '.fil', 2.8, 2, 8.139),
+                     findings.candidate_key(item + '.fil', 3.3, 2, 9.957))
+    assert first == f'candidate|{item}|DM2.800|W2|SN8.139'          # web.keys.sp_key
+    assert campaign.release_kept({'L999999'}) == [] and ff.exists()   # unreviewed candidates hold it
+    verdict(reviews, first, 'rfi', 1.)
+    verdict(reviews, second, 'unsure', 2.)
+    assert campaign.release_kept({'L999999'}) == [] and ff.exists()   # one open, and unsure protects
+    verdict(reviews, second, 'known', 3.)
+    # Settled, it is judged again although another observation's dispatch asked.
+    released = campaign.release_kept({'L999999'}, run)
+    assert [name for name, _ in released] == ['L1263256_SAP000_B040_P000_bf.tar'] and not ff.exists()
+    assert released[0][1] == '2 FETCH candidate(s) settled'
+    assert campaign.state.rows('SELECT state FROM files')[0]['state'] == 'searched'
+
+
 def test_the_keep_rule_runs_without_numpy(monkeypatch):
     """The campaign driver judges beams on the head's own Python, which has no numpy."""
     import importlib

@@ -845,13 +845,16 @@ class Campaign:
                 self.release_kept(observations, run_name)
         shutil.rmtree(self.root/'dispatch'/run_name, ignore_errors=True)
 
-    def judge(self):
-        """The periodic index, brought up to date with every run, and a judge over it."""
+    def judge(self, settled=frozenset()):
+        """The periodic index, brought up to date with every run, and a judge over it.
+
+        settled: candidate keys whose latest verdict frees their beam (findings.SETTLED).
+        """
         from euroflash.findings import Index, Judge
         if getattr(self, 'periodic_index', None) is None:
             self.periodic_index = Index(self.root)
         self.periodic_index.backfill(self.root/'results')
-        return Judge(self.periodic_index)
+        return Judge(self.periodic_index, settled=settled)
 
     def findings(self, run_name):
         """{beam stem: why} for the beams of one run worth keeping (euroflash.findings)."""
@@ -873,20 +876,26 @@ class Campaign:
 
         A beam kept for a fold loses it when a later SAP of its observation
         shows the fold's frequency across beams at scattered DMs, or when the
-        rule itself changed (`rekeep`). A FETCH candidate, or a reviewer's
-        astro or unsure verdict on any candidate of the beam, always holds it.
+        rule itself changed (`rekeep`). A FETCH candidate holds it until its
+        latest verdict is RFI, noise or a known source (findings.SETTLED);
+        beams whose candidates are all settled are judged again whatever their
+        observation, since the verdicts come later from the web layer. A
+        reviewer's astro or unsure verdict on any candidate of the beam always
+        holds it.
         """
-        from euroflash.findings import reviewed_items
-        judge = self.judge()
+        from euroflash.findings import latest_verdicts, reviewed_items, settled_keys
         reviews = getattr(self.o, 'reviews', None) or self.root.parent/'web'/'reviews.sqlite'
-        protected = reviewed_items(reviews, judge.index)
+        verdicts = latest_verdicts(reviews)
+        judge = self.judge(settled_keys(verdicts))
+        protected = reviewed_items(reviews, judge.index, verdicts=verdicts)
         released = []
         for f in self.state.rows("SELECT * FROM files WHERE state='kept'"):
             beams = [flattened(p) for p in json.loads(f['fil'] or '[]')]
             entries = [judge.index.beams.get(b.stem) for b in beams]
             if not beams or any(e is None for e in entries):
                 continue
-            if observations is not None and not any(e['observation'] in observations for e in entries):
+            if (observations is not None and not any(e['observation'] in observations for e in entries)
+                    and not any(e.get('sp_candidates') and not judge.open_candidates(e) for e in entries)):
                 continue
             if any(b.stem in protected for b in beams):
                 continue
@@ -1118,6 +1127,10 @@ def parser():
     retry = sub.add_parser('retry', help='Queue SAPs in attention for another search of their unsearched beams')
     retry.add_argument('--root', type=Path, required=True)
     retry.add_argument('keys', nargs='*', help='SAP keys; all SAPs in attention with prepared beams if omitted')
+    requeue = sub.add_parser('requeue', help='Stage and search searched SAPs again from the archive')
+    requeue.add_argument('--root', type=Path, required=True)
+    requeue.add_argument('--reason', required=True, help='Recorded with each SAP')
+    requeue.add_argument('keys', nargs='+', help='SAP keys')
     return p
 
 
@@ -1134,6 +1147,32 @@ def retry_saps(root, keys=()):
             state.set_sap(sap['key'], state='prepared', run_name=None, detail='retry requested: ' + (sap['detail'] or ''))
             state.event('retry', sap['key'], sap['detail'])
             queued.append(sap['key'])
+    return queued
+
+
+def requeue_saps(root, keys, reason):
+    """Put searched SAPs back at the start: every beam is staged, converted and searched again.
+
+    For a search that went wrong after the data were deleted: the 25 SAPs of
+    fingerprint ec416ee2 (23-24 September) had their strongest periodic peaks
+    removed by a multi-beam veto that deleted bright pulsars, J0323+3944 among
+    them, and were never folded. Beams the campaign kept are staged again
+    too: flatfielding needs every central beam of the SAP. Only SAPs that
+    finished (searched or attention) are taken; returns their keys.
+    """
+    state = State(Path(root)/'campaign-state.sqlite')
+    queued = []
+    for key in keys:
+        found = state.rows("SELECT state FROM saps WHERE key=?", key)
+        if not found or found[0]['state'] not in ('searched', 'attention'):
+            continue
+        with state.db() as db:
+            db.execute("UPDATE files SET state='pending',request_id=NULL,failures=0,locality=NULL,checked=NULL,"
+                       "detail=?,updated=? WHERE sap_key=? AND state<>'excluded'",
+                       (f'requeued: {reason}'[:2000], time.time(), key))
+        state.set_sap(key, state='pending', run_name=None, detail=f'requeued: {reason}'[:2000])
+        state.event('requeued', key, reason)
+        queued.append(key)
     return queued
 
 
@@ -1162,6 +1201,9 @@ def main(argv=None):
         return
     if a.command == 'retry':
         print('Queued for another search:', ' '.join(retry_saps(a.root, a.keys)) or 'nothing')
+        return
+    if a.command == 'requeue':
+        print('Queued to be staged and searched again:', ' '.join(requeue_saps(a.root, a.keys, a.reason)) or 'nothing')
         return
     if a.command == 'rekeep':
         print(json.dumps(rekeep(a.root, a.reviews, a.apply), indent=2))

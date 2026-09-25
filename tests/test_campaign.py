@@ -577,6 +577,30 @@ def test_retry_requeues_attention_saps_with_prepared_beams(tmp_path, monkeypatch
     assert campaign.state.rows('SELECT state FROM saps WHERE key=?', second)[0]['state'] == 'attention'
 
 
+def test_requeue_stages_and_searches_a_searched_sap_again(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL), ('1000001', 1, FULL)], max_staging_saps=2)
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    put_online(api, where, '1000001', 1, FULL)
+    campaign.tick()
+    settle(campaign)
+    first, second = [r['key'] for r in campaign.state.rows('SELECT key FROM saps ORDER BY position')]
+    campaign.state.set_sap(first, state='searched', run_name='run-a')
+    campaign.state.set_sap(second, state='staging')
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET state='searched', failures=2 WHERE sap_key=?", (first,))
+        db.execute("UPDATE files SET state='kept' WHERE sap_key=? AND beam=13", (first,))
+        db.execute("UPDATE files SET state='excluded' WHERE sap_key=? AND beam=12", (first,))
+    assert C.requeue_saps(tmp_path/'campaign', [first, second, 'nope'], 'veto deleted pulsars') == [first]
+    sap = campaign.state.rows('SELECT * FROM saps WHERE key=?', first)[0]
+    assert sap['state'] == 'pending' and sap['run_name'] is None and sap['detail'] == 'requeued: veto deleted pulsars'
+    files = campaign.state.rows('SELECT beam, state, failures, request_id FROM files WHERE sap_key=?', first)
+    assert {f['state'] for f in files if f['beam'] != 12} == {'pending'} and all(f['failures'] == 0 for f in files if f['beam'] != 12)
+    assert [f['state'] for f in files if f['beam'] == 12] == ['excluded']
+    assert campaign.state.rows('SELECT state FROM saps WHERE key=?', second)[0]['state'] == 'staging'
+    assert campaign.state.rows("SELECT kind FROM events WHERE subject=? ORDER BY time DESC LIMIT 1", first)[0]['kind'] == 'requeued'
+
+
 def test_raw_reclaim_removes_only_archives_with_evidence(tmp_path):
     from euroflash.reclaim import survey_raw
     ledger = Ledger(tmp_path/'ledger.sqlite')

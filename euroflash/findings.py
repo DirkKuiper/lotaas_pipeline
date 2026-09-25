@@ -2,7 +2,11 @@
 
 A beam's flatfielded filterbank (1.2 GB) is kept for review when FETCH
 accepted one of its single-pulse candidates, or when one of its periodic folds
-is worth a look. Judged beam by beam, a fold was worth a look unless the fold
+is worth a look. A FETCH candidate stops holding its beam once its latest
+verdict in the web layer's reviews.sqlite says it is nothing to keep data for
+(SETTLED: RFI, noise or a known source, given by a person or by web.triage):
+on 25 September 316 of the 489 beams kept overnight held nothing else, 219 of
+them the whole of L605714 for an undispersed burst at sunset. Judged beam by beam, a fold was worth a look unless the fold
 itself was flagged, and in the first night under the per-SAP veto 44% of beams
 were kept: 847 of the 849 for folds, most of them interference that one beam
 cannot recognise or a known pulsar seen away from its own beam. A fold is not
@@ -39,6 +43,8 @@ import sqlite3
 from euroflash import psrcat
 
 INDEX = 'periodic-index.jsonl'
+# Latest verdicts under which a FETCH candidate no longer holds its beam's filterbank.
+SETTLED = ('rfi', 'noise', 'known')
 ITEM = re.compile(r'(L\d+)_SAP(\d+)_BEAM(\d+)')
 MIN_DM = 2.0
 MAX_DM = 1000.0
@@ -110,18 +116,33 @@ def beam_summary(output, run_name):
 
 def run_candidates(run_dir):
     """FETCH-accepted single-pulse candidates per beam stem in one run's ledger snapshots."""
-    counts = {}
+    return {stem: len(keys) for stem, keys in run_candidate_keys(run_dir).items()}
+
+
+def candidate_key(beam_id, dm, width, snr):
+    """The web layer's key for a FETCH candidate (web.keys.sp_key): its verdicts carry it.
+
+    None when the ledger lacks a value: no verdict can reach that candidate, so it holds its beam.
+    """
+    if None in (dm, width, snr):
+        return None
+    return f'candidate|{Path(beam_id).stem}|DM{float(dm):.3f}|W{int(width)}|SN{float(snr):.3f}'
+
+
+def run_candidate_keys(run_dir):
+    """{beam stem: [key]} of the FETCH-accepted single-pulse candidates in one run's ledger snapshots."""
+    keys = {}
     for snapshot in Path(run_dir).glob('*/ledger-snapshot.sqlite'):
         db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
         try:
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if 'detections' in tables:
-                for beam, n in db.execute("SELECT beam_id, COUNT(*) FROM detections "
-                                          "WHERE detection_type='candidate' GROUP BY beam_id"):
-                    counts[Path(beam).stem] = counts.get(Path(beam).stem, 0) + n
+                for beam, dm, width, snr in db.execute("SELECT beam_id, candidate_dm, width_samples, snr "
+                                                       "FROM detections WHERE detection_type='candidate'"):
+                    keys.setdefault(Path(beam).stem, []).append(candidate_key(beam, dm, width, snr))
         finally:
             db.close()
-    return counts
+    return keys
 
 
 class Index:
@@ -130,6 +151,7 @@ class Index:
     def __init__(self, root):
         self.path = Path(root)/INDEX
         self.beams, self.runs = {}, set()
+        self._keys = {}
         if self.path.is_file():
             for line in self.path.read_text().splitlines():
                 if line.strip():
@@ -175,6 +197,12 @@ class Index:
     def observation(self, observation):
         return [b for item, b in self.beams.items() if item and b['observation'] == observation]
 
+    def candidate_keys(self, beam):
+        """The keys of a beam's FETCH candidates in its run, read from the run's ledger snapshots once."""
+        if beam['run'] not in self._keys:
+            self._keys[beam['run']] = run_candidate_keys(self.path.parent/'results'/beam['run'])
+        return self._keys[beam['run']].get(beam['item'], [])
+
 
 def periodic_key(beam, fold):
     """The web layer's key for a fold (web.indexer): its reviews carry it."""
@@ -182,19 +210,29 @@ def periodic_key(beam, fold):
     return 'periodicity|' + hashlib.sha256(f"{beam['item']}|{beam.get('fp')}|{fold.get('plot')}".encode()).hexdigest()
 
 
-def reviewed_items(path, index, labels=('astro', 'unsure')):
-    """Beams with a candidate whose latest verdict is among labels: never released."""
+def latest_verdicts(path):
+    """{key: label} of each candidate's latest verdict in reviews.sqlite; {} without one."""
     path = Path(path) if path else None
     if not path or not path.is_file():
-        return set()
+        return {}
     db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
     try:
-        latest = dict(db.execute('SELECT key, label FROM reviews r WHERE created = '
-                                 '(SELECT MAX(created) FROM reviews v WHERE v.key = r.key)').fetchall())
+        return dict(db.execute('SELECT key, label FROM reviews r WHERE created = '
+                               '(SELECT MAX(created) FROM reviews v WHERE v.key = r.key)').fetchall())
     except sqlite3.Error:
-        return set()
+        return {}
     finally:
         db.close()
+
+
+def settled_keys(verdicts):
+    """Candidates whose latest verdict says there is nothing to keep data for (SETTLED)."""
+    return frozenset(key for key, label in verdicts.items() if label in SETTLED)
+
+
+def reviewed_items(path, index, labels=('astro', 'unsure'), verdicts=None):
+    """Beams with a candidate whose latest verdict is among labels: never released."""
+    latest = latest_verdicts(path) if verdicts is None else verdicts
     wanted = {key for key, label in latest.items() if label in labels}
     items = {key.split('|')[1] for key in wanted if not key.startswith('periodicity|') and key.count('|') >= 1}
     for item, beam in index.beams.items():
@@ -206,8 +244,9 @@ def reviewed_items(path, index, labels=('astro', 'unsure')):
 class Judge:
     """Decides, fold by fold, what keeps a filterbank; built once per decision round."""
 
-    def __init__(self, index, pulsars=None):
+    def __init__(self, index, pulsars=None, settled=frozenset()):
         self.index = index
+        self.settled = settled
         self.pulsars = psrcat.load() if pulsars is None else pulsars
         self._cones = {}
         # Interference lines: frequencies that formed a family across beams at
@@ -307,11 +346,23 @@ class Judge:
             return f'family of {len(beams)} beams in {len(saps)} SAPs'
         return None
 
+    def open_candidates(self, beam):
+        """How many of a beam's FETCH candidates hold it: those without a settling verdict.
+
+        All of them when the run's ledger snapshots no longer say which they were.
+        """
+        count = beam.get('sp_candidates') or 0
+        if not count or not self.settled:
+            return count
+        keys = self.index.candidate_keys(beam)
+        return sum(1 for key in keys if key not in self.settled) if keys else count
+
     def keep(self, beam):
-        """(keep?, why): FETCH candidates always keep; else the first fold worth a look."""
-        if beam.get('sp_candidates'):
-            return True, f"{beam['sp_candidates']} FETCH candidate(s)"
-        reasons = []
+        """(keep?, why): FETCH candidates without a settling verdict keep; else the first fold worth a look."""
+        held = self.open_candidates(beam)
+        if held:
+            return True, f"{held} FETCH candidate(s)"
+        reasons = [f"{beam['sp_candidates']} FETCH candidate(s) settled"] if beam.get('sp_candidates') else []
         for fold in beam['folds']:
             why = self.reason(fold, beam)
             if why is None:
