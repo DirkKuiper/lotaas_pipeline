@@ -45,6 +45,8 @@ from euroflash import psrcat
 INDEX = 'periodic-index.jsonl'
 # Latest verdicts under which a FETCH candidate no longer holds its beam's filterbank.
 SETTLED = ('rfi', 'noise', 'known')
+# Why a searched beam is kept while none of its run's periodic results can be read yet.
+AWAITING = 'periodic results not read yet'
 ITEM = re.compile(r'(L\d+)_SAP(\d+)_BEAM(\d+)')
 MIN_DM = 2.0
 MAX_DM = 1000.0
@@ -119,6 +121,21 @@ def run_candidates(run_dir):
     return {stem: len(keys) for stem, keys in run_candidate_keys(run_dir).items()}
 
 
+def periodic_items(run_dir):
+    """Beam stems whose periodic search succeeded in one run, by its ledger snapshots."""
+    items = set()
+    for snapshot in Path(run_dir).glob('*/ledger-snapshot.sqlite'):
+        db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
+        try:
+            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'attempts' in tables:
+                items |= {Path(item).stem for (item,) in db.execute(
+                    "SELECT DISTINCT item FROM attempts WHERE stage='periodicity' AND status='success'")}
+        finally:
+            db.close()
+    return items
+
+
 def candidate_key(beam_id, dm, width, snr):
     """The web layer's key for a FETCH candidate (web.keys.sp_key): its verdicts carry it.
 
@@ -146,11 +163,18 @@ def run_candidate_keys(run_dir):
 
 
 class Index:
-    """periodic-index.jsonl: one line per searched beam and run; the latest run of a beam wins."""
+    """periodic-index.jsonl: one line per searched beam and run; the latest run of a beam wins.
+
+    A run whose periodic results could not be read yet is recorded without beams
+    and read again at each backfill until they can: the driver judges a run when
+    its dispatch exits, and on 25 September the CPU tier's results of 112 runs
+    appeared on the head about a minute later, so those runs held no beams, their
+    folds kept nothing and their kept beams could never be judged again.
+    """
 
     def __init__(self, root):
         self.path = Path(root)/INDEX
-        self.beams, self.runs = {}, set()
+        self.beams, self.runs, self.empty = {}, set(), set()
         self._keys = {}
         if self.path.is_file():
             for line in self.path.read_text().splitlines():
@@ -159,11 +183,15 @@ class Index:
 
     def _take(self, entry):
         self.runs.add(entry['run'])
+        if not entry.get('item'):
+            self.empty.add(entry['run'])
+            return
+        self.empty.discard(entry['run'])
         current = self.beams.get(entry['item'])
         if current is None or entry['run'] >= current['run']:
             self.beams[entry['item']] = entry
 
-    def add_run(self, run_dir):
+    def add_run(self, run_dir, record_empty=True):
         """Record every beam a run searched; returns their entries."""
         run_dir = Path(run_dir)
         candidates = run_candidates(run_dir)
@@ -179,20 +207,27 @@ class Index:
         with self.path.open('a') as stream:
             for entry in entries:
                 stream.write(json.dumps(entry, sort_keys=True) + '\n')
-            if not entries:
+            if not entries and record_empty:
                 stream.write(json.dumps({'run': run_dir.name, 'item': None}) + '\n')
         for entry in entries:
             self._take(entry)
+        if not entries:
+            self.empty.add(run_dir.name)
         self.runs.add(run_dir.name)
         return entries
 
     def backfill(self, results):
-        """Add every run under results/ that is not indexed yet."""
+        """Add every run under results/ not indexed yet, and those whose results could not be read before."""
         added = []
         for run_dir in sorted(Path(results).iterdir()):
-            if run_dir.is_dir() and run_dir.name not in self.runs:
-                added += self.add_run(run_dir)
+            if run_dir.is_dir() and (run_dir.name not in self.runs or run_dir.name in self.empty):
+                added += self.add_run(run_dir, record_empty=run_dir.name not in self.runs)
         return added
+
+    def read(self, item, run_name):
+        """Whether the index holds this run's results of the beam."""
+        entry = self.beams.get(item)
+        return entry is not None and entry['run'] == run_name
 
     def observation(self, observation):
         return [b for item, b in self.beams.items() if item and b['observation'] == observation]
