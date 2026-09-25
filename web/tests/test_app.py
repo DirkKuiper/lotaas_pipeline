@@ -278,6 +278,9 @@ def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, c
     assert 'J0845+6900' not in page and 'J1200+4500' not in page         # not LOTAAS; not searched yet
     row = page.split('J0847+6830')[1].split('</tr>')[0]
     assert 'discovery' in row and 'flag ok">both' in row and '(1/2)' in row and 'best S/N 14.0' in row
+    # The link opens the redetection, not whichever event of the beam has the lowest id.
+    redetection = Indexer(cfg).db.execute("SELECT id FROM candidates WHERE type='known_pulsar'").fetchone()[0]
+    assert f'href="/verify/{redetection}">1, best S/N 14.0' in row
     row = page.split('J0850+6800')[1].split('</tr>')[0]
     assert 'RRAT' in row and 'single pulse' in row and 'not found' in row
     everything = client.get('/lotaas?show=all').text
@@ -305,3 +308,96 @@ def test_the_viewer_opens_in_detail_and_offers_the_other_views(cfg, campaign):
     assert initial['view']['smooth'] == 1.0 and initial['view']['nsub'] == candidate['presets']['detail'][0]
     plain = client.get(f'/api/sp/{cid}/view?smooth=0&nsub=8&tscrunch=3').json()
     assert plain['smooth'] == 0 and plain['nsub'] == 8 and plain['smoothed_pixel_snr'] is None
+
+
+def beam_results(cfg, number, clustered=(), dec='+68:24:59.00'):
+    """A searched beam of ITEM's observation on disk, with these (dm, snr, time, width) cluster centres."""
+    item = ITEM.replace('BEAM025', f'BEAM{number:03d}')
+    beam_dir = cfg.result_roots[0] / 'run-a' / 'efc-gpu-01' / 'processed' / item / 'ffffffffffffffff'
+    beam_dir.mkdir(parents=True, exist_ok=True)
+    (beam_dir / 'metadata.json').write_text(json.dumps({
+        'pilot': False, 'tsamp': 0.007864319719374176, 'nu_min': 119.45, 'nu_max': 151.04, 'tstart_mjd': 57713.16,
+        'observation_info': {'RA (J2000)': '08:47:08.00', 'DEC (J2000)': dec, 'Object': 'LOTAAS-P1254B-SAP0'}}))
+    (beam_dir / 'clustered_candidates.txt').write_text(
+        'DM\tS/N\tTime\tSample\tFilter_Width\tDM_scaled\tCluster\n'
+        + ''.join(f'{dm}\t{snr}\t{time}\t1\t{width}\t0\t{i}\n' for i, (dm, snr, time, width) in enumerate(clustered)))
+    return item
+
+
+def verdicts(cfg):
+    from web import store
+    db = store.reviews(cfg)
+    try:
+        return [dict(r) for r in db.execute('SELECT key, reviewer, label, note FROM reviews')]
+    finally:
+        db.close()
+
+
+def test_an_undispersed_burst_across_beams_is_interference_even_at_one_low_dm(cfg, campaign):
+    # L605714 at sunset: in every beam an undispersed burst peaked below DM 2, which the
+    # classifier never records, and only its DM 2-4 tail reached FETCH. The tails agree
+    # within 1.5 of one DM, like a pulsar in neighbouring beams; the beams' own cluster
+    # centres below DM 2 show what the burst was.
+    per_dm = 4148.808 * (1 / (119.45 * 151.04) - 1 / 151.04 ** 2)
+    for number in range(60, 65):
+        beam_results(cfg, number, [(0.4, 9.0, 300.0 - 0.4 * per_dm, 2)])
+    add_detections(campaign, [(60 + i, dm, 8.5, 2, 'candidate', None, 300.0 - dm * per_dm)
+                              for i, dm in enumerate((2.4, 2.9, 3.3, 3.8, 2.6))])
+    # A bright pulsar's pulse in five neighbouring beams, all at its DM, no burst below DM 2.
+    for number in range(70, 75):
+        beam_results(cfg, number)
+    add_detections(campaign, [(70 + i, 26.2, 20.0 - i, 1, 'known_pulsar', 'J0323+3944', 2465.645) for i in range(5)])
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    client = client_for(cfg)
+    shown = client.get('/single-pulse').text
+    assert 'B060' not in shown and 'B064' not in shown and '(5 hidden)' in shown
+    assert shown.count('5 beams</span>') == 5                    # the pulsar's pulses stay
+    page = client.get('/verify/' + client.get('/single-pulse?coincident=include').text
+                      .split('B062')[0].rsplit('href="/verify/', 1)[1].split('?')[0]).text
+    assert 'scattered DMs: interference' in page
+    recorded = verdicts(cfg)
+    assert sorted(v['label'] for v in recorded) == ['rfi'] * 5
+    assert all(v['reviewer'] == 'auto-triage' and '4 of the 9 events there below DM 1' in v['note'] for v in recorded)
+    indexer.run_pass()
+    assert len(verdicts(cfg)) == 5                               # recorded once
+    listing = client.get('/single-pulse?coincident=include&review=rfi').text
+    assert listing.count('RFI</span>') == 5
+
+
+def test_a_known_pulsar_seen_away_from_its_beam_is_recognised(cfg, campaign, monkeypatch, tmp_path):
+    # B0823+26 in L611400: FETCH positives in 33 beams up to 3.6 degrees away, on its rotation.
+    catalogue = tmp_path / 'psrcat.db'
+    catalogue.write_text(
+        'PSRJ     J0850+6625\nPSRB     B0845+66\nRAJ      08:50:00.0\nDECJ     +66:25:00\nDM       19.5\n'
+        'P0       0.5306\n@----\n'
+        'PSRJ     J0851+6630\nRAJ      08:51:00.0\nDECJ     +66:30:00\nDM       40.0\nP0       1.0\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    for number in range(30, 40):
+        beam_results(cfg, number)
+    period = 0.5306
+    on = [(30 + k % 10, 19.4 + 0.02 * (k % 10), 9.0 + k % 4, 2, 'candidate', None, 100.0 + 7 * k * period + 0.004 * (k % 3))
+          for k in range(20)]
+    off = [(33, 19.5, 8.0, 2, 'candidate', None, 100.0 + 51.5 * period)]           # half a turn out
+    other = [(35, 40.0, 8.0, 2, 'candidate', None, 500.0), (36, 40.1, 8.0, 2, 'candidate', None, 900.0)]
+    add_detections(campaign, on + off + other)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    known = {r['key']: dict(r) for r in indexer.db.execute('SELECT * FROM sp_known')}
+    assert len(known) == 20 and all(k['name'] == 'B0845+66' and 'rotation' in k['route'] and k['z'] > 15
+                                    for k in known.values())
+    assert 1.9 < min(k['separation_deg'] for k in known.values()) < 2.1
+    client = client_for(cfg)
+    shown = client.get('/single-pulse').text
+    assert '(20 hidden)' in shown and shown.count('B0845+66 2.0°') == 0
+    body = shown.split('<tbody>')[1]
+    # The pulse off the rotation, and the other pulsar's two (no fold shows it is there), stay.
+    assert '<td class="num">19.50</td>' in body and '<td class="num">40.00</td>' in body and '40.10' in body
+    everything = client.get('/single-pulse?known=include').text
+    assert everything.count('B0845+66 2.0°</span>') == 20
+    cid = everything.split('B0845+66 2.0°')[0].rsplit('href="/verify/', 1)[1].split('?')[0]
+    page = client.get(f'/verify/{cid}').text
+    assert 'these pulses keep its rotation' in page and 'a known pulsar seen away from its own beam' in page
+    recorded = verdicts(cfg)
+    assert sorted(v['label'] for v in recorded) == ['known'] * 20
+    assert all(v['key'] in known and 'B0845+66 (J0850+6625), 2.0' in v['note'] for v in recorded)

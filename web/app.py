@@ -58,6 +58,11 @@ MULTIBEAM_BEAMS = 4
 COINCIDENT_BEAMS = 5
 
 
+# How indexer.derive_known saw that a pulsar was in the observation.
+KNOWN_ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
+                'rotation': 'these pulses keep its rotation'}
+
+
 # The periodic search's shortest period; millisecond pulsars are out of its reach.
 MIN_PERIOD_SECONDS = 0.016
 
@@ -626,6 +631,9 @@ def create_app(cfg, run_background=True):
             args.append('%' + params['q'] + '%')
         if kind == 'sp' and params.get('coincident') != 'include':
             clauses.append(f'NOT EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key AND {coincident_sql("x")})')
+        if kind == 'sp' and params.get('known') != 'include':
+            # Pulses of a catalogued pulsar seen away from its own beam (indexer.derive_known).
+            clauses.append('NOT EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key)')
         if kind == 'periodic' and params.get('multibeam') != 'include':
             clauses.append(f'NOT EXISTS (SELECT 1 FROM periodic_families pf WHERE pf.key=c.key '
                            f'AND {multibeam_sql("pf")})')
@@ -695,21 +703,27 @@ def create_app(cfg, run_background=True):
                     t.status AS triage_status, t.score AS repeatability, t.members AS group_members,
                     t.reasons AS triage_reasons, x.beams AS coincident_beams, x.saps AS coincident_saps,
                     x.dm_min AS coincident_dm_min, x.dm_max AS coincident_dm_max,
-                    COALESCE({coincident_sql('x')}, 0) AS coincident
+                    COALESCE({coincident_sql('x')}, 0) AS coincident,
+                    k.name AS known_name, k.separation_deg AS known_separation, k.route AS known_route
                 FROM candidates c LEFT JOIN periodic p ON p.key=c.key
                 LEFT JOIN periodic_families f ON f.key=c.key
                 LEFT JOIN periodic_triage t ON t.key=c.key
-                LEFT JOIN sp_coincidence x ON x.key=c.key WHERE {where}
+                LEFT JOIN sp_coincidence x ON x.key=c.key
+                LEFT JOIN sp_known k ON k.key=c.key WHERE {where}
                 ORDER BY {ordering(params)} LIMIT 100 OFFSET ?""", *args, (number_ - 1) * 100)
             # Counts per type under the other filters, for the type selector.
             every, every_args, _ = candidate_filter(dict(params, type='all'))
             types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
                                     every_args).fetchall())
             triage_counts = {}
-            hidden = 0
+            hidden = known_hidden = 0
             if kind == 'sp' and params.get('coincident') != 'include':
                 shown, shown_args, _ = candidate_filter(dict(params, coincident='include'))
                 hidden = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0] - count
+            if kind == 'sp' and params.get('known') != 'include':
+                shown, shown_args, _ = candidate_filter(dict(params, known='include'))
+                known_hidden = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}',
+                                          shown_args).fetchone()[0] - count
             if kind == 'periodic':
                 all_where, all_args, _ = candidate_filter(dict(params, triage='all'))
                 triage_counts = dict(db.execute(f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)
@@ -722,7 +736,7 @@ def create_app(cfg, run_background=True):
         query = urlencode({k: v for k, v in params.items() if k not in ('page', 'kind')})
         return page(request, template, found=found, count=count, params=params, number=number_,
                     pages=max(1, math.ceil(count / 100)), types=types, query=query, kind=kind,
-                    triage_counts=triage_counts, coincident_hidden=hidden)
+                    triage_counts=triage_counts, coincident_hidden=hidden, known_hidden=known_hidden)
 
     @app.get('/single-pulse', response_class=HTMLResponse)
     def single_pulse(request: Request):
@@ -789,6 +803,10 @@ def create_app(cfg, run_background=True):
             coincidence = db.execute(f'SELECT x.*, {coincident_sql("x")} AS rfi FROM sp_coincidence x WHERE x.key=?',
                                      (candidate['key'],)).fetchone()
             coincidence = dict(coincidence) if coincidence else None
+            known = db.execute('SELECT * FROM sp_known WHERE key=?', (candidate['key'],)).fetchone()
+            known = dict(known) if known else None
+            if known:
+                known['evidence'] = ', '.join(KNOWN_ROUTES[r] for r in known['route'].split('+') if r in KNOWN_ROUTES)
             others = rows(db, """SELECT id, type, dm, snr, time FROM candidates WHERE item=? AND id<>?
                 AND kind=? ORDER BY snr DESC LIMIT 12""", candidate['item'], cid, candidate['kind'])
         initial = {}
@@ -823,7 +841,8 @@ def create_app(cfg, run_background=True):
                        snippet=json.loads(snippet['meta']) if snippet else None, others=others,
                        observed=beam_run['observation_date'] if beam_run else None,
                        labels=LABELS, kept=kept, initial=initial, display=display,
-                       section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence)
+                       section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence,
+                       known=known)
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
             context.update(family=family, relatives=relatives, triage=triage)
@@ -837,7 +856,7 @@ def create_app(cfg, run_background=True):
     def pulsar_summary(db):
         found = rows(db, """SELECT k.*,
                 (SELECT id FROM candidates c WHERE c.kind='sp' AND c.item=k.sp_item AND c.snr=k.sp_best_snr
-                 LIMIT 1) AS sp_id,
+                 ORDER BY c.type='known_pulsar' DESC LIMIT 1) AS sp_id,
                 (SELECT id FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
                  AND c.snr=k.periodic_best LIMIT 1) AS periodic_id
             FROM catalogue_pulsars k""")
@@ -881,7 +900,14 @@ def create_app(cfg, run_background=True):
                     'missed': 'Searched but not found', 'found': 'Redetected'}
 
     def lotaas_summary(db):
-        rows_ = rows(db, 'SELECT * FROM lotaas_sources')
+        # The links open the redetection itself, as on /pulsars: the lowest id of the beam's
+        # candidates was any event there (a FETCH reject at DM 2164.8 for B0823+26).
+        rows_ = rows(db, """SELECT k.*,
+                (SELECT id FROM candidates c WHERE c.kind='sp' AND c.item=k.sp_item AND c.snr=k.sp_best_snr
+                 ORDER BY c.type='known_pulsar' DESC LIMIT 1) AS sp_id,
+                (SELECT id FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
+                 AND c.snr=k.periodic_best LIMIT 1) AS periodic_id
+            FROM lotaas_sources k""")
         for k in rows_:
             k['searched'] = k['observation'] is not None
             k['status'] = ('not searched yet' if not k['searched'] else
@@ -913,9 +939,6 @@ def create_app(cfg, run_background=True):
         show = show if show in LOTAAS_SHOWS else 'searched'
         with store.reading(cfg) as db:
             found, summary = lotaas_summary(db)
-            ids = {(r['kind'], r['item']): r['id'] for r in rows(db, """SELECT c.kind, c.item, MIN(c.id) AS id
-                FROM candidates c JOIN lotaas_sources l ON c.item IN (l.sp_item, l.periodic_item)
-                GROUP BY c.kind, c.item""")}
         chosen = {'searched': lambda k: k['searched'], 'all': lambda k: True,
                   'discoveries': lambda k: k['discovery'], 'single': lambda k: k['lotaas_single'],
                   'missed': lambda k: k['status'] == 'missed',
@@ -924,9 +947,6 @@ def create_app(cfg, run_background=True):
         order = {'both': 0, 'periodic': 1, 'single pulses': 2, 'missed': 3, 'out of reach': 4, 'not searched yet': 5}
         shown = sorted((k for k in found if chosen(k)),
                        key=lambda k: (order[k['status']], k['separation_deg'] if k['searched'] else 0, k['psrj']))
-        for k in shown:
-            k['sp_id'] = ids.get(('sp', k['sp_item']))
-            k['periodic_id'] = ids.get(('periodic', k['periodic_item']))
         return page(request, 'lotaas.html', found=shown, summary=summary, show=show, shows=LOTAAS_SHOWS,
                     searched_radius=SEARCHED_RADIUS_DEG, beam_radius=BEAM_RADIUS_DEG)
 

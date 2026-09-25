@@ -96,9 +96,18 @@ CREATE TABLE IF NOT EXISTS candidates (key TEXT PRIMARY KEY, id TEXT UNIQUE, kin
 CREATE INDEX IF NOT EXISTS candidates_type ON candidates(type, snr);
 CREATE INDEX IF NOT EXISTS candidates_item ON candidates(item, kind);
 CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, meta TEXT);
--- A single-pulse candidate and the events at its moment in other beams of its observation.
+-- A single-pulse candidate and the events at its moment in other beams of its observation:
+-- near_zero of those events (its own included) lie below DM 1.
 CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, saps INTEGER,
-    dm_min REAL, dm_max REAL, consistent INTEGER);
+    dm_min REAL, dm_max REAL, consistent INTEGER, near_zero INTEGER, events INTEGER);
+-- Cluster centres below the classifier's min_dm, which no candidate records; read from each
+-- beam's clustered_candidates.txt (sp_low_dm_read: the beams read so far).
+CREATE TABLE IF NOT EXISTS sp_low_dm (dir TEXT, item TEXT, dm REAL, snr REAL, time REAL, width INTEGER);
+CREATE INDEX IF NOT EXISTS sp_low_dm_dir ON sp_low_dm(dir);
+CREATE TABLE IF NOT EXISTS sp_low_dm_read (dir TEXT PRIMARY KEY);
+-- A single pulse of a catalogued pulsar seen away from its own beam (indexer.derive_known).
+CREATE TABLE IF NOT EXISTS sp_known (key TEXT PRIMARY KEY, pulsar TEXT, name TEXT, separation_deg REAL,
+    route TEXT, z REAL);
 -- Every catalogued pulsar near a campaign-searched beam, what LOFAR has published of it, and what the search found.
 DROP TABLE IF EXISTS pulsar_recovery;
 CREATE TABLE IF NOT EXISTS catalogue_pulsars (psrj TEXT PRIMARY KEY, bname TEXT, dm REAL, period REAL,
@@ -132,7 +141,8 @@ LABELS = {'rfi': 'RFI', 'noise': 'Noise', 'known': 'Known source', 'astro': 'Ast
 RETIRED = {'candidates': ('slack_sent',), 'reviews': ('slack_ts',)}
 # Columns added since, given to databases made before them: a SAP's source is 'lta' or
 # 'spider' (early-cycle beams fetched from SPIDER, euroflash.spider).
-ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),)}
+ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
+         'sp_coincidence': (('near_zero', 'INTEGER'), ('events', 'INTEGER'))}
 
 
 def _connect(path, schema):

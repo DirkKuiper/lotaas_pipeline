@@ -43,6 +43,9 @@ class Config:
     # Also keep snippets of FETCH rejects scoring above this; None keeps none.
     rejected_above: float | None = None
     exclude_beams: list = field(default_factory=lambda: [12])
+    # Record the verdicts the data settle (web.triage): pulses of known pulsars seen away
+    # from their beam, and undispersed bursts across many beams.
+    auto_triage: bool = True
     # Ask for the token cookie; off only for tests on a private machine.
     auth: bool = True
     control_dir: Path = Path('~/.ssh/control').expanduser()
