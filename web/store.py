@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, 
 CREATE TABLE IF NOT EXISTS sp_low_dm (dir TEXT, item TEXT, dm REAL, snr REAL, time REAL, width INTEGER);
 CREATE INDEX IF NOT EXISTS sp_low_dm_dir ON sp_low_dm(dir);
 CREATE TABLE IF NOT EXISTS sp_low_dm_read (dir TEXT PRIMARY KEY);
+-- A single-pulse event among a burst of events of its own beam at one moment at scattered DMs,
+-- none standing out (indexer.derive_coincidence): an undispersed burst seen in one beam.
+CREATE TABLE IF NOT EXISTS sp_sweep (key TEXT PRIMARY KEY, events INTEGER, expected REAL, dm_min REAL,
+    dm_max REAL, peak_ratio REAL);
 -- A single pulse of a catalogued pulsar seen away from its own beam (indexer.derive_known).
 CREATE TABLE IF NOT EXISTS sp_known (key TEXT PRIMARY KEY, pulsar TEXT, name TEXT, separation_deg REAL,
     route TEXT, z REAL);

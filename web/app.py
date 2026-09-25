@@ -803,6 +803,8 @@ def create_app(cfg, run_background=True):
             coincidence = db.execute(f'SELECT x.*, {coincident_sql("x")} AS rfi FROM sp_coincidence x WHERE x.key=?',
                                      (candidate['key'],)).fetchone()
             coincidence = dict(coincidence) if coincidence else None
+            sweep = db.execute('SELECT * FROM sp_sweep WHERE key=?', (candidate['key'],)).fetchone()
+            sweep = dict(sweep) if sweep else None
             known = db.execute('SELECT * FROM sp_known WHERE key=?', (candidate['key'],)).fetchone()
             known = dict(known) if known else None
             if known:
@@ -842,7 +844,7 @@ def create_app(cfg, run_background=True):
                        observed=beam_run['observation_date'] if beam_run else None,
                        labels=LABELS, kept=kept, initial=initial, display=display,
                        section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence,
-                       known=known)
+                       known=known, sweep=sweep)
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
             context.update(family=family, relatives=relatives, triage=triage)

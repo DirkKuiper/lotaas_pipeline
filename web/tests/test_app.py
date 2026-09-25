@@ -437,3 +437,68 @@ def test_a_fold_at_a_catalogued_pulsars_own_period_is_settled(cfg, campaign, mon
     recorded = verdicts(cfg)
     assert [v['label'] for v in recorded] == ['known']
     assert 'B0823+26 (J0826+2637) at its own period and DM, 2.51 deg' in recorded[0]['note']
+
+
+PER_DM = 4148.808 * (1 / (119.45 * 151.04) - 1 / 151.04 ** 2)   # s of band-averaged delay per unit DM
+
+
+def test_a_burst_at_scattered_dms_in_one_beam_is_interference(cfg, campaign):
+    # L606808 SAP002 B073: seven events at one undispersed moment, DM 3-148, all at S/N 7.0-7.3.
+    burst = [(40, dm, snr, 3, kind, None, 1041.0 - dm * PER_DM) for dm, snr, kind in
+             ((3.0, 7.2, 'rejected'), (38.1, 7.2, 'candidate'), (62.0, 7.3, 'candidate'), (66.6, 7.3, 'unconfirmed'),
+              (103.7, 7.3, 'candidate'), (127.9, 7.1, 'unconfirmed'), (147.5, 7.0, 'unconfirmed'))]
+    # A bright pulse and the tails of its DM curve: one DM stands out.
+    pulse = [(41, dm, snr, 2, kind, None, 2000.0 - dm * PER_DM) for dm, snr, kind in
+             ((26.2, 40.0, 'candidate'), (5.0, 7.5, 'rejected'), (15.0, 7.6, 'rejected'), (40.0, 7.5, 'rejected'),
+              (60.0, 7.4, 'rejected'))]
+    # A busy beam: four events at one moment are its ordinary rate, not a burst.
+    busy = [(42, 10.0 + (i * 37) % 900, 7.1, 2, 'rejected', None, t) for i, t in
+            enumerate(x for x in range(20, 3600, 3) if abs(x - 2600) > 20)]
+    busy += [(42, dm, 7.2, 2, kind, None, 2600.0 - dm * PER_DM) for dm, kind in
+             ((12.0, 'candidate'), (55.0, 'rejected'), (90.0, 'rejected'), (140.0, 'rejected'))]
+    add_detections(campaign, burst + pulse + busy)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    from web.keys import parse_item
+    swept = {(parse_item(r['key'].split('|')[1])[2], r['key'].split('|')[2])
+             for r in indexer.db.execute('SELECT key FROM sp_sweep')}
+    assert swept == {(40, f'DM{dm:.3f}') for dm in (3.0, 38.1, 62.0, 66.6, 103.7, 127.9, 147.5)}
+    recorded = verdicts(cfg)
+    assert sorted(v['key'].split('|')[2] for v in recorded) == ['DM103.700', 'DM38.100', 'DM62.000']
+    assert all(v['label'] == 'rfi' and 'Undispersed burst in this beam: 7 events' in v['note'] for v in recorded)
+    cid = indexer.db.execute("SELECT id FROM candidates WHERE item LIKE '%BEAM040%' AND dm=62.0").fetchone()[0]
+    assert 'A burst in this beam: 7 events' in client_for(cfg).get(f'/verify/{cid}').text
+
+
+def test_a_redetection_inside_a_burst_is_not_the_pulsar(cfg, campaign, monkeypatch, tmp_path):
+    # L605714 SAP001 B003: B1737+13 'redetected' by one of twelve events of a burst, no pulse at its DM.
+    from web import store
+    from web.keys import sp_key
+    catalogue = tmp_path / 'psrcat.db'
+    catalogue.write_text('PSRJ     J0847+6825\nPSRB     B0842+68\nRAJ      08:47:08.0\nDECJ     +68:24:59\n'
+                         'DM       48.668\nP0       0.8031\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    fold(campaign['beam_dir'], 48.7, 0.8031 * (1 - 7e-5), 389.0, 'psr')        # the pulsar is in the beam
+    burst = [(25, dm, snr, 127, kind, None, 1458.5 - dm * PER_DM) for dm, snr, kind in
+             ((0.7, 8.2, 'rejected'), (9.3, 8.1, 'rejected'), (21.0, 8.3, 'unconfirmed'), (35.2, 8.0, 'rejected'),
+              (61.5, 8.1, 'candidate'), (74.0, 8.2, 'rejected'), (96.7, 8.3, 'rejected'))]
+    add_detections(campaign, burst + [(25, 48.6, 8.4, 127, 'known_pulsar', 'J0847+6825', 1458.5 - 48.6 * PER_DM)])
+    item = ITEM
+    redetection = sp_key('known_pulsar', item, 48.6, 127, 8.4)
+    positive = sp_key('candidate', item, 61.5, 127, 8.1)
+    indexer = Indexer(cfg)
+    db = store.reviews(cfg)
+    with db:   # the triage's earlier verdict, and a person's
+        db.execute("INSERT INTO reviews(key,reviewer,label,note,created) VALUES (?,?,?,?,?)",
+                   (redetection, 'auto-triage', 'known', 'earlier', 1.0))
+        db.execute("INSERT INTO reviews(key,reviewer,label,note,created) VALUES (?,?,?,?,?)",
+                   (positive, 'Dirk', 'unsure', 'look again', 1.0))
+    db.close()
+    indexer.run_pass()
+    assert indexer.db.execute('SELECT COUNT(*) FROM sp_known').fetchone()[0] == 0
+    recorded = verdicts(cfg)
+    latest = [v for v in recorded if v['key'] == redetection][-1]
+    assert latest['label'] == 'rfi' and "Replaces this triage's earlier 'known'" in latest['note']
+    assert [v['reviewer'] for v in recorded if v['key'] == positive] == ['Dirk']      # a person's stands
+    indexer.run_pass()
+    assert len(verdicts(cfg)) == len(recorded)                                          # nothing repeated
