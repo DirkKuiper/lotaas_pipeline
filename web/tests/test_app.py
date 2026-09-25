@@ -401,3 +401,24 @@ def test_a_known_pulsar_seen_away_from_its_beam_is_recognised(cfg, campaign, mon
     recorded = verdicts(cfg)
     assert sorted(v['label'] for v in recorded) == ['known'] * 20
     assert all(v['key'] in known and 'B0845+66 (J0850+6625), 2.0' in v['note'] for v in recorded)
+
+
+def test_a_burst_in_all_three_saps_at_scattered_dms_is_interference(cfg, campaign):
+    # L611408: one burst in 92 beams of all three SAPs, bright at every DM, so fewer than
+    # a quarter of the events lay below DM 1. No one position is in all three SAPs.
+    per_dm = 4148.808 * (1 / (119.45 * 151.04) - 1 / 151.04 ** 2)
+    rows = [(number, dm, 30.0, 9, 'candidate', None, 99.0 - dm * per_dm)
+            for number, dm in zip(range(20, 26), (5.1, 7.9, 12.4, 18.8, 26.0, 33.5))]
+    add_detections(campaign, rows)
+    with campaign['ledger'].connect() as db:
+        run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
+        for sap, dm in ((1, 9.3), (2, 14.1)):
+            db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
+                       "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
+                       "(?,?,20.0,9,'candidate',NULL,0.9,?,?,1)",
+                       (ITEM.replace('SAP000', f'SAP{sap:03d}').replace('BEAM025', 'BEAM030') + '.fil', dm, run,
+                        99.0 - dm * per_dm))
+    Indexer(cfg).run_pass()
+    recorded = verdicts(cfg)
+    assert len(recorded) == 8 and {v['label'] for v in recorded} == {'rfi'}
+    assert all('all three SAPs at scattered DMs' in v['note'] for v in recorded)

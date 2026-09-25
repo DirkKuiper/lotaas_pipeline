@@ -546,7 +546,7 @@ class Indexer:
             events.sort()
             times = [e[0] for e in events]
             for t, beam, dm, key, kind, width in events:
-                if kind not in KINDS_QUEUED:
+                if key is None:           # a cluster centre below LOW_DM: a partner only
                     continue
                 tolerance = max(COINCIDENCE_SECONDS, 1.5 * width)
                 near = events[bisect.bisect_left(times, t - tolerance):bisect.bisect_right(times, t + tolerance)]
@@ -591,14 +591,16 @@ class Indexer:
         33 beams of L611400 up to 3.6 degrees away, and every one arrived on
         its rotation. A pulse at a catalogued pulsar's DM within KNOWN_RADIUS_DEG
         is that pulsar's when the pulsar is seen in the same observation: with
-        three or more such pulses they must keep its time, and only those on
-        its rotation count (found by chance less than once in a thousand, or
-        once in ten when a fold at its period or the classifier's redetection
-        shows the pulsar is there); with fewer, a fold at its period or a
-        harmonic must show it. A redetection alone is not enough: the level
-        steps at the start of L603674 were redetections of J0152+0948.
-        Millisecond pulsars cannot be phased with 7.9 ms samples; a fold must
-        show them.
+        three or more such pulses narrow enough to phase they must keep its
+        time, and only those on its rotation count (found by chance less than
+        once in a thousand, or once in ten when a fold at its period or the
+        classifier's redetection shows the pulsar is there), tried with every
+        pulse and again without those already known as interference; with
+        fewer, a fold at its period or a harmonic must show it. Where the
+        pulses do not keep its time, only the classifier's own redetections
+        count, and only beside such a fold. A redetection alone is not enough:
+        the level steps at the start of L603674 were redetections of
+        J0152+0948. Millisecond pulsars cannot be phased with 7.9 ms samples.
         """
         from euroflash import psrcat
         pulsars = psrcat.load()
@@ -622,6 +624,10 @@ class Indexer:
                 parsed = parse_item(r['item'])
                 if parsed:
                     folds.setdefault(parsed[0], []).append(r)
+            # Interference at a pulsar's DM would break its rotation: during the burst at
+            # sunset in L605714, events near DM 48.7 hid B1737+13's own redetection.
+            interference = {r['key'] for r in self.db.execute(
+                'SELECT key FROM sp_coincidence WHERE beams >= ? AND NOT consistent', (COINCIDENT_BEAMS,))}
             for observation, (centre, spread) in self.fields(
                     {o: {i: p[:2] for i, p in members.items()} for o, members in positions.items()}).items():
                 here = sorted(events.get(observation, []), key=lambda e: e['dm'])
@@ -650,18 +656,35 @@ class Indexer:
                         routes.append('redetection')
                     period = psrcat.period_at(p, epochs.get(observation))
                     z = None
-                    if len(matched) >= 3 and period >= KNOWN_MIN_PERIOD:
-                        times = [m[0]['time'] for m in matched]
-                        z, trial, phase, trials = self.rotation(times, period, max(times) - min(times))
-                        chance = trials * math.exp(-z)
-                        if not (chance <= 1e-3 or (chance <= 0.1 and routes)):
-                            continue          # they do not keep its time
-                        routes.append('rotation')
-
-                        def on(m):
-                            offset = abs((m[0]['time'] / trial) % 1 - phase)
-                            return min(offset, 1 - offset) <= max(0.1, m[2] / trial)
-                        matched = [m for m in matched if on(m)]
+                    # Pulses at its DM that are not already known as interference: a burst at
+                    # the pulsar's DM can hide its rotation, and a pulse of it can also fall
+                    # during a burst elsewhere, so both sets are tried.
+                    clean = [m for m in matched if m[0]['key'] not in interference]
+                    # A boxcar wider than half a turn says nothing of the phase.
+                    phased = [m for m in matched if m[2] < period / 2]
+                    if len(phased) >= 3 and period >= KNOWN_MIN_PERIOD:
+                        kept = None
+                        for trying in (phased, [m for m in phased if m in clean]):
+                            if len(trying) < 3:
+                                continue
+                            times = [m[0]['time'] for m in trying]
+                            z, trial, phase, trials = self.rotation(times, period, max(times) - min(times))
+                            chance = trials * math.exp(-z)
+                            if chance <= 1e-3 or (chance <= 0.1 and routes):
+                                def on(m):
+                                    offset = abs((m[0]['time'] / trial) % 1 - phase)
+                                    return min(offset, 1 - offset) <= max(0.1, m[2] / trial)
+                                kept = [m for m in trying if on(m)]
+                                routes.append('rotation')
+                                break
+                        if kept is None:
+                            # They do not keep its time. With a fold at its period, the
+                            # classifier's own redetections of it still count.
+                            kept, z = ([m for m in matched if m[0]['type'] == 'known_pulsar'
+                                        and m[0]['pulsar'] == p['name']] if 'fold' in routes else []), None
+                            if not kept:
+                                continue
+                        matched = kept
                     elif 'fold' not in routes:
                         continue
                     for e, separation, _ in matched:
