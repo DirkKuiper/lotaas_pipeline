@@ -798,7 +798,7 @@ class Campaign:
             self.state.event('dispatch_failed', run_name, f'exit {process.returncode}; see logs/{run_name}.log')
         else:
             self.dispatch_failures[node] = 0
-            found = self.findings(run_name)
+            found = self.findings(run_name, succeeded)
             for sap in saps:
                 done = kept = failed = late = 0
                 mean = Path(sap['sap_dir'])/MEAN if sap['sap_dir'] else None
@@ -856,9 +856,15 @@ class Campaign:
         self.periodic_index.backfill(self.root/'results')
         return Judge(self.periodic_index, settled=settled)
 
-    def findings(self, run_name):
-        """{beam stem: why} for the beams of one run worth keeping (euroflash.findings)."""
-        from euroflash.findings import run_candidates
+    def findings(self, run_name, succeeded=()):
+        """{beam stem: why} for the beams of one run worth keeping (euroflash.findings).
+
+        A beam whose periodic search succeeded, by the run's ledger, but whose
+        results the index cannot read yet is kept (findings.AWAITING) and judged
+        when it can: its folds were not seen, so deleting it would lose what
+        they might hold.
+        """
+        from euroflash.findings import AWAITING, periodic_items, run_candidates
         judge = self.judge()
         found = {}
         for item, beam in judge.index.beams.items():
@@ -869,6 +875,9 @@ class Campaign:
         # A beam whose periodic search never ran still keeps a FETCH candidate.
         for item, n in run_candidates(self.root/'results'/run_name).items():
             found.setdefault(item, f'{n} FETCH candidate(s)')
+        for item in periodic_items(self.root/'results'/run_name) & set(succeeded):
+            if not judge.index.read(item, run_name):
+                found.setdefault(item, AWAITING)
         return found
 
     def release_kept(self, observations=None, run_name=None, apply=True):
@@ -879,11 +888,12 @@ class Campaign:
         rule itself changed (`rekeep`). A FETCH candidate holds it until its
         latest verdict is RFI, noise or a known source (findings.SETTLED);
         beams whose candidates are all settled are judged again whatever their
-        observation, since the verdicts come later from the web layer. A
-        reviewer's astro or unsure verdict on any candidate of the beam always
-        holds it.
+        observation, since the verdicts come later from the web layer, and so
+        are beams kept until their run's periodic results could be read
+        (findings.AWAITING). A reviewer's astro or unsure verdict on any
+        candidate of the beam always holds it.
         """
-        from euroflash.findings import latest_verdicts, reviewed_items, settled_keys
+        from euroflash.findings import AWAITING, latest_verdicts, reviewed_items, settled_keys
         reviews = getattr(self.o, 'reviews', None) or self.root.parent/'web'/'reviews.sqlite'
         verdicts = latest_verdicts(reviews)
         judge = self.judge(settled_keys(verdicts))
@@ -894,7 +904,11 @@ class Campaign:
             entries = [judge.index.beams.get(b.stem) for b in beams]
             if not beams or any(e is None for e in entries):
                 continue
+            awaiting = re.match(r'searched in (\S+); kept for review: ' + re.escape(AWAITING), f['detail'] or '')
+            if awaiting and not all(judge.index.read(b.stem, awaiting[1]) for b in beams):
+                continue      # its run's periodic results still cannot be read
             if (observations is not None and not any(e['observation'] in observations for e in entries)
+                    and not awaiting
                     and not any(e.get('sp_candidates') and not judge.open_candidates(e) for e in entries)):
                 continue
             if any(b.stem in protected for b in beams):

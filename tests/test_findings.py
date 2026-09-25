@@ -186,6 +186,20 @@ def test_a_reviewer_verdict_holds_a_beam(tmp_path):
     assert len(campaign.release_kept({'L603686'})) == 1 and not ff.exists()
 
 
+def test_a_run_indexed_before_its_results_arrived_is_read_again(tmp_path):
+    root = tmp_path/'campaign'
+    run = 'campaign-20260925-072820-gpu01'
+    (root/'results'/run/'efc-cpu-01').mkdir(parents=True)
+    index = findings.Index(root)
+    assert index.backfill(root/'results') == [] and run in index.empty
+    item = beam(root/'results', run, 'L605714', 0, 30, node='efc-cpu-01')
+    assert [e['item'] for e in index.backfill(root/'results')] == [item] and run not in index.empty
+    assert index.read(item, run) and not index.read(item, 'campaign-older')
+    again = findings.Index(root)                      # as the file records it
+    assert again.read(item, run) and run not in again.empty
+    assert (root/findings.INDEX).read_text().count('"item": null') == 1
+
+
 def snapshot(results, run, detections, node='efc-cpu-00'):
     """A run's ledger snapshot with these (beam_id, dm, width, snr, type) detections."""
     path = results/run/node/'ledger-snapshot.sqlite'

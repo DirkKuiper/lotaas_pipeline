@@ -667,6 +667,43 @@ def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, mo
     assert not campaign.unsearched(sap['key'])
 
 
+def test_a_beam_whose_periodic_results_cannot_be_read_yet_is_kept_until_they_can(tmp_path, monkeypatch):
+    # 25 September: the CPU tier's results of 112 runs appeared on the head about a
+    # minute after their dispatch exited, so their folds were never judged.
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(tmp_path/'no-catalogue.db'))
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    beams = {int(p.parent.name[1:]): p for p in Path(sap['sap_dir']).glob('B*/*_ff.fil')}
+    run_name = 'campaign-late'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    node = tmp_path/'campaign'/'results'/run_name/'efc-cpu-00'
+    snapshot(node/'ledger-snapshot.sqlite', {p.stem: 'success' for p in beams.values()})
+    ledger = Ledger(node/'ledger-snapshot.sqlite')
+    for p in beams.values():
+        ledger.finish(ledger.start(p.stem, 'periodicity', 'fp', 'log', ['cmd']))
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
+    # No result could be read: every beam searched is kept, none deleted.
+    assert all(p.exists() for p in beams.values())
+    assert campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='kept' AND detail LIKE ?",
+                               '%periodic results not read yet')[0]['n'] == len(beams)
+    assert campaign.release_kept({'L999999'}, 'campaign-other') == []   # still unreadable: held
+    # The results arrive: one fold is worth a look, the rest hold nothing.
+    fold = {'frequency_hz': 1.25, 'period_seconds': 0.8, 'frequency_resolution_hz': 1 / 3600., 'dm': 40.0,
+            'statistic': 15.0, 'rfi_like': False, 'catalogue_matches': []}
+    for number, p in beams.items():
+        out = node/'processed'/p.stem/'abc'
+        out.mkdir(parents=True)
+        (out/'periodicity_search_summary.json').write_text('{}')
+        (out/'periodicity_folded_candidates.jsonl').write_text(json.dumps(fold) + '\n' if number == 30 else '')
+    released = campaign.release_kept({'L999999'}, 'campaign-other')
+    assert len(released) == len(beams) - 1
+    assert sorted(b for b, p in beams.items() if p.exists()) == [30]
+
+
 def test_a_sap_stalled_a_few_beams_short_is_searched_and_its_late_beams_follow(tmp_path, monkeypatch):
     campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)],
                                  partial_after_hours=2.0, partial_missing=3)
