@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS candidates (key TEXT PRIMARY KEY, id TEXT UNIQUE, kin
 CREATE INDEX IF NOT EXISTS candidates_type ON candidates(type, snr);
 CREATE INDEX IF NOT EXISTS candidates_item ON candidates(item, kind);
 CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, meta TEXT);
+-- derive() looks up every candidate's snippet by key: 150 s a pass over 280,000 candidates without it.
+CREATE INDEX IF NOT EXISTS snippets_key ON snippets(key);
 -- A single-pulse candidate and the events at its moment in other beams of its observation:
 -- near_zero of those events (its own included) lie below DM 1.
 CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, saps INTEGER,

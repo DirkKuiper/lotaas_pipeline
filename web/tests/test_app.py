@@ -379,27 +379,31 @@ def test_a_known_pulsar_seen_away_from_its_beam_is_recognised(cfg, campaign, mon
     on = [(30 + k % 10, 19.4 + 0.02 * (k % 10), 9.0 + k % 4, 2, 'candidate', None, 100.0 + 7 * k * period + 0.004 * (k % 3))
           for k in range(20)]
     off = [(33, 19.5, 8.0, 2, 'candidate', None, 100.0 + 51.5 * period)]           # half a turn out
+    # 0.7 from its DM, beyond the 0.5 a pulse is matched at, but on its rotation: a sidelobe
+    # measures the DM less well (B1133+16 in L626310). Half a turn out it is not the pulsar's.
+    off += [(37, 18.8, 8.5, 2, 'candidate', None, 100.0 + 140 * period),
+            (38, 18.8, 8.5, 2, 'candidate', None, 100.0 + 160.5 * period)]
     other = [(35, 40.0, 8.0, 2, 'candidate', None, 500.0), (36, 40.1, 8.0, 2, 'candidate', None, 900.0)]
     add_detections(campaign, on + off + other)
     indexer = Indexer(cfg)
     indexer.run_pass()
     known = {r['key']: dict(r) for r in indexer.db.execute('SELECT * FROM sp_known')}
-    assert len(known) == 20 and all(k['name'] == 'B0845+66' and 'rotation' in k['route'] and k['z'] > 15
+    assert len(known) == 21 and all(k['name'] == 'B0845+66' and 'rotation' in k['route'] and k['z'] > 15
                                     for k in known.values())
     assert 1.9 < min(k['separation_deg'] for k in known.values()) < 2.1
     client = client_for(cfg)
     shown = client.get('/single-pulse').text
-    assert '(20 hidden)' in shown and shown.count('B0845+66 2.0°') == 0
+    assert '(21 hidden)' in shown and shown.count('B0845+66 2.0°') == 0
     body = shown.split('<tbody>')[1]
     # The pulse off the rotation, and the other pulsar's two (no fold shows it is there), stay.
     assert '<td class="num">19.50</td>' in body and '<td class="num">40.00</td>' in body and '40.10' in body
     everything = client.get('/single-pulse?known=include').text
-    assert everything.count('B0845+66 2.0°</span>') == 20
+    assert everything.count('B0845+66 2.0°</span>') == 21 and '18.80' in everything.split('<tbody>')[1]
     cid = everything.split('B0845+66 2.0°')[0].rsplit('href="/verify/', 1)[1].split('?')[0]
     page = client.get(f'/verify/{cid}').text
     assert 'these pulses keep its rotation' in page and 'a known pulsar seen away from its own beam' in page
     recorded = verdicts(cfg)
-    assert sorted(v['label'] for v in recorded) == ['known'] * 20
+    assert sorted(v['label'] for v in recorded) == ['known'] * 21
     assert all(v['key'] in known and 'B0845+66 (J0850+6625), 2.0' in v['note'] for v in recorded)
 
 

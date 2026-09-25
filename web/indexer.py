@@ -69,6 +69,10 @@ SWEEP_MIN_SPAN_SECONDS = 600.0
 KNOWN_RADIUS_DEG = 5.0
 KNOWN_DM_TOLERANCE = 0.5
 KNOWN_DM_FRACTION = 0.025
+# Once its rotation is established, pulses on it count within this wider DM window: off axis
+# the beam's response changes across the band, a pulse fills only part of it and its DM is
+# poorly measured. One pulse of B1133+16 reached 15 beams of L626310 at DM 4.3-5.1 (4.84).
+KNOWN_ROTATION_DM = (1.0, 0.05)
 # Its rotation is searched over this fractional period range around the catalogue period
 # at the epoch: Earth's orbit shifts the topocentric period by up to 1e-4.
 KNOWN_PERIOD_RANGE = 1.5e-4
@@ -693,15 +697,16 @@ class Indexer:
                 beams = positions[observation]
                 for p in psrcat.cone(pulsars, *centre, spread + KNOWN_RADIUS_DEG):
                     tolerance = max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION * p['dm'])
-                    matched = []
-                    for e in here[bisect.bisect_left(dms, p['dm'] - tolerance):
-                                  bisect.bisect_right(dms, p['dm'] + tolerance)]:
+                    wide = max(KNOWN_ROTATION_DM[0], KNOWN_ROTATION_DM[1] * p['dm'])
+                    matched, farther = [], []
+                    for e in here[bisect.bisect_left(dms, p['dm'] - wide):bisect.bisect_right(dms, p['dm'] + wide)]:
                         if e['item'] not in beams:
                             continue
                         ra, dec, tsamp = beams[e['item']]
                         separation = psrcat.separation(ra, dec, p['ra'], p['dec'])
                         if separation <= KNOWN_RADIUS_DEG:
-                            matched.append((e, separation, (e['width'] or 1) * (tsamp or 0.007864)))
+                            (matched if abs(e['dm'] - p['dm']) <= tolerance else farther).append(
+                                (e, separation, (e['width'] or 1) * (tsamp or 0.007864)))
                     if not matched:
                         continue
                     routes = ['fold'] if any(psrcat.match(f['period'], f['dm'] or 0.0, [p])
@@ -729,6 +734,9 @@ class Indexer:
                                     offset = abs((m[0]['time'] / trial) % 1 - phase)
                                     return min(offset, 1 - offset) <= max(0.1, m[2] / trial)
                                 kept = [m for m in trying if on(m)]
+                                # On the rotation, a pulse whose DM the band measured less well.
+                                kept += [m for m in farther if m[2] < period / 2 and on(m)
+                                         and m[0]['key'] not in interference]
                                 routes.append('rotation')
                                 break
                         if kept is None:
