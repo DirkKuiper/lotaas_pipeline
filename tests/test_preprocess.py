@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from lotaas_reprocessing.dedispersion import iter_dedispersed
-from lotaas_reprocessing.preprocess import fill_masked, local_levels, zero_dm
+from lotaas_reprocessing.preprocess import fill_masked, local_levels, searchable, zero_dm
 
 
 def drifting(nchan=16, nsamp=20000, seed=3):
@@ -81,3 +81,16 @@ def test_zero_dm_removes_what_arrives_at_every_frequency_at_once_and_keeps_a_dis
     assert boxcar_snr(before[1.5], 3991, 20, 80) > 5
     assert boxcar_snr(after[1.5], 3991, 20, 80) < 3
     assert boxcar_snr(after[30.0], 9001, 3, 50) > 0.9 * boxcar_snr(before[30.0], 9001, 3, 50)
+
+
+def test_after_the_zero_dm_filter_the_dm_zero_trial_holds_only_rounding_and_is_not_searched():
+    rng = np.random.default_rng(3)
+    nu = np.linspace(119.45, 151.04, 64)
+    data = rng.normal(0, 1, (64, 8192)).astype(np.float32)
+    data[:, 4000:4003] += 400.                            # bright broadband interference
+    zero_dm(data)
+    trials = dict(iter_dedispersed(data, .00786, nu, [0.0, 0.5]))
+    at_zero, dispersed = (np.abs(np.asarray(trials[dm])).max() for dm in (0.0, 0.5))
+    assert at_zero < 1e-3 * dispersed, 'the DM 0 trial should be zero but for rounding'
+    assert not searchable(0.0, {'zero_dm': True})
+    assert searchable(0.0, {}) and searchable(0.0, None) and searchable(0.5, {'zero_dm': True})

@@ -680,3 +680,30 @@ def test_classifier_records_empty_beams_and_missing_input(tmp_path, monkeypatch)
         classify.classify_candidates('missing.fil',tmp_path/'missing.tsv',str(tmp_path/'plots'))
     with sqlite3.connect(db_utils.DB_PATH) as db:
         assert db.execute('SELECT outcome FROM beam_runs ORDER BY id').fetchall()==[('no_candidates',),('error',)]
+
+
+def test_the_dm_zero_trial_is_not_searched_after_the_zero_dm_filter(tmp_path):
+    # Its rounding residue made about 230 events of S/N 7 to 30 per beam in the pilot of 27 September.
+    from lotaas_reprocessing.matched_filter import run_all_matched_filtering
+    rng = np.random.default_rng(5)
+    trials = tmp_path/'DM_trials'
+    trials.mkdir()
+    residue = (rng.standard_normal(20000) * 1e-6).astype('float32')
+    residue[5000] = 1e-4                                  # left where interference was subtracted
+    residue.tofile(trials/'beam_DM0.0.dat')
+    pulse = rng.standard_normal(20000).astype('float32')
+    pulse[12000] += 30.
+    pulse.tofile(trials/'beam_DM5.0.dat')
+    plan = [{'low_dm': 0., 'high_dm': 10., 'ddm': 5., 'downsample': 1}]
+    info = {'Object': 'x', 'Telescope': 'x', 'Instrument': 'x',
+            'Observation Date': 'x', 'Frequency Range (MHz)': 'x'}
+
+    def found(**kwargs):
+        out = tmp_path/('out' + str(len(list(tmp_path.glob('out*')))))
+        out.mkdir()
+        run_all_matched_filtering(trials, .01, str(out), info, plan, **kwargs)
+        return {float(line.split()[0]) for line in (out/'all_detected_candidates.cands').read_text().splitlines()
+                if not line.startswith('#')}
+
+    assert {0.0, 5.0} <= found()
+    assert found(preprocessing={'zero_dm': True}) == {5.0}

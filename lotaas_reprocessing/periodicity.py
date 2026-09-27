@@ -439,6 +439,7 @@ def search_periodicity(trial_dir, output_dir, metadata, config=None):
     every beam in a batch. The search summary carries what the fold step
     needs to complete the beam's periodicity summary.
     """
+    from .preprocess import searchable
     from .trials import trial_specs, validate_trials
     config=_configured(metadata, config)
     trial_dir,output_dir=Path(trial_dir),Path(output_dir)
@@ -455,6 +456,8 @@ def search_periodicity(trial_dir, output_dir, metadata, config=None):
     partial=raw_path.with_name(raw_path.name+".partial")
     with partial.open("w") as raw:
         for name,spec in specs.items():
+            if not searchable(spec["dm"],metadata.get("preprocessing")):
+                continue  # Zero but for rounding (preprocess.searchable).
             data,polluted=valid_trial(trial_dir/name,metadata,spec["dm"],spec["downsample"])
             fft_padded=(fast_length(len(data)) if config["fft_fast_lengths"] else len(data))-len(data)
             dt=float(metadata["tsamp"])*spec["downsample"]

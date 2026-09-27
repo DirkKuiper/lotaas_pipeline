@@ -290,7 +290,8 @@ def _dm_axis(axis, dms, which="x"):
 def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info,
                               dedispersion_plan, detection_threshold=5,
                               nu_min=None, nu_max=None, trim_wrap=True, max_duration=600,
-                              baseline_seconds=None, baseline_widths=64, merge=False):
+                              baseline_seconds=None, baseline_widths=64, merge=False,
+                              preprocessing=None):
     """Runs CPU-based matched filtering across all DM trials.
 
     With the band limits available, the tail that circular dedispersion has
@@ -298,8 +299,12 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
     end of an observation, growing with DM: 0.4% of a one-hour beam at DM
     150, 3% at DM 1000, 30% at DM 10000. Set trim_wrap False to search the
     whole series and accept the wrapped interference instead.
+
+    A trial the preprocessing left without signal (preprocess.searchable) is
+    skipped: after the zero-DM filter, the DM 0 trial.
     """
-    
+    from lotaas_reprocessing.preprocess import searchable
+
     all_candidates = []
     candidate_count = 0
 
@@ -315,6 +320,8 @@ def run_all_matched_filtering(dm_trials_dir, tsamp, output_dir, observation_info
 
         if match:
             dm = float(match.group(1))
+            if not searchable(dm, preprocessing):
+                continue
 
             # Get downsampling factor directly from dedispersion plan
             downsample = 1  # Default

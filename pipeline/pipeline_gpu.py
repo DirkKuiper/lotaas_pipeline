@@ -129,8 +129,9 @@ if __name__ == "__main__":
         observation_info=observation_info
     )
 
-   # Masked cells filled (lotaas_reprocessing.preprocess): at the channel's own local level since
-    # 28 September; at the global mean before, which left 7.9 s steps in the dedispersed series.
+    # Masked cells filled (lotaas_reprocessing.preprocess): at the channel's own local level with
+    # preprocessing.mask_fill 'local'; by default at the global mean, which leaves 7.9 s steps in
+    # the dedispersed series.
     from lotaas_reprocessing.preprocess import fill_masked, zero_dm
     preprocessing = settings.get("preprocessing") or {}
     fill_mode = preprocessing.get("mask_fill", "global")
