@@ -18,8 +18,11 @@ FOFF = -31.59 / NCHANS
 
 
 def synthetic_filterbank(path, dm=30.0, t_pulse=15.0, amplitude=1.2, width=3, nsamp=4000, seed=1,
-                         undispersed=None):
-    """Gaussian noise with one dispersed boxcar pulse, arriving at t_pulse at the top of the band."""
+                         undispersed=None, burst=None):
+    """Gaussian noise with one dispersed boxcar pulse, arriving at t_pulse at the top of the band.
+
+    burst: (channel, start, stop, level) adds interference to one channel between start and stop seconds.
+    """
     rng = np.random.default_rng(seed)
     data = rng.normal(10.0, 1.0, (nsamp, NCHANS)).astype(np.float32)
     freqs = FCH1 + np.arange(NCHANS) * FOFF
@@ -29,6 +32,9 @@ def synthetic_filterbank(path, dm=30.0, t_pulse=15.0, amplitude=1.2, width=3, ns
     if undispersed is not None:
         start = int(round(undispersed / TSAMP))
         data[start:start + 2, :] += 3.0
+    if burst is not None:
+        channel, start, stop, level = burst
+        data[int(round(start / TSAMP)):int(round(stop / TSAMP)), channel] += level
     header = {'telescope_id': 11, 'machine_id': -1, 'data_type': 1, 'source_name': 'LOTAAS-P1254B-SAP0',
               'src_raj': 84708.0, 'src_dej': 682459.0, 'tstart': 57713.157638888886, 'tsamp': TSAMP,
               'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'nifs': 1, 'nbits': 32}

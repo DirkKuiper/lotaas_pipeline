@@ -217,6 +217,51 @@ def smooth_image(image, sigma):
 # single_pulse.baseline_seconds) subtracts the mean over channels at each sample and a 2 s running
 # baseline; the local S/N is measured the same way, so the page and the search agree on a pulse.
 SEARCH_BASELINE_SECONDS = 2.0
+# The search's RFI mask judges blocks of this many native samples (settings rfi_block_size).
+RFI_BLOCK_SAMPLES = 1000
+# No pulse reaches this in one channel and sample (S/N 1000 one sample wide: 40).
+MAX_CELL_SIGMA = 50.0
+
+
+def _clipped(z, sigma=3.0):
+    """Cells of z (channel, block) within sigma of their block's mean over channels, clipped
+    until nothing changes (lotaas_reprocessing.numpy_utils.sigmaclip_2d)."""
+    keep = np.ones_like(z, dtype=bool)
+    while True:
+        values = np.where(keep, z, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            mean, std = np.nanmean(values, axis=0), np.nanstd(values, axis=0)
+            now = (values >= mean - sigma * std) & (values <= mean + sigma * std)
+        if now.sum() == keep.sum():
+            return now
+        keep = now
+
+
+def rfi_mask(data, block, phase=0):
+    """The search's RFI mask of (time, channel) data: channel blocks whose spread, skewness or
+    kurtosis stand out among the channels of their block (numpy_utils.compute_rfi_mask, without
+    scipy). A channel quiet but for strong interference has a small robust scale, so its bursts
+    reach thousands of sigma once normalised; the search never sees them, and the local S/N
+    measured as the search measures must not either. `phase`: samples of the observation's
+    block before the first one here, so blocks fall where the search's did. The search had data
+    where a snippet's edge blocks run past it; they are padded with each channel's median, not
+    its mean, which a burst drags until the padding itself looks like interference."""
+    x = np.asarray(data, dtype=np.float64).T
+    nchan, nsamp = x.shape
+    lead = int(phase) % block
+    blocks = -(-(lead + nsamp) // block)
+    if lead or blocks * block > lead + nsamp:
+        x = np.pad(x, ((0, 0), (lead, blocks * block - lead - nsamp)), mode='median')
+    x = x.reshape(nchan, blocks, block)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        x = x / x.mean(axis=2, keepdims=True)
+        d = x - x.mean(axis=2, keepdims=True)
+        m2, m3, m4 = (d ** 2).mean(axis=2), (d ** 3).mean(axis=2), (d ** 4).mean(axis=2)
+        stats = (np.sqrt(m2), m3 / m2 ** 1.5, m4 / m2 ** 2 - 3.0)
+    good = _clipped(stats[0]) & _clipped(stats[1]) & _clipped(stats[2])
+    return np.repeat(~good, block, axis=1)[:, lead:lead + nsamp].T
 
 
 class Snippet:
@@ -251,6 +296,11 @@ class Snippet:
         self.flat = np.isnan(self.scale)
         self.known_bad = sorted(set(known) | set(np.flatnonzero(self.flat).tolist()))
         self.automatic_bad = persistent_channels(self.data.T)
+        # The observation's sample grid, which the search's RFI blocks and baseline blocks follow.
+        k = int(self.meta.get('downsample', 1))
+        self.first = int(self.meta.get('start_sample', 0)) // k
+        block = max(8, round(RFI_BLOCK_SAMPLES / k))
+        self.rfi_mask = rfi_mask(self.data, block, self.first % block)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
             self.normalised = (self.data - self.centre) / self.scale
@@ -274,8 +324,15 @@ class Snippet:
         return self.t0 + np.arange(self.data.shape[0]) * self.tsamp
 
     def search_series(self, dm, extra=(), auto_mask=True):
-        """The band series as the search measures it: zero-DM filtered, dedispersed, running baseline removed."""
+        """The band series as the search measures it: RFI-masked cells, and cells no pulse could
+        reach, at their channel's level; zero-DM filtered, dedispersed, running baseline removed.
+
+        A pulse of S/N 1000 one sample wide is 40 sigma in each cell. Beyond that it is
+        interference the search's mask removes at full resolution: a broadband burst scaled
+        by a quiet channel's noise reached 1,300 sigma, and its remainder after the zero-DM
+        filter halved an injected pulse's S/N beside it (27 September 2026)."""
         data = self.masked(extra, auto_mask)
+        data[(self.rfi_mask | (np.abs(data) > MAX_CELL_SIGMA)) & np.isfinite(data)] = 0.0
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
             data = data - np.nanmean(data, axis=1, keepdims=True)
@@ -286,7 +343,10 @@ class Snippet:
         window = baseline_window(self.width, self.tsamp, 1, SEARCH_BASELINE_SECONDS)
         if finite.sum() > 2 * window:
             filled = np.where(finite, series, np.nanmedian(series))
-            series = np.where(finite, filled - running_baseline(filled, window), np.nan)
+            # Baseline blocks on the observation's grid, as the search's over the whole trial.
+            lead = self.first % max(1, window // 2)
+            padded = np.concatenate([np.full(lead, np.nanmedian(series), dtype=np.float32), filled])
+            series = np.where(finite, filled - running_baseline(padded, window)[lead:], np.nan)
         return series
 
     def masked(self, extra=(), auto_mask=True):

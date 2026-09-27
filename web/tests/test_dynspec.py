@@ -177,3 +177,31 @@ def test_the_local_snr_is_measured_as_the_search_measures_it(tmp_path):
     assert view['raw_peak_snr'] > 8 and view['peak_snr'] < 3
     pulse = snippet(tmp_path / 'pulse').view(window=2.0, nsub=16)
     assert pulse['peak_snr'] > 0.8 * pulse['raw_peak_snr'] > 6
+
+
+def test_the_search_measure_drops_interference_the_search_masks(tmp_path, monkeypatch):
+    # A quiet channel's burst, scaled by that channel's noise, reached 1,300 sigma; left in, its remainder
+    # after the zero-DM filter halved an injected pulse's S/N beside it (27 September 2026).
+    for name in ('clean', 'burst', 'unmasked'):
+        (tmp_path / name).mkdir()
+    clean = snippet(tmp_path / 'clean').view(window=2.0, nsub=16)['peak_snr']
+    hit = snippet(tmp_path / 'burst', burst=(7, 8.0, 14.0, 2000.0)).view(window=2.0, nsub=16)['peak_snr']
+    assert clean > 8 and abs(hit - clean) < 0.15 * clean
+    # Without the mask and the cell limit the same burst ruins the measure.
+    monkeypatch.setattr(dynspec, 'MAX_CELL_SIGMA', np.inf)
+    monkeypatch.setattr(dynspec, 'rfi_mask', lambda data, block, phase=0: np.zeros(data.shape, dtype=bool))
+    ruined = snippet(tmp_path / 'unmasked', burst=(7, 8.0, 14.0, 2000.0)).view(window=2.0, nsub=16)['peak_snr']
+    assert ruined < 0.7 * clean
+
+
+def test_the_rfi_mask_flags_a_channel_burst_and_spares_a_pulse():
+    rng = np.random.default_rng(3)
+    data = rng.normal(10.0, 1.0, (4000, 64)).astype(np.float32)
+    data[1500:1600, 9] += 300.0                       # interference in one channel
+    data[2500:2503, :] += 1.2                         # a pulse across the band
+    mask = dynspec.rfi_mask(data, 1000)
+    assert mask[1500:1600, 9].all() and not mask[2000:3000, :].any()
+    assert mask[1000:2000, 9].all() and not mask[:1000, 9].any()
+    # Blocks follow the observation's grid: 250 samples of their first block came before this stretch.
+    shifted = dynspec.rfi_mask(data, 1000, phase=250)
+    assert shifted[750:1750, 9].all() and not shifted[1750:, 9].any() and not shifted[:750, 9].any()
