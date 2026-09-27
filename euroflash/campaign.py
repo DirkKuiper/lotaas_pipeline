@@ -744,8 +744,11 @@ class Campaign:
             self.state.event('flatfield_failed', key, error)
             return False
         if not self.o.keep_unflattened:
+            # Only beams flatfielded: one converted while its SAP was being flatfielded waits for the
+            # saved flatfield. Eight late beams of three SAPs were deleted unsearched on 25-26 September.
             for path in sap_dir.glob('B*/*_32bit.fil'):
-                path.unlink()
+                if path.with_name(path.stem + '_ff.fil').is_file():
+                    path.unlink()
         self.state.set_sap(key, state='prepared', sap_dir=str(sap_dir), detail=None)
         self.state.event('prepared', key, str(sap_dir))
         return True
