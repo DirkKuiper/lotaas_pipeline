@@ -36,6 +36,9 @@ from tqdm import tqdm
 from matplotlib.gridspec import GridSpec
 from functools import lru_cache
 
+# In their own module so the web layer, which has no matplotlib, measures as the search does.
+from lotaas_reprocessing.baseline import baseline_window, running_baseline  # noqa: F401
+
 # Scale factor taking a median absolute deviation to a Gaussian sigma.
 MAD_TO_SIGMA = 1.4826
 # Windows drawn to estimate one noise scale. The precision of a scale from n
@@ -75,36 +78,6 @@ def robust_scale(values, rng=None):
     if non_zero.size == 0:
         return centre, 0.0
     return centre, float(np.mean(non_zero)) * MAD_TO_SIGMA
-
-
-def running_baseline(series, window, start=0, stop=None):
-    """The slow baseline of a dedispersed series, for samples start..stop.
-
-    Medians of consecutive blocks of window/2 samples, counted from sample 0,
-    linearly interpolated between block centres and held flat beyond the
-    outermost ones. A block median ignores a pulse filling less than half of
-    it, so a boxcar of width w keeps its signal when the window is >= 64 w.
-    Blocks are aligned to sample 0 whatever stretch is requested, so a local
-    stretch gets exactly the values the whole series gets there.
-    """
-    n = len(series)
-    stop = n if stop is None else min(int(stop), n)
-    start = max(0, int(start))
-    block = max(1, int(window) // 2)
-    blocks = n // block
-    if blocks < 2:
-        return np.full(stop - start, np.median(np.asarray(series)), dtype=np.float32)
-    first = max(0, start // block - 1)
-    last = min(blocks, (stop - 1) // block + 2)
-    medians = np.median(np.asarray(series[first * block:last * block], dtype=np.float32)
-                        .reshape(last - first, block), axis=1)
-    centres = (np.arange(first, last) + 0.5) * block
-    return np.interp(np.arange(start, stop), centres, medians).astype(np.float32)
-
-
-def baseline_window(width, tsamp, downsample, baseline_seconds, baseline_widths=64):
-    """Samples of running baseline removed before a boxcar of `width` trial samples."""
-    return max(int(round(baseline_seconds / (tsamp * downsample))), int(baseline_widths) * int(width))
 
 
 def merge_events(centres, strengths, widths, gap=1.0):
