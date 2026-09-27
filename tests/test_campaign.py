@@ -936,6 +936,11 @@ def test_lost_late_beams_are_staged_again_and_their_sap_is_finished(tmp_path, mo
     campaign.state.set_sap(sap['key'], state='attention', run_name='run-x', detail='2 beams not searched in run-x')
     campaign.apply_exclusions()
     assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'attention', 'lost beams are not excluded ones'
+    campaign.recover()
+    assert {r['state'] for r in campaign.state.rows('SELECT state FROM files WHERE beam IN (38, 58)')} == {'converted'}, \
+        'nor are they searched'
+    with campaign.state.db() as db:                   # as the start of 27 September left one of them
+        db.execute("UPDATE files SET state='searched',detail='searched before per-beam states' WHERE beam=58")
     assert C.restage_lost(tmp_path/'campaign', [sap['key']], 'deleted before their search') == [sap['key']]
     assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'partial'
     assert {r['state'] for r in campaign.state.rows('SELECT state FROM files WHERE beam IN (38, 58)')} == {'pending'}
