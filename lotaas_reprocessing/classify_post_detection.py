@@ -23,20 +23,24 @@ from fetch.utils import get_model
 from lotaas_reprocessing.filterbank import FilterbankFile
 from lotaas_reprocessing.numpy_utils import compute_rfi_mask  # CPU fallback OK
 from lotaas_reprocessing.cupy_utils import fourier_domain_dedispersion  # uses GPU if available
+from lotaas_reprocessing.coordinates import packed_ra
 from lotaas_reprocessing.sap_beam_map import plot_sap_beam_layout, matched_filter_sn_at_idx
 
 logger = logging.getLogger(__name__)
 
 
 def _packed_float_to_sexagesimal_string(val, is_ra=True):
-    val = float(val)
+    # Packed values carry one sign for the whole angle; RA wraps into 0-24 h (coordinates.py).
+    val = packed_ra(val) if is_ra else float(val)
+    sign = "-" if val < 0 else ""
+    val = abs(val)
     hh_or_dd = int(val // 10000)
     mm = int((val % 10000) // 100)
     ss = val % 100
     if is_ra:
         return f"{hh_or_dd:02d}:{mm:02d}:{ss:05.2f}"
     else:
-        return f"{hh_or_dd:02d}:{mm:02d}:{ss:04.1f}"
+        return f"{sign}{hh_or_dd:02d}:{mm:02d}:{ss:04.1f}"
 
 
 def _load_settings(path="settings.yaml"):

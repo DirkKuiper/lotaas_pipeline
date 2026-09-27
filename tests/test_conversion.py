@@ -52,7 +52,9 @@ def test_unsupported_bit_depth_is_refused():
                        'DAT_WTS': np.ones(4)}, 4, 4, 4, 1, 1)
 
 
-def test_whole_file_conversion_matches_the_reference(tmp_path):
+@pytest.mark.parametrize('ra, src_raj', [('03:32:59.0', 33259.0),
+                                          ('-00:07:35.0', 235225.0)])   # L606840 SAP000 B010: west of 0 h
+def test_whole_file_conversion_matches_the_reference(tmp_path, ra, src_raj):
     rng = np.random.default_rng(6)
     nchan, nsblk, nsub = 64, 512, 3
     rows = [two_bit_row(rng, nsblk, nchan) for _ in range(nsub)]
@@ -65,7 +67,7 @@ def test_whole_file_conversion_matches_the_reference(tmp_path):
     for key, value in dict(NCHAN=nchan, NSBLK=nsblk, NBITS=2, NPOL=1, TBIN=.0005).items():
         table.header[key] = value
     primary = fits.PrimaryHDU()
-    for key, value in {'SRC_NAME': 'SYNTHETIC', 'RA': '03:32:59.0', 'DEC': '+54:34:43.0',
+    for key, value in {'SRC_NAME': 'SYNTHETIC', 'RA': ra, 'DEC': '+54:34:43.0',
                        'DATE-OBS': '2026-01-01T00:00:00'}.items():
         primary.header[key] = value
     source = tmp_path / 'L000001_SAP000_BEAM013.fits'
@@ -74,6 +76,7 @@ def test_whole_file_conversion_matches_the_reference(tmp_path):
     convert(source, output)
     fil = FilterbankFile(str(output))
     converted = fil.get_spectra(0, fil.nspec)
+    assert fil.header['src_raj'] == pytest.approx(src_raj) and fil.header['src_dej'] == pytest.approx(543443.0)
     fil.close()
     expected = np.concatenate([reduce_reference(r, 2, nsblk, nchan, 4, 16) for r in rows])[:, ::-1]
     assert converted.shape == expected.shape

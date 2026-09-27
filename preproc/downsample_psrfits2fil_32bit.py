@@ -7,6 +7,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.time import Time
 from lotaas_reprocessing import filterbank
+from lotaas_reprocessing.coordinates import packed_ra
 
 
 def parse_ids(filename):
@@ -99,7 +100,7 @@ def convert(input_path, output_path, fscrunch=4, tscrunch=16, dc=False, max_subi
             start = float(Time(hdr['DATE-OBS'], format='isot', scale='utc').mjd)
         header = dict(telescope_id=11, machine_id=-1, data_type=1,
                       source_name=hdr['SRC_NAME'], barycentric=0, pulsarcentric=0,
-                      src_raj=float(hdr['RA'].replace(':', '')),
+                      src_raj=packed_ra(hdr['RA']),
                       src_dej=float(hdr['DEC'].replace(':', '')), tstart=start,
                       tsamp=float(sub.header['TBIN']) * tscrunch,
                       foff=float(freqs[1] - freqs[0]), fch1=float(freqs[0]),

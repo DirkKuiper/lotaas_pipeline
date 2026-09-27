@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from astropy.time import Time
 
+from lotaas_reprocessing.coordinates import packed_ra
+
 def average_in_time(data, factor):
     """Average the data along the time axis by a given factor."""
     nsamp = data.shape[1]
@@ -10,6 +12,8 @@ def average_in_time(data, factor):
 
 def parse_ra_dec(ra_raw, dec_raw):
     """Convert RA and DEC from HHMMSS and DDMMSS formats to HMS and DMS strings."""
+    # A header west of 0 h (negative) or past 24 h would read as '-1:92:65' (coordinates.py).
+    ra_raw = packed_ra(ra_raw)
     ra_h = int(ra_raw // 10000)
     ra_m = int((ra_raw % 10000) // 100)
     ra_s = ra_raw % 100

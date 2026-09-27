@@ -19,6 +19,7 @@ if REPO_ROOT not in sys.path:
 # -----------------------------------------------------------------
 
 from lotaas_reprocessing import filterbank
+from lotaas_reprocessing.coordinates import packed_ra
 from lotaas_reprocessing.numpy_utils import fourier_domain_dedispersion, compute_rfi_mask
 from lotaas_reprocessing.matched_filter import run_matched_filtering
 from lotaas_reprocessing.classify_post_detection import classify_candidates
@@ -42,14 +43,17 @@ def load_settings(path="settings.yaml"):
 
 def packed_float_to_sexagesimal_string(val, is_ra=True):
     """Convert PSRFITS-style packed RA/DEC floats to sexagesimal strings."""
-    val = float(val)
+    # Packed values carry one sign for the whole angle; RA wraps into 0-24 h (coordinates.py).
+    val = packed_ra(val) if is_ra else float(val)
+    sign = "-" if val < 0 else ""
+    val = abs(val)
     hh_or_dd = int(val // 10000)
     mm = int((val % 10000) // 100)
     ss = val % 100
     if is_ra:
         return f"{hh_or_dd:02d}:{mm:02d}:{ss:05.2f}"
     else:
-        return f"{hh_or_dd:02d}:{mm:02d}:{ss:04.1f}"
+        return f"{sign}{hh_or_dd:02d}:{mm:02d}:{ss:04.1f}"
 
 
 def main():
