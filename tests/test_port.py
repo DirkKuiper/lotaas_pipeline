@@ -32,10 +32,27 @@ def test_dispersed_pulse_recovered_at_correct_time(factor):
     assert trial.max() > 15
 
 
-def test_zero_dm_is_sum_of_time_scrunched_channels():
-    x = np.random.default_rng(7).normal(size=(5, 101)).astype('float32')
-    _, trial = next(iter_dedispersed(x, .1, np.arange(120., 125.), [0], 2))
-    np.testing.assert_allclose(trial, time_scrunch(x, 2).sum(axis=0), atol=2e-6)
+def test_zero_dm_is_the_band_limited_sum_of_the_channels():
+    # Below the new Nyquist frequency downsampling keeps every component; the channel sum is exact.
+    t = np.arange(400) * .1
+    x = np.array([np.cos(2 * np.pi * f * t + p) for f, p in ((0.3, 0), (0.75, 1), (1.2, 2))]).astype('float32')
+    _, trial = next(iter_dedispersed(x, .1, np.arange(120., 123.), [0], 2))
+    np.testing.assert_allclose(trial, x.sum(axis=0)[::2], atol=2e-5)
+
+
+def test_downsampling_folds_nothing_back_from_above_the_new_nyquist_frequency():
+    # A bright pulsar's harmonic just above the Nyquist frequency of a x4 trial: block averaging passed
+    # ~10% of its amplitude to |f - fs|, which the periodic search found as a pulsar at another DM.
+    tsamp, factor = 0.0078643, 4
+    t = np.arange(2 ** 16) * tsamp
+    fs = 1 / (tsamp * factor)
+    x = np.cos(2 * np.pi * 1.11 * fs * t)[None, :].astype('float32')
+    _, trial = next(iter_dedispersed(x, tsamp, np.array([150.]), [0], factor))
+    power = np.abs(np.fft.rfft(trial)) / (len(trial) / 2)
+    alias = np.argmin(np.abs(np.fft.rfftfreq(len(trial), tsamp * factor) - 0.11 * fs))
+    assert power[alias] < 1e-3, 'nothing at the alias frequency'
+    averaged = time_scrunch(x, factor)[0]
+    assert np.abs(np.fft.rfft(averaged))[alias] / (len(averaged) / 2) > 0.05, 'averaging did fold it back'
 
 
 def test_gpu_matches_cpu_when_available():
