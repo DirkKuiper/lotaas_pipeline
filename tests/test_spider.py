@@ -20,7 +20,7 @@ EDGE = 151.068115234375
 FOFF = -0.048828125
 
 
-def header(fch1=EDGE, nchans=4, tsamp=1.0, nbits=32, source='LOTAAS-P0442A-SAP0'):
+def header(fch1=EDGE, nchans=4, tsamp=1.0, nbits=32, source='LOTAAS-P0442A-SAP0', src_raj=None):
     def string(s):
         return struct.pack('<i', len(s)) + s.encode()
     out = string('HEADER_START') + string('source_name') + string(source)
@@ -28,12 +28,14 @@ def header(fch1=EDGE, nchans=4, tsamp=1.0, nbits=32, source='LOTAAS-P0442A-SAP0'
         out += string(key) + struct.pack('<i', value)
     for key, value in (('fch1', fch1), ('foff', FOFF), ('tsamp', tsamp), ('tstart', 57085.3)):
         out += string(key) + struct.pack('<d', value)
+    if src_raj is not None:
+        out += string('src_raj') + struct.pack('<d', src_raj)
     return out + string('HEADER_END')
 
 
-def beam_tar(path, obs='261129', sap='000', beam='030', samples=700, member=None, keep=0):
+def beam_tar(path, obs='261129', sap='000', beam='030', samples=700, member=None, keep=0, src_raj=None):
     """A beam tar as the early-cycle pipeline wrote it: filterbank plus RFI plot."""
-    data = header() + bytes(range(256)) * (samples * 16 // 256) + bytes(samples * 16 % 256)
+    data = header(src_raj=src_raj) + bytes(range(256)) * (samples * 16 // 256) + bytes(samples * 16 % 256)
     name = member or f'downsampled_L{obs}_SAP{sap}_BEAM{beam}_32bit.fil'
     path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(path, 'w') as archive:
@@ -84,6 +86,18 @@ def test_a_beam_arrives_converted_with_fch1_at_the_first_channel_centre(tmp_path
     assert receipt['fch1_archive'] == EDGE
     assert json.loads((tmp_path/'r.json').read_text()) == receipt
     assert not list(out.parent.glob('*.partial'))
+
+
+def test_a_beam_past_24_hours_arrives_within_a_day(tmp_path, fake_ssh):
+    # L167142 SAP001 B001, 0.4 degrees from the pole, came as 32:41:08: 8:41:08.
+    tar = tmp_path/'EC'/'167142'/'SAP001'/'L167142_SAP001_BEAM001_beam_data.tar'
+    data = beam_tar(tar, obs='167142', sap='001', beam='001', src_raj=324108.0)
+    out = tmp_path/'out'/'downsampled_L167142_SAP001_BEAM001_32bit.fil'
+    receipt = spider.fetch(url(tar), out, tmp_path/'r.json')
+    written = out.read_bytes()
+    found, length, _ = spider.sigproc_header(written)
+    assert found['src_raj'] == 84108.0 and receipt['src_raj_archive'] == 324108.0
+    assert written[length:] == data[length:], 'the data are untouched'
 
 
 def test_unpadded_early_names_are_the_same_beam(tmp_path, fake_ssh):

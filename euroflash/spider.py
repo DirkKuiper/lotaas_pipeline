@@ -34,6 +34,8 @@ import sys
 import time
 from urllib.parse import urlsplit
 
+from lotaas_reprocessing.coordinates import packed_ra
+
 ROOT = '/project/euflash/Data/EC_LOTAAS'
 TAR = re.compile(r'^L(\d+)_SAP(\d+)_BEAM(\d+)_beam_data\.tar$')
 MEMBER = re.compile(r'^downsampled_(L\d+)_SAP(\d+)_BEAM(\d+)_32bit\.fil$')
@@ -122,6 +124,11 @@ def _write_filterbank(source, size, output, edge_fch1):
         # The band's top edge to the first channel's centre (foff is negative).
         fch1 = header['fch1'] + header['foff'] / 2
         head = head[:where['fch1']] + struct.pack('<d', fch1) + head[where['fch1'] + 8:]
+    raj = header.get('src_raj')
+    if raj is not None and 'src_raj' in where:
+        # Near the pole the converter wrote beams past 24 h ('32:41:08'), and LOFAR wrote those west of 0 h negative.
+        raj = packed_ra(raj)
+        head = head[:where['src_raj']] + struct.pack('<d', raj) + head[where['src_raj'] + 8:]
     partial = output.with_name(output.name + '.partial')
     with partial.open('wb') as out:
         out.write(head)
@@ -137,7 +144,8 @@ def _write_filterbank(source, size, output, edge_fch1):
         raise IOError(f'filterbank ended after {copied} of {size} bytes')
     return partial, {'member_bytes': size, 'samples': samples, 'duration_s': round(seconds, 3),
                      'nchans': header['nchans'], 'tsamp': header['tsamp'], 'source_name': header.get('source_name'),
-                     'fch1_archive': header['fch1'], 'fch1': fch1}
+                     'fch1_archive': header['fch1'], 'fch1': fch1,
+                     'src_raj_archive': header.get('src_raj'), 'src_raj': raj}
 
 
 def fetch(url, output, receipt_path, destination=None, edge_fch1=True, ssh_options=()):
