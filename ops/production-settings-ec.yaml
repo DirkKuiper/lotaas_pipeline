@@ -7,8 +7,18 @@ bad_channels:
 rfi_block_size: 1000
 rfi_averaging_factor: 128
 persistent_channel_threshold: 4.0
+# Before dedispersion (lotaas_reprocessing.preprocess): masked cells at their channel's own local
+# level, not the global mean, which left 7.9 s steps in the dedispersed series; and a zero-DM filter
+# against broadband interference and the tied-array beam's broadband wander.
+preprocessing:
+  mask_fill: local
+  zero_dm: true
 single_pulse:
   max_width_seconds: 1.0
+  # A running baseline of 2 s, doubled until it spans 64 widths, under each boxcar. With the
+  # preprocessing above, injected pulses of white-noise S/N 30 came out at 26-28 and were found in
+  # 94-96 of 96 trials; the search before found 0-7 (benchmarks/snr-discrepancy-2026-09-27).
+  baseline_seconds: 2.0
   # One crossing per event per trial (strongest width and sample) instead of
   # one per sample and width: identical clusters, 40-180x fewer rows, and RFI
   # beams no longer stop at the 25 million-crossing guard.
