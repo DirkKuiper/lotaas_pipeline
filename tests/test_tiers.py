@@ -443,3 +443,26 @@ def test_a_failed_catalogue_query_is_retried_under_the_node_lock(tmp_path, monke
     assert atnf.query_atnf(factory=flaky, radius=1.0) == 'catalogue' and len(calls) == 2
     assert (tmp_path/'.lotaas-atnf.ready').exists(), 'later queries skip the lock'
     assert atnf.query_atnf(factory=lambda **k: 'cached') == 'cached'
+
+
+def test_every_node_of_a_run_receives_the_source_as_it_was_when_the_run_started(tmp_path, monkeypatch):
+    # A deploy while a batch waited for its CPU slot gave the CPU node other
+    # code, and it refused the whole batch (campaign-20260927-115112-gpu01).
+    from euroflash import cluster
+    repo = tmp_path/'repo'
+    (repo/'euroflash').mkdir(parents=True)
+    (repo/'euroflash'/'stage.py').write_text('OLD = 1\n')
+    settings, image = tmp_path/'settings.yaml', tmp_path/'runtime.sif'
+    settings.write_text('a: 1\n')
+    image.write_bytes(b'image')
+    source = cluster.freeze_source(repo, settings, image)
+    (repo/'euroflash'/'stage.py').write_text('NEW = 2\n')
+    settings.write_text('a: 2\n')
+    monkeypatch.setattr(cluster, 'ssh_args', lambda node, control_dir=None: ['sh', '-c'])
+    cluster.upload('efc-cpu-00', source, str(tmp_path/'node'))
+    assert (tmp_path/'node'/'euroflash'/'stage.py').read_text() == 'OLD = 1\n'
+    assert (tmp_path/'node'/'campaign-settings.yaml').read_text() == 'a: 1\n'
+    assert (tmp_path/'node'/'containers'/'runtime.sif').read_bytes() == b'image'
+    image.write_bytes(b'another image')
+    with pytest.raises(RuntimeError, match='changed after the run started'):
+        cluster.upload('efc-cpu-01', source, str(tmp_path/'later'))

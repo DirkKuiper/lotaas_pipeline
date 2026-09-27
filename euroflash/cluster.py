@@ -17,6 +17,7 @@ import argparse
 import concurrent.futures as futures
 import fcntl
 import getpass
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -184,6 +185,44 @@ def snapshot(node,work,control_dir=None):
     remote(node,['python3','-c','import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close();',work+'/ledger.sqlite',work+'/ledger-snapshot.sqlite'],control_dir)
 
 
+class Frozen:
+    """A file as it was when the run started, for a node that receives it later.
+
+    Held in memory, or, for the runtime image, checked to be unchanged when sent.
+    """
+
+    def __init__(self,path,hold=True):
+        self.path,self.stat=path,path.stat()
+        self.data=path.read_bytes() if hold else None
+
+    def add_to(self,archive,name):
+        if self.data is None:
+            now=self.path.stat()
+            if (now.st_size,now.st_mtime_ns)!=(self.stat.st_size,self.stat.st_mtime_ns):
+                raise RuntimeError(f'{self.path} changed after the run started; '
+                                   'its nodes would not agree on the search fingerprint')
+            archive.add(self.path,arcname=name,recursive=False)
+            return
+        info=tarfile.TarInfo(name)
+        info.size,info.mode,info.mtime=len(self.data),self.stat.st_mode&0o7777,int(self.stat.st_mtime)
+        archive.addfile(info,io.BytesIO(self.data))
+
+
+def freeze_source(repo,settings,image):
+    """The code, settings and image every node of a run receives, as they are now.
+
+    The files used to be listed at the start and read at each upload. A CPU
+    node takes its slot when one frees, sometimes long after the GPU node
+    received the source, and a deploy in between gave it other code: it
+    computed another fingerprint and refused every beam of the batch
+    (campaign-20260927-115112-gpu01, retried automatically).
+    """
+    files=[f for f in repo.rglob('*') if f.is_file() and f.suffix in {'.py','.yaml','.lock'}
+           and not any(x in f.parts for x in ['.git','__pycache__','.pytest_cache'])]
+    return ([(Frozen(f),str(f.relative_to(repo))) for f in files]
+            +[(Frozen(image,hold=False),'containers/runtime.sif'),(Frozen(settings),'campaign-settings.yaml')])
+
+
 def upload(node,files,destination,control_dir=None):
     remote(node,['mkdir','-p',destination],control_dir)
     command=ssh_args(node,control_dir)+[shlex.join(['tar','xf','-','-C',destination])]
@@ -191,7 +230,10 @@ def upload(node,files,destination,control_dir=None):
     try:
         with tarfile.open(fileobj=process.stdin,mode='w|') as archive:
             for path,name in files:
-                archive.add(path,arcname=name,recursive=False)
+                if isinstance(path,Frozen):
+                    path.add_to(archive,name)
+                else:
+                    archive.add(path,arcname=name,recursive=False)
         process.stdin.close()
         if process.wait():raise RuntimeError(f'Transfer failed to {node}')
     finally:
@@ -262,10 +304,7 @@ def main():
     beams=[f for f in sorted(a.input.resolve().rglob('*_ff.fil')) if not excluded(f,a.exclude_beams)]
     if not beams:p.error('No prepared beams found')
     if len({f.name for f in beams})!=len(beams):p.error('Duplicate beam basenames')
-    # A frozen source snapshot avoids edits to a checkout changing a running job.
-    source=[(f,str(f.relative_to(REPO))) for f in REPO.rglob('*') if f.is_file()
-            and f.suffix in {'.py','.yaml','.lock'} and not any(x in f.parts for x in ['.git','__pycache__','.pytest_cache'])]
-    source += [(a.image.resolve(),'containers/runtime.sif'),(a.settings.resolve(),'campaign-settings.yaml')]
+    source=freeze_source(REPO,a.settings.resolve(),a.image.resolve())
     a.work.mkdir(parents=True,exist_ok=True)
     ledger=Ledger(a.ledger)
     tiered=bool(a.cpu_nodes)
