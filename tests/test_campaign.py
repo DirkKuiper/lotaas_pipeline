@@ -870,3 +870,46 @@ def test_the_loop_rests_while_every_source_with_files_is_paused(tmp_path, monkey
     assert not campaign.retrieving(), 'nothing can be fetched until the pause ends'
     campaign.throttle_until = 0
     assert campaign.retrieving()
+
+
+def test_a_beam_converted_while_its_sap_is_flatfielded_is_kept_for_the_saved_flatfield(tmp_path, monkeypatch):
+    # L1275137 SAP000 on 26 September: searched without beams 6, 47 and 49; 6 and 47 were
+    # converted during its flatfield and deleted with the unflattened files, never searched.
+    import threading
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)],
+                                 partial_after_hours=2.0, partial_missing=3)
+    campaign.tick()
+    late = [38, 58]
+    put_online(api, where, '1000001', 0, [b for b in FULL if b not in late])
+    campaign.tick()
+    settle(campaign)
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET updated=updated-7300 WHERE state='converted'")
+    listed, gate = threading.Event(), threading.Event()
+    real = campaign.runner.flatfield
+
+    def slow(sap, **kw):
+        # The flatfield takes the beams present when it starts and runs for minutes.
+        present = sorted(sap.glob('B*/*_32bit.fil'))
+        listed.set()
+        gate.wait(10)
+        hidden = [p for p in sap.glob('B*/*_32bit.fil') if p not in present]
+        for p in hidden:
+            p.rename(p.with_name(p.name + '.hide'))
+        try:
+            return real(sap, **kw)
+        finally:
+            for p in hidden:
+                p.with_name(p.name + '.hide').rename(p)
+    campaign.runner.flatfield = slow
+    campaign.tick()                                   # stalled a few beams short: flatfielded without them
+    assert listed.wait(10)
+    put_online(api, where, '1000001', 0, late)
+    campaign.refresh()
+    campaign.retrieve()                               # the late beams arrive meanwhile
+    gate.set()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    assert sap['state'] == 'prepared' and (Path(sap['sap_dir'])/C.MEAN).is_file()
+    raw = sorted(p.parent.name for p in Path(sap['sap_dir']).glob('B*/*_32bit.fil'))
+    assert raw == ['B038', 'B058'], 'only the flatfielded beams lose their unflattened file'
