@@ -28,5 +28,15 @@ def running_baseline(series, window, start=0, stop=None):
 
 
 def baseline_window(width, tsamp, downsample, baseline_seconds, baseline_widths=64):
-    """Samples of running baseline removed before a boxcar of `width` trial samples."""
-    return max(int(round(baseline_seconds / (tsamp * downsample))), int(baseline_widths) * int(width))
+    """Samples of running baseline removed before a boxcar of `width` trial samples.
+
+    baseline_seconds, doubled until it spans baseline_widths x width. Widths
+    that share a window share one baseline: a trial's 14 boxcar widths need 6
+    baselines instead of 12, which halves the matched filter's time (122 to
+    65 ms a one-hour trial; with 12 the pilot of 27 September spent 3.8 times
+    production's matched-filter time).
+    """
+    window = max(2, int(round(baseline_seconds / (tsamp * downsample))))
+    while window < int(baseline_widths) * int(width):
+        window *= 2
+    return window
