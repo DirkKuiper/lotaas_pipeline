@@ -95,7 +95,8 @@
     $('m-peak').textContent = fmt(v.peak_snr, 1);
     $('m-width').textContent = v.best_width ? `${fmt(v.best_width * v.analysis_tsamp, 3)} s (S/N ${fmt(v.best_snr, 1)})` : '—';
     $('status').textContent = `DM ${fmt(v.dm, 3)}${state.raw ? ' (not dedispersed)' : ''} · ${fmt(v.tsamp * 1e3, 2)} ms × ${v.nsub} subbands` +
-      ` · local S/N ${fmt(v.peak_snr, 1)} at ${fmt(v.width_seconds, 3)} s width (${v.reference_windows} reference windows)` +
+      ` · local S/N ${fmt(v.peak_snr, 1)} as the search measures it (${fmt(v.raw_peak_snr, 1)} without its zero-DM filter and baseline)` +
+      ` at ${fmt(v.width_seconds, 3)} s width (${v.reference_windows} reference windows)` +
       (v.pixel_snr !== null && v.pixel_snr !== undefined ? ` · pulse ≈ ${fmt(v.pixel_snr, 1)}σ per pixel` +
         (v.smooth && v.smoothed_pixel_snr !== null ? `, ≈ ${fmt(v.smoothed_pixel_snr, 1)}σ smoothed` : '') +
         ((v.smooth ? v.smoothed_pixel_snr : v.pixel_snr) < 2 ? ' (faint at this display: try smoothing or the matched view)' : '') : '') +

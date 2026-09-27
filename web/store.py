@@ -115,9 +115,11 @@ CREATE TABLE IF NOT EXISTS sp_low_dm_read (dir TEXT PRIMARY KEY);
 -- none standing out (indexer.derive_coincidence): an undispersed burst seen in one beam.
 CREATE TABLE IF NOT EXISTS sp_sweep (key TEXT PRIMARY KEY, events INTEGER, expected REAL, dm_min REAL,
     dm_max REAL, peak_ratio REAL);
--- The review page's local S/N of a queued single-pulse candidate, measured once on its snippet
--- (indexer.measure_local): what web.triage compares with the search's S/N.
-CREATE TABLE IF NOT EXISTS sp_local (key TEXT PRIMARY KEY, local_snr REAL, measured REAL);
+-- The review page's local S/N of a queued single-pulse candidate, measured once on its snippet as the
+-- search measures (indexer.measure_local): what web.triage compares with the search's S/N. sp_local
+-- held the measure without the zero-DM filter and baseline, until 27 September 2026.
+DROP TABLE IF EXISTS sp_local;
+CREATE TABLE IF NOT EXISTS sp_local_snr (key TEXT PRIMARY KEY, local_snr REAL, measured REAL);
 -- A single pulse of a catalogued pulsar seen away from its own beam (indexer.derive_known).
 CREATE TABLE IF NOT EXISTS sp_known (key TEXT PRIMARY KEY, pulsar TEXT, name TEXT, separation_deg REAL,
     route TEXT, z REAL);

@@ -96,7 +96,7 @@ def settled(db):
                                   f"{r['dm_min']:.1f}-{r['dm_max']:.1f}, the strongest {r['peak_ratio']:.2f} times the "
                                   f"median S/N: no DM stands out as a pulse's would.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, c.snr, l.local_snr, {earlier} AS earlier FROM candidates c
-            JOIN sp_local l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND l.local_snr IS NOT NULL
+            JOIN sp_local_snr l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND l.local_snr IS NOT NULL
             AND l.local_snr < ? AND c.snr >= ? AND {NOT_KNOWN}""", (LOCAL_MIN, SEARCH_MIN)):
         out.setdefault(r['key'], (r['key'], 'noise', f"Search S/N {r['snr']:.1f}, but S/N {r['local_snr']:.1f} on its "
                                   f"own data at its time, DM and width (the local S/N of the review page): no pulse "

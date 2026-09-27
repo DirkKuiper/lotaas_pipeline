@@ -650,7 +650,7 @@ def test_a_candidate_its_own_data_do_not_show_is_noise(cfg, campaign, amplitude,
     indexer.run_pass()
     Snippets(cfg).run_pass()
     indexer.run_pass()
-    local = indexer.db.execute('SELECT local_snr FROM sp_local').fetchall()
+    local = indexer.db.execute('SELECT local_snr FROM sp_local_snr').fetchall()
     assert len(local) == 1 and (local[0][0] < 4) == settled
     noise = [v for v in verdicts(cfg) if v['label'] == 'noise']
     assert bool(noise) == settled

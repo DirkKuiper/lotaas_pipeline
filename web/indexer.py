@@ -997,7 +997,7 @@ class Indexer:
         """The local S/N the review page shows, measured once on the snippet of each open queued candidate."""
         rows = self.db.execute("""SELECT c.key, s.path FROM candidates c JOIN snippets s ON s.key=c.key
             WHERE c.kind='sp' AND c.type IN ('candidate', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
-            AND NOT EXISTS (SELECT 1 FROM sp_local l WHERE l.key=c.key)
+            AND NOT EXISTS (SELECT 1 FROM sp_local_snr l WHERE l.key=c.key)
             AND NOT EXISTS (SELECT 1 FROM review_state.reviews v WHERE v.key=c.key AND v.reviewer != 'auto-triage')
             LIMIT ?""", (limit,)).fetchall()
         if not rows:
@@ -1012,7 +1012,7 @@ class Indexer:
                 continue
             measured.append((key, snr if math.isfinite(snr) else None, time.time()))
         with self.db:
-            self.db.executemany('INSERT OR REPLACE INTO sp_local VALUES (?,?,?)', measured)
+            self.db.executemany('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,?)', measured)
         return len(measured)
 
     def repair_positions(self):

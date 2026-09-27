@@ -17,6 +17,7 @@ import warnings
 
 import numpy as np
 
+from lotaas_reprocessing.baseline import baseline_window, running_baseline
 from lotaas_reprocessing.single_pulse_quality import persistent_channels, local_boxcar_snr
 
 from web import sigproc
@@ -212,6 +213,12 @@ def smooth_image(image, sigma):
     return smoothed
 
 
+# The single-pulse search since 27 September 2026 (pipeline settings preprocessing.zero_dm and
+# single_pulse.baseline_seconds) subtracts the mean over channels at each sample and a 2 s running
+# baseline; the local S/N is measured the same way, so the page and the search agree on a pulse.
+SEARCH_BASELINE_SECONDS = 2.0
+
+
 class Snippet:
     """A candidate's filterbank snippet with its sidecar, normalised once per channel.
 
@@ -265,6 +272,22 @@ class Snippet:
     @property
     def times(self):
         return self.t0 + np.arange(self.data.shape[0]) * self.tsamp
+
+    def search_series(self, dm, extra=(), auto_mask=True):
+        """The band series as the search measures it: zero-DM filtered, dedispersed, running baseline removed."""
+        data = self.masked(extra, auto_mask)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            data = data - np.nanmean(data, axis=1, keepdims=True)
+            aligned = dedisperse(data, self.freqs, self.tsamp, dm)
+            usable = max(1, int(np.isfinite(data).any(axis=0).sum()))
+            series = np.where(np.isfinite(aligned).sum(axis=1) >= usable, np.nanmean(aligned, axis=1), np.nan)
+        finite = np.isfinite(series)
+        window = baseline_window(self.width, self.tsamp, 1, SEARCH_BASELINE_SECONDS)
+        if finite.sum() > 2 * window:
+            filled = np.where(finite, series, np.nanmedian(series))
+            series = np.where(finite, filled - running_baseline(filled, window), np.nan)
+        return series
 
     def masked(self, extra=(), auto_mask=True):
         data = self.normalised.copy()
@@ -336,8 +359,13 @@ class Snippet:
         boxcar_snr = self.snr(series, times, self.width)
         # This is a fixed event window, never a peak selected elsewhere in a
         # large snippet. The local noise uses independent same-width windows.
-        evidence = local_boxcar_snr(series, -self.t0 / self.tsamp, self.width,
-                                   radius=round(self.analysis / self.tsamp))
+        # The event window is fixed, never a peak selected elsewhere in a large snippet, and the
+        # local noise uses independent same-width windows; measured as the search measures (the
+        # peak) and on the band average as displayed (raw).
+        radius = round(self.analysis / self.tsamp)
+        raw_peak = local_boxcar_snr(series, -self.t0 / self.tsamp, self.width, radius=radius)['local_snr']
+        evidence = local_boxcar_snr(self.search_series(dm, mask, auto_mask), -self.t0 / self.tsamp, self.width,
+                                    radius=radius)
         peak = evidence['local_snr']
         # The same measurement without the reviewer's own mask. Channels picked
         # while looking at the pulse raise its S/N by chance alone: dropping
@@ -345,14 +373,8 @@ class Snippet:
         # noise event to about 6.8.
         unmasked = peak
         if mask:
-            plain = dedisperse(self.masked((), auto_mask), self.freqs, self.tsamp, dm)
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', RuntimeWarning)
-                plain_counts = np.isfinite(plain).sum(axis=1)
-                plain_usable = max(1, nf - len(set(self.known_bad) | (set(self.automatic_bad) if auto_mask else set())))
-                plain_series = np.where(plain_counts >= plain_usable, np.nanmean(plain, axis=1), np.nan)
-            unmasked = local_boxcar_snr(plain_series, -self.t0 / self.tsamp, self.width,
-                                        radius=round(self.analysis / self.tsamp))['local_snr']
+            unmasked = local_boxcar_snr(self.search_series(dm, (), auto_mask), -self.t0 / self.tsamp, self.width,
+                                        radius=radius)['local_snr']
         best_snr, best_width = self.best_width(series, times)
 
         # On/reference spectra use the measured scatter of same-width sums in
@@ -411,17 +433,18 @@ class Snippet:
                 'zmin': float(low), 'zmax': float(high),
                 'series': scrunch(per_sample[first:stop, None], factor, 1)[:, 0],
                 'boxcar': scrunch(boxcar_snr[first:stop, None], factor, 1)[:, 0],
-                'peak_snr': peak, 'width': self.width, 'width_seconds': self.width * self.tsamp,
+                'peak_snr': peak, 'raw_peak_snr': raw_peak, 'width': self.width,
+                'width_seconds': self.width * self.tsamp,
                 'best_snr': best_snr, 'best_width': best_width,
                 'reference_windows': evidence['reference_windows'],
                 'spectrum_on': np.asarray(spectrum_on), 'spectrum_off': np.asarray(spectrum_off),
                 'masked': masked, 'automatic_bad': self.automatic_bad,
                 'unmasked_peak_snr': unmasked, 'profiles': np.asarray(profiles, dtype=np.float32),
                 'profile_freqs': profile_freqs,
-                'pixel_snr': pixel_snr(peak, image.shape[1], factor, self.width),
+                'pixel_snr': pixel_snr(raw_peak, image.shape[1], factor, self.width),
                 'smooth': float(smooth or 0.0),
-                'smoothed_pixel_snr': (pixel_snr(peak, image.shape[1], factor, self.width) * smoothing_gain(smooth)
-                                       if smooth and pixel_snr(peak, image.shape[1], factor, self.width) is not None
+                'smoothed_pixel_snr': (pixel_snr(raw_peak, image.shape[1], factor, self.width) * smoothing_gain(smooth)
+                                       if smooth and pixel_snr(raw_peak, image.shape[1], factor, self.width) is not None
                                        else None),
                 'coverage_seconds': [float(times[covered][0]), float(times[covered][-1])] if covered.any() else None}
 

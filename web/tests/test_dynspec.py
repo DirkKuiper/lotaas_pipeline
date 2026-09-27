@@ -117,7 +117,8 @@ def test_view_reports_profiles_pixel_snr_and_the_unmasked_snr(tmp_path):
     plain = s.view(window=2.0, nsub=8)
     assert plain['profiles'].shape == (4, len(plain['times']))
     assert plain['unmasked_peak_snr'] == plain['peak_snr']
-    assert plain['pixel_snr'] == pytest.approx(dynspec.pixel_snr(plain['peak_snr'], 8, 1, s.width))
+    # The per-pixel hint describes the image as displayed, without the search's zero-DM filter.
+    assert plain['pixel_snr'] == pytest.approx(dynspec.pixel_snr(plain['raw_peak_snr'], 8, 1, s.width))
     masked = s.view(window=2.0, nsub=8, mask=[5, 6, 7])
     assert masked['unmasked_peak_snr'] == pytest.approx(plain['peak_snr'])
 
@@ -164,3 +165,15 @@ def test_displayed_pixels_are_in_sigma_of_their_own_resolution(tmp_path):
         assert abs(scatter - 1) < 0.1, kwargs
     smooth = s.view(window=2.0, tscrunch=1, nsub=16, smooth=1.0)
     assert smooth['smooth'] == 1.0 and smooth['smoothed_pixel_snr'] > smooth['pixel_snr']
+
+
+def test_the_local_snr_is_measured_as_the_search_measures_it(tmp_path):
+    # Since 27 September 2026 the search takes out the mean over channels at each sample and a 2 s baseline:
+    # a burst at every frequency at once registers raw but not as searched; a dispersed pulse keeps its S/N.
+    (tmp_path / 'burst').mkdir()
+    (tmp_path / 'pulse').mkdir()
+    burst = snippet(tmp_path / 'burst', dm=0.5, amplitude=0.0, undispersed=15.0)
+    view = burst.view(window=2.0, nsub=16)
+    assert view['raw_peak_snr'] > 8 and view['peak_snr'] < 3
+    pulse = snippet(tmp_path / 'pulse').view(window=2.0, nsub=16)
+    assert pulse['peak_snr'] > 0.8 * pulse['raw_peak_snr'] > 6
