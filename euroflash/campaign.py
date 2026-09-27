@@ -287,6 +287,9 @@ class Campaign:
         self.manifest_lock = threading.Lock()
         self.flatfield_pool = ThreadPoolExecutor(max_workers=max(1, getattr(options, 'flatfield_workers', 2)))
         self.flatfield_jobs = {}
+        # Files being retrieved, {surl: (source, future)}, in a pool per source that outlives the pass.
+        self.retrievals = {}
+        self.retrieval_pools = {}
         self.throttle_until = 0.
         self.spider_throttle_until = 0.
         # Cluster runs in flight by run name. Each holds one GPU node until the
@@ -481,23 +484,71 @@ class Campaign:
 
     # ---------------------------------------------------------- retrieval
     def retrieve(self):
-        """Download, extract, convert and delete raw data for files on disk; fetch SPIDER beams beside them."""
-        now, files, workers = time.time(), [], 0
-        for source, until, n in (('lta', self.throttle_until, self.o.download_workers),
-                                 ('spider', self.spider_throttle_until, getattr(self.o, 'spider_workers', 0))):
+        """Download, extract, convert and delete raw data for files on disk; fetch SPIDER beams beside them.
+
+        Each source's files run in a pool of its workers that outlives the pass,
+        at most workers x --files-per-worker of them handed out at once. A pass
+        hands out what fits and waits at most --retrieve-wait seconds for what is
+        in hand, then goes on to flatfield and dispatch. On 25-26 September 49 of
+        16,035 downloads crawled at 2-3.5 MB/s for up to 45 min; while each pass
+        waited for its whole batch, the GPUs waited with it (4.4 searches an hour
+        that night, 6.4 the next). Returns how many files were converted since
+        the last pass looked.
+        """
+        done = self.collect_retrievals()
+        now = time.time()
+        for source, until, n in self.retrieval_sources():
             if now < until or n < 1:
                 continue
-            files += self.state.rows('''SELECT f.* FROM files f JOIN saps s ON s.key=f.sap_key
+            room = n * self.o.files_per_worker - sum(1 for s, _ in self.retrievals.values() if s == source)
+            if room < 1:
+                continue
+            files = self.state.rows('''SELECT f.* FROM files f JOIN saps s ON s.key=f.sap_key
                                        WHERE f.state='online' AND s.source=? ORDER BY s.position,f.beam LIMIT ?''',
-                                     source, n * self.o.files_per_worker)
-            workers += n
-        if not files:
-            return 0
-        for f in files:
-            self.state.set_file(f['surl'], state='working')
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            done = sum(pool.map(self.process_file, files))
+                                    source, room)
+            if files and source not in self.retrieval_pools:
+                self.retrieval_pools[source] = ThreadPoolExecutor(max_workers=n, thread_name_prefix=f'retrieve-{source}')
+            for f in files:
+                self.state.set_file(f['surl'], state='working')
+                self.retrievals[f['surl']] = (source, self.retrieval_pools[source].submit(self.process_file, f))
+        if self.retrievals:
+            wait([future for _, future in self.retrievals.values()], timeout=self.o.retrieve_wait)
+        return done + self.collect_retrievals()
+
+    def retrieval_sources(self):
+        """(source, paused until, workers) of each source of files."""
+        return (('lta', self.throttle_until, self.o.download_workers),
+                ('spider', self.spider_throttle_until, getattr(self.o, 'spider_workers', 0)))
+
+    def collect_retrievals(self):
+        """Take in the retrievals that ended since the last look; returns how many converted their file."""
+        done = 0
+        for surl, (_, future) in list(self.retrievals.items()):
+            if not future.done():
+                continue
+            del self.retrievals[surl]
+            try:
+                done += future.result()
+            except Exception as error:
+                # process_file records its own failures, so this is a fault in it: try the file again.
+                self.state.set_file(surl, state='online', detail=f'retrieval raised {error!r}'[:2000])
+                self.state.event('retrieve_failed', surl, repr(error))
         return done
+
+    def retrieving(self):
+        """Whether a pass has retrieval to wait for: files in flight, or on disk for a source not backing off.
+
+        Only then does the loop go straight back. While SURF throttled us
+        (HTTP 429, 28 times on 25-27 September) files stayed 'online' and the
+        loop went round about a hundred times a minute for the whole pause.
+        """
+        if self.retrievals:
+            return True
+        now = time.time()
+        sources = [source for source, until, n in self.retrieval_sources() if n >= 1 and now >= until]
+        return bool(sources) and bool(self.state.rows(
+            f"""SELECT 1 FROM files f JOIN saps s ON s.key=f.sap_key WHERE f.state='online'
+                AND s.source IN ({','.join('?' * len(sources))}) LIMIT 1""", *sources))
 
     def process_file(self, f):
         from euroflash import spider
@@ -943,6 +994,7 @@ class Campaign:
         converted = self.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='converted' AND updated>?", day)[0]['n']
         report = {'time_unix': time.time(), 'root': str(self.root), **counts,
                   'files_converted_last_24h': converted,
+                  'retrievals_in_flight': len(self.retrievals),
                   'free_tb': round(shutil.disk_usage(self.root).free / 1e12, 2),
                   'active_requests': self.state.rows('''SELECT r.id,r.sap_key,r.status,r.files,
                         SUM(f.state='requested') AS waiting FROM requests r JOIN files f ON f.request_id=r.id
@@ -1045,12 +1097,18 @@ class Campaign:
                                        "('pending','staging','flatfielding','prepared','dispatched','partial') LIMIT 1")
             if self.o.once or self.should_stop() or (idle and not self.dispatches):
                 break
-            # Retrieval work is taken in bounded batches; go straight back for more.
-            if self.state.rows("SELECT 1 FROM files WHERE state='online' LIMIT 1"):
+            # A pass waits for retrieval itself (retrieve): go straight back while there is some.
+            if self.retrieving():
                 continue
             deadline = time.time() + self.o.poll_seconds
             while time.time() < deadline and not self.should_stop():
                 time.sleep(min(5, max(0, deadline - time.time())))
+        if self.retrievals:
+            # Record retrievals still running rather than redo them next start.
+            wait([future for _, future in self.retrievals.values()])
+            self.collect_retrievals()
+        for pool in self.retrieval_pools.values():
+            pool.shutdown(wait=True)
         if self.flatfield_jobs:
             # Record flatfields still running rather than redo them next start.
             wait(list(self.flatfield_jobs.values()))
@@ -1091,7 +1149,9 @@ def parser():
     run.add_argument('--max-prepared-saps', type=int, default=20, help='Prepared SAPs allowed to wait for a search')
     run.add_argument('--min-free-tb', type=float, default=5.0, help='Stop admitting SAPs below this free space')
     run.add_argument('--download-workers', type=int, default=4)
-    run.add_argument('--files-per-worker', type=int, default=4, help='Files each worker takes per loop pass')
+    run.add_argument('--files-per-worker', type=int, default=4, help='Files handed to each download worker at once')
+    run.add_argument('--retrieve-wait', type=float, default=60,
+                     help='Seconds a pass waits for downloads in hand before it flatfields and dispatches')
     run.add_argument('--poll-seconds', type=float, default=300)
     run.add_argument('--locality-interval', type=float, default=900, help='Seconds between dCache checks of a file')
     run.add_argument('--restage-after-hours', type=float, default=12)
