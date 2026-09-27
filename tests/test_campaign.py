@@ -797,3 +797,76 @@ def test_late_beams_that_arrive_during_the_partial_search_are_not_forgotten(tmp_
     settle(campaign)
     assert campaign.runner.flatfielded[-1][1:] == (False, None, str(sap_dir/C.MEAN))
     assert [p.parent.name for p in campaign.unsearched(sap['key'])] == ['B038', 'B058']
+
+
+def test_a_crawling_download_holds_one_worker_not_the_pass(tmp_path, monkeypatch):
+    # 25-26 September: 49 of 16,035 downloads crawled for up to 45 min, and each held its
+    # batch, and with it every dispatch, until it ended.
+    import threading
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], retrieve_wait=0.2)
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    slow = C.basename(surl('1000001', 0, 20))
+    gate = threading.Event()
+
+    def crawling(url, tokens, target, max_bytes):
+        if Path(target).name == slow:
+            gate.wait(60)
+        return fake_download(url, tokens, target, max_bytes)
+    monkeypatch.setattr('euroflash.download.download', crawling)
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        begun = time.time()
+        campaign.tick()
+        assert time.time() - begun < 5, 'a pass goes on without the crawling download'
+        states = {r['name']: r['state'] for r in campaign.state.rows("SELECT name,state FROM files WHERE state!='excluded'")}
+        if sum(s == 'converted' for s in states.values()) == 72:
+            break
+    assert states[slow] == 'working' and campaign.retrieving()
+    assert campaign.status()['retrievals_in_flight'] == 1
+    gate.set()
+    campaign.retrieve()
+    assert campaign.state.rows('SELECT state FROM files WHERE name=?', slow)[0]['state'] == 'converted'
+    assert not campaign.retrievals
+
+
+def test_a_pass_hands_out_no_more_than_the_workers_hold_and_tops_them_up(tmp_path, monkeypatch):
+    import threading
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)],
+                                 download_workers=2, files_per_worker=1, retrieve_wait=0.05)
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    slow = C.basename(surl('1000001', 0, 0))                 # the first handed out
+    gate = threading.Event()
+
+    def crawling(url, tokens, target, max_bytes):
+        if Path(target).name == slow:
+            gate.wait(60)
+        return fake_download(url, tokens, target, max_bytes)
+    monkeypatch.setattr('euroflash.download.download', crawling)
+    campaign.refresh()
+    for _ in range(6):
+        campaign.retrieve()
+        assert len(campaign.retrievals) <= 2
+    converted = campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='converted'")[0]['n']
+    assert converted >= 5, 'the free worker kept taking files'
+    assert campaign.state.rows('SELECT state FROM files WHERE name=?', slow)[0]['state'] == 'working'
+    gate.set()
+    campaign.retrieve()
+
+
+def test_the_loop_rests_while_every_source_with_files_is_paused(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    campaign.tick()
+    put_online(api, where, '1000001', 0, [13, 14])
+
+    def throttled(*args):
+        raise IOError('HTTP Error 429: Too Many Requests')
+    monkeypatch.setattr('euroflash.download.download', throttled)
+    campaign.refresh()
+    assert campaign.retrieving(), 'files on disk to fetch'
+    campaign.retrieve()
+    assert not campaign.retrievals and campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='online'")[0]['n'] == 2
+    assert not campaign.retrieving(), 'nothing can be fetched until the pause ends'
+    campaign.throttle_until = 0
+    assert campaign.retrieving()
