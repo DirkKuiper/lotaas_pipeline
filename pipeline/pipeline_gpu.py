@@ -129,12 +129,16 @@ if __name__ == "__main__":
         observation_info=observation_info
     )
 
-   # Masking and replacing data with random noise
-    print("Replacing masked data with random noise...")
+   # Masked cells filled (lotaas_reprocessing.preprocess): at the channel's own local level since
+    # 28 September; at the global mean before, which left 7.9 s steps in the dedispersed series.
+    from lotaas_reprocessing.preprocess import fill_masked, zero_dm
+    preprocessing = settings.get("preprocessing") or {}
+    fill_mode = preprocessing.get("mask_fill", "global")
+    print(f"Filling masked data ({fill_mode})...")
     rng = np.random.default_rng(args.seed)
     if not np.isfinite(masked_data).any():
         raise ValueError("All data were masked")
-    masked_data[mask] = rng.normal(np.nanmean(masked_data), np.nanstd(masked_data), int(mask.sum()))
+    fill_masked(masked_data, mask, block_size, rng, fill_mode)
 
     print(f"nu shape: {nu.shape}, range: {nu.min()} - {nu.max()}")
 
@@ -156,6 +160,12 @@ if __name__ == "__main__":
         detrended_data[freq_idx, :] = masked_data[freq_idx, :] - p(t)
 
     masked_data = detrended_data
+
+    if preprocessing.get("zero_dm"):
+        # Broadband interference and a tied-array beam's slow broadband wander arrive at every
+        # frequency at once: subtract the mean over channels at each sample.
+        print("Zero-DM filtering...")
+        zero_dm(masked_data)
 
     # Create FITS header
     hdr = fits.Header()
@@ -275,7 +285,7 @@ if __name__ == "__main__":
 
     # Save metadata to a YAML file
     metadata_file = os.path.join(output_dir, "metadata.yaml")
-    metadata = {"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "periodicity": periodicity, "periodicity_enabled": periodicity_enabled, "periodicity_dm_plan": periodicity_plan if periodicity_enabled else [], "classification": settings.get("classification") or {}, "stage_timings": {"dedispersion": dedispersion_timing, "periodicity_dedispersion": periodicity_timing}, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
+    metadata = {"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "periodicity": periodicity, "periodicity_enabled": periodicity_enabled, "periodicity_dm_plan": periodicity_plan if periodicity_enabled else [], "classification": settings.get("classification") or {}, "preprocessing": preprocessing, "stage_timings": {"dedispersion": dedispersion_timing, "periodicity_dedispersion": periodicity_timing}, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
                    # Band limits, so the search can size the tail that circular
                    # dedispersion pollutes at each DM.
                    "nu_min": float(np.min(nu)), "nu_max": float(np.max(nu)),
