@@ -41,9 +41,12 @@ def test_a_local_stretch_gets_the_whole_series_values():
 
 
 def test_window_scales_with_width_and_has_a_floor():
-    assert baseline_window(1, DT, 1, 2.0) == round(2.0 / DT)
-    assert baseline_window(100, DT, 1, 2.0) == 6400
-    assert baseline_window(3, DT, 32, 2.0) == 192
+    base = round(2.0 / DT)
+    assert baseline_window(1, DT, 1, 2.0) == base
+    assert baseline_window(100, DT, 1, 2.0) == 32 * base >= 64 * 100   # doubled until it spans 64 widths
+    assert baseline_window(3, DT, 32, 2.0) == 256                     # round(2 s / (32 DT)) = 8, doubled past 192
+    # The widths of a one-hour trial share six baselines.
+    assert len({baseline_window(w, DT, 1, 2.0) for w in (1, 2, 3, 5, 6, 9, 13, 18, 25, 34, 48, 66, 91, 127)}) == 6
 
 
 def test_merging_keeps_one_strongest_crossing_per_event():
