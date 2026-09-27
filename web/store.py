@@ -151,12 +151,20 @@ ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
          'sp_coincidence': (('near_zero', 'INTEGER'), ('events', 'INTEGER'))}
 
 
+# Reads through a memory map of the file, and a larger page cache for what the
+# WAL holds (web.sqlite is about 1 GB; SQLite's default cache is 2 MB).
+MMAP_BYTES = 4 << 30
+CACHE_KIB = 64 << 10
+
+
 def _connect(path, schema):
     # URI mode, so the sources can be ATTACHed read-only with ?mode=ro.
     db = sqlite3.connect(f'file:{quote(str(path))}', uri=True, timeout=60, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA journal_mode=WAL')
     db.execute('PRAGMA busy_timeout=60000')
+    db.execute(f'PRAGMA mmap_size={MMAP_BYTES}')
+    db.execute(f'PRAGMA cache_size=-{CACHE_KIB}')
     db.executescript(schema)
     for table, columns in RETIRED.items():
         present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
@@ -187,6 +195,11 @@ def reading(cfg):
     db = sqlite3.connect(cfg.index_db, timeout=60, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA busy_timeout=60000')
+    # Each page opens its own handle, so SQLite's own 2 MB cache starts empty
+    # every time; a mapped file reads straight from the OS cache. The single-pulse
+    # counts walk every SP candidate: 11 s through read() calls, 0.7 s mapped.
+    db.execute(f'PRAGMA mmap_size={MMAP_BYTES}')
+    db.execute(f'PRAGMA cache_size=-{CACHE_KIB}')
     db.execute('ATTACH DATABASE ? AS r', (str(cfg.reviews_db),))
     try:
         yield db
