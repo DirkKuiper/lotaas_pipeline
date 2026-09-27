@@ -1,6 +1,6 @@
 """The data before dedispersion: RFI-masked cells filled, and a zero-DM filter.
 
-Measured on 27-28 September on three LT5_004 beams, one of them holding
+Measured on 27 September 2026 on three LT5_004 beams, one of them holding
 B2217+47, and an early-cycle beam (benchmarks/snr-discrepancy-2026-09-27):
 
 - The RFI mask flags 7.9 s blocks of single channels. Filled with noise at
@@ -52,7 +52,7 @@ def local_levels(masked, block):
 def fill_masked(data, mask, block, rng, mode='global'):
     """Fill the masked cells of data (channel, time; NaN where masked) in place and return it.
 
-    'global': noise at the unmasked data's mean and spread, as before 28 September.
+    'global': noise at the unmasked data's mean and spread, the original fill.
     'local': each channel's local level (local_levels over RFI blocks) plus
     noise of the typical channel's spread.
     """
