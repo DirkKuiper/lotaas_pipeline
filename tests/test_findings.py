@@ -260,3 +260,26 @@ def test_ecliptic_positions_are_read_too():
     text = 'PSRJ     J0141+6009\nELONG    50.28081\nELAT     45.30668\nDM       34.8\nF0       0.8130\n@---\n'
     pulsar, = psrcat.parse(text)
     assert abs(pulsar['ra'] - 25.416) < 0.01 and abs(pulsar['dec'] - 60.159) < 0.01
+
+
+def test_a_bright_pulsars_harmonics_and_their_aliases_keep_nothing(tmp_path):
+    # L543473 SAP001 B023: B2217+47 (P 0.53848 s, DM 43.5) folded at P/2 with statistic 63,743, and seen again
+    # at its 17th harmonic, at P/2 at DMs 286 and 523, and as aliases of its 9th, 19th and 20th harmonics.
+    results = tmp_path/'results'
+    run = 'campaign-20260927-052342-gpu00'
+    f0 = 1 / 0.5384801
+    parent = fold(2 * f0, 43.5, 63743.0, catalogue_matches=[{'name': 'J2219+4754'}])
+    repeats = [fold(17 * f0, 43.5, 5665.6), fold(2 * f0, 285.6, 515.2), fold(2 * f0, 523.2, 402.0),
+               fold(1 / 0.2860939, 438.8, 630.1), fold(1 / 0.1868310, 301.6, 989.5), fold(1 / 1.220799, 887.5, 129.9)]
+    other = fold(1 / 0.7, 57.0, 25.0)
+    items = [beam(results, run, 'L543473', 1, 23 + i, [parent, r], ra='22:19:00', dec='+48:00:00')
+             for i, r in enumerate(repeats)]
+    lone = beam(results, run, 'L543473', 1, 40, [parent, other], ra='22:19:00', dec='+48:00:00')
+    verdicts = judge_run(tmp_path, run)
+    reasons = [verdicts[item][1] for item in items]
+    assert not any(verdicts[item][0] for item in items), reasons
+    assert 'harmonic 17/2' in reasons[0] and 'J2219+4754' in reasons[0]
+    assert all('alias of harmonic' in r for r in reasons[3:]), reasons
+    assert 'x4' in reasons[3] and 'x8' in reasons[5]
+    assert verdicts[lone][0], 'an unrelated fold in the same beam still keeps its filterbank'
+    assert findings.relative(1 / 0.7, 57.0, 2 * f0, 43.5) is None
