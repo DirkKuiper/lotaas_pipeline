@@ -67,6 +67,15 @@ RECURRENCE_BINS = 0.75
 RECURRENCE_OBSERVATIONS = 2
 RECURRENCE_FRACTION = 0.1
 RECURRENCE_AWAY_DEG = 10.0
+# A much stronger catalogued fold of the same beam seen again (relative()): its
+# frequency divided by up to RELATIVE_DIVISORS (it may itself be a harmonic),
+# up to RELATIVE_HARMONICS times, at RELATIVE_RATIO its statistic or more.
+RELATIVE_RATIO = 5.0
+RELATIVE_HARMONICS = 64
+RELATIVE_DIVISORS = 4
+ALIAS_DOWNSAMPLES = (2, 4, 8, 16)
+ALIAS_ORDERS = (1, 2, 3)
+LOTAAS_TSAMP = 0.007864319719374176
 
 
 def _position(info):
@@ -113,7 +122,38 @@ def beam_summary(output, run_name):
             pass
     return {'item': item, 'observation': match[1], 'sap': int(match[2]), 'beam': int(match[3]),
             'run': run_name, 'fp': output.name, 'ra': ra, 'dec': dec, 'mjd': metadata.get('tstart_mjd'),
+            'tsamp': metadata.get('tsamp'),
             'folds': folds, 'vetoed': vetoed, 'sp_candidates': 0}
+
+
+def relative(f, dm, parent_f, parent_dm, tsamp=LOTAAS_TSAMP, tolerance=1 / 3600.):
+    """How a fold at frequency f (Hz) and dm repeats a stronger one: 'harmonic n/m', 'alias ...', or None.
+
+    A bright pulsar leaks across the DM trials at its harmonics and
+    subharmonics. Averaging samples to downsample a trial (before 27 September)
+    also folded a harmonic n f above the new Nyquist frequency fs/2 to
+    |n f - k fs|, at an apparent DM of the pulsar's times n f / |n f - k fs|:
+    B2217+47 (DM 43.5) came out of L543473 SAP001 at 0.286, 0.187 and 1.221 s at
+    DMs 439, 302 and 888, and 48 of its beams were kept for them.
+    """
+    if not f or not parent_f or f <= 0 or parent_f <= 0:
+        return None
+    for m in range(1, RELATIVE_DIVISORS + 1):
+        base = parent_f / m
+        n = round(f / base)
+        if 1 <= n <= RELATIVE_HARMONICS and abs(f - n * base) <= tolerance * (1 + n / 8):
+            return f'harmonic {n}/{m}'
+    for m in range(1, RELATIVE_DIVISORS + 1):
+        base = parent_f / m
+        for ds in ALIAS_DOWNSAMPLES:
+            fs = 1 / (tsamp * ds)
+            for k in ALIAS_ORDERS:
+                for n in range(1, RELATIVE_HARMONICS + 1):
+                    if abs(f - abs(n * base - k * fs)) <= tolerance * (1 + n / 8):
+                        predicted = parent_dm * n * base / f
+                        if abs(dm - predicted) <= max(2.0, 0.05 * predicted):
+                            return f'alias of harmonic {n}/{m} in the x{ds} trials'
+    return None
 
 
 def run_candidates(run_dir):
@@ -372,6 +412,9 @@ class Judge:
             found = psrcat.match(fold['period'], fold['dm'], self.cone(beam), mjd=beam.get('mjd'))
             if found:
                 return f"catalogue {found[0]['name']} {found[1]}"
+        relation = self.relation(fold, beam)
+        if relation:
+            return relation
         elsewhere = self.recurring(fold, beam)
         if len(elsewhere) >= self.recurrence_needed(beam):
             return f'recurs in {len(elsewhere)} other observations'
@@ -379,6 +422,18 @@ class Judge:
         if ((len(beams) >= FAMILY_BEAMS or (len(saps) >= 2 and len(beams) >= FAMILY_BEAMS_TWO_SAPS))
                 and not dm_consistent(dms, home=fold['dm'])):
             return f'family of {len(beams)} beams in {len(saps)} SAPs'
+        return None
+
+    def relation(self, fold, beam):
+        """The much stronger catalogued fold of this beam that this one repeats (relative()), described."""
+        for parent in beam['folds']:
+            if (parent is fold or not parent['catalogue'] or not parent.get('statistic') or not fold.get('statistic')
+                    or parent['statistic'] < RELATIVE_RATIO * fold['statistic']):
+                continue
+            how = relative(fold['f'], fold['dm'], parent['f'], parent['dm'], beam.get('tsamp') or LOTAAS_TSAMP,
+                           fold.get('resolution') or 1 / 3600.)
+            if how:
+                return f"{how} of {parent['catalogue'][0]}"
         return None
 
     def open_candidates(self, beam):
