@@ -76,3 +76,15 @@ def zero_dm(data):
     """Subtract, at each sample, the mean over channels, in place; returns data."""
     data -= data.mean(axis=0, keepdims=True)
     return data
+
+
+def searchable(dm, preprocessing=None):
+    """Whether a DM trial still carries signal after this preprocessing.
+
+    After the zero-DM filter every sample's mean over channels is zero, so the
+    DM 0 trial, their sum, is zero but for rounding. The matched filter scaled
+    that residue, largest where bright interference had been subtracted, into
+    about 230 events of S/N 7 to 30 per beam (pilot of 27 September 2026).
+    Any other trial shifts the channels against each other and keeps its signal.
+    """
+    return not ((preprocessing or {}).get('zero_dm') and dm == 0)

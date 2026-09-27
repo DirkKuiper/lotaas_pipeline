@@ -432,3 +432,17 @@ def test_sifting_connects_neighbours_across_dm_step_boundaries():
     assert len({r['sift_group'] for r in result})==2
     assert result[0]['sift_group']==result[1]['sift_group']
     assert result[2]['sift_group']==result[3]['sift_group']
+
+
+def test_the_dm_zero_trial_is_not_searched_after_the_zero_dm_filter(tmp_path):
+    trials = tmp_path / "Periodic_DM_trials"
+    trials.mkdir()
+    for dm in (0.0, 1.0):
+        periodic_data(.01, 2.56, n=65536).tofile(trials / f"beam_DM{dm}.dat")
+    plan = [{"low_dm": 0, "high_dm": 2, "ddm": 1, "downsample": 1}]
+    metadata = {"tsamp": .01, "filename": "beam.fil", "samples_processed": 65536, "nu_min": 120., "nu_max": 160.,
+                "dedispersion_plan": plan, "periodicity_dm_plan": plan, "preprocessing": {"zero_dm": True}}
+    run_periodicity_search(trials, tmp_path, metadata, config())
+    search = json.loads((tmp_path / "periodicity_search_summary.json").read_text())
+    rows = [json.loads(line) for line in (tmp_path / "periodicity_raw_candidates.jsonl").read_text().splitlines()]
+    assert search["trials_searched"] == 1 and rows and {row["dm"] for row in rows} == {1.0}

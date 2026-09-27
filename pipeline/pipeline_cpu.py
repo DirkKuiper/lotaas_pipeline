@@ -38,7 +38,7 @@ def single_pulse(output, metadata):
         metadata['observation_info'], metadata['dedispersion_plan'],
         nu_min=metadata.get('nu_min'), nu_max=metadata.get('nu_max'), max_duration=max_duration,
         baseline_seconds=sp.get('baseline_seconds'), baseline_widths=sp.get('baseline_widths', 64),
-        merge=bool(sp.get('merge_events', False)))
+        merge=bool(sp.get('merge_events', False)), preprocessing=metadata.get('preprocessing'))
     raw = output/'all_detected_candidates.cands'; clustered = output/'clustered_candidates.txt'
     cluster.cluster_candidates(str(raw), str(clustered), plan=metadata['dedispersion_plan'])
     from lotaas_reprocessing.single_pulse_quality import measure_clusters
