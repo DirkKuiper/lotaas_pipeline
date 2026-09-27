@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -577,3 +578,81 @@ def test_the_index_runs_in_a_process_of_its_own(cfg, campaign):
         assert done, 'the index process never finished a pass'
     workers[0].join(timeout=15)
     assert not workers[0].is_alive()
+
+
+def test_a_burst_in_all_three_saps_at_one_dm_is_interference_too(cfg, campaign):
+    # L556848 on 27 September: a 0.75 s burst at 129-150 MHz in 59 beams of all three SAPs,
+    # all near DM 56. Its DMs agree, but no one position on the sky is in all three SAPs.
+    rows = [(number, 56.0 + 0.3 * (number % 3), 11.0, 13, 'candidate', None, 2284.7 - 56.0 * PER_DM)
+            for number in range(20, 26)]
+    add_detections(campaign, rows)
+    with campaign['ledger'].connect() as db:
+        run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
+        for sap in (1, 2):
+            db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
+                       "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
+                       "(?,56.2,9.0,13,'candidate',NULL,0.8,?,?,1)",
+                       (ITEM.replace('SAP000', f'SAP{sap:03d}').replace('BEAM025', 'BEAM030') + '.fil', run,
+                        2284.7 - 56.2 * PER_DM))
+    Indexer(cfg).run_pass()
+    recorded = verdicts(cfg)
+    assert len(recorded) == 8 and {v['label'] for v in recorded} == {'rfi'}
+    assert all('all three SAPs at one DM' in v['note'] and 'No one position' in v['note'] for v in recorded)
+
+
+def test_a_bright_pulsar_seen_again_at_an_alias_is_known(cfg, campaign):
+    # L543473 SAP001 B023: B2217+47 folded at P/2 (statistic 63,743) and its 19th harmonic, aliased by the
+    # x4 trials to 0.286 s at DM 438.8; an unrelated fold in the same beam stays for a person.
+    beam_dir = campaign['beam_dir']
+    fold(beam_dir, 43.5, 0.2692400, 63743.0, 'b2217')
+    rows = [json.loads(line) for line in (beam_dir / 'periodicity_folded_candidates.jsonl').read_text().splitlines()]
+    rows[0]['catalogue_matches'] = [{'name': 'J2219+4754'}]
+    (beam_dir / 'periodicity_folded_candidates.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    (beam_dir / 'metadata.json').write_text(json.dumps(dict(json.loads((beam_dir / 'metadata.json').read_text()),
+                                                            tsamp=0.007864319719374176)))
+    fold(beam_dir, 438.8, 0.2860939, 630.1, 'alias')
+    fold(beam_dir, 57.0, 0.7, 25.0, 'other')
+    Indexer(cfg).run_pass()
+    recorded = {v['key']: v for v in verdicts(cfg)}
+    by_period = {round(period, 6): key for key, period in Indexer(cfg).db.execute('SELECT key, period FROM periodic')}
+    alias = recorded[by_period[0.286094]]
+    assert alias['label'] == 'known' and 'J2219+4754 seen again: alias of harmonic 19/2 in the x4 trials' in alias['note']
+    assert by_period[0.7] not in recorded
+
+
+def test_right_ascensions_converted_before_the_fix_are_read_back_on_the_sky():
+    from web.indexer import sexagesimal
+    assert abs(sexagesimal('-1:92:65.00', hours=True) - 15 * (23 + 52 / 60 + 25 / 3600)) < 1e-6
+    assert abs(sexagesimal('32:41:08.00', hours=True) - 15 * (8 + 41 / 60 + 8 / 3600)) < 1e-6
+    assert abs(sexagesimal('09:16:45.00', hours=True) - 15 * (9 + 16 / 60 + 45 / 3600)) < 1e-6
+    assert abs(sexagesimal('-02:46:08.00') + (2 + 46 / 60 + 8 / 3600)) < 1e-6
+
+
+def test_beams_recorded_with_a_garbled_right_ascension_are_repaired(cfg, campaign):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    beam_dir = campaign['beam_dir']
+    meta = json.loads((beam_dir / 'metadata.json').read_text())
+    meta['observation_info']['RA (J2000)'] = '-1:92:65.00'
+    (beam_dir / 'metadata.json').write_text(json.dumps(meta))
+    with indexer.db:
+        indexer.db.execute('UPDATE beams SET ra_deg=-38.0 WHERE dir=?', (str(beam_dir),))
+    assert indexer.repair_positions() == 1
+    ra = indexer.db.execute('SELECT ra_deg FROM beams WHERE dir=?', (str(beam_dir),)).fetchone()[0]
+    assert abs(ra - 15 * (23 + 52 / 60 + 25 / 3600)) < 1e-6
+
+
+@pytest.mark.parametrize('amplitude, settled', [(1.2, False), (0.0, True)])
+def test_a_candidate_its_own_data_do_not_show_is_noise(cfg, campaign, amplitude, settled):
+    # The search put it at S/N 12; the snippet either holds the pulse or none (a baseline step of the mask fill).
+    synthetic_filterbank(cfg.source_roots[0] / f'{ITEM}.fil', amplitude=amplitude)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    Snippets(cfg).run_pass()
+    indexer.run_pass()
+    local = indexer.db.execute('SELECT local_snr FROM sp_local').fetchall()
+    assert len(local) == 1 and (local[0][0] < 4) == settled
+    noise = [v for v in verdicts(cfg) if v['label'] == 'noise']
+    assert bool(noise) == settled
+    if settled:
+        assert noise[0]['reviewer'] == 'auto-triage' and 'Search S/N 12.0, but S/N' in noise[0]['note']

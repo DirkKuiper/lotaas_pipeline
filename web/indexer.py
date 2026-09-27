@@ -118,11 +118,22 @@ def key_of(kind, item, dm, width, snr):
 
 
 def sexagesimal(text, hours=False):
-    """'09:16:45.00' or '+71:18:29.00' in degrees."""
+    """'09:16:45.00' or '+71:18:29.00' in degrees; a right ascension comes out within 0-360.
+
+    Beams converted before 27 September west of 0 h, or near the pole, carry
+    right ascensions such as '-1:92:65.00' or '32:41:08.00': a packed hhmmss.s
+    outside 0-24 h (-735.0, 324108.0) split by floor division. Put back
+    together it is read as lotaas_reprocessing.coordinates does (23:52:25, 08:41:08).
+    """
     try:
-        sign = -1 if str(text).strip().startswith('-') else 1
-        parts = [abs(float(p)) for p in str(text).strip().lstrip('+-').split(':')]
-        value = parts[0] + parts[1] / 60 + (parts[2] if len(parts) > 2 else 0) / 3600
+        text = str(text).strip()
+        sign = -1 if text.startswith('-') else 1
+        parts = [abs(float(p)) for p in text.lstrip('+-').split(':')]
+        whole, minutes, seconds = (parts + [0.0, 0.0])[:3]
+        if hours and (sign < 0 or whole >= 24 or minutes >= 60 or seconds >= 60):
+            from lotaas_reprocessing.coordinates import ra_hours
+            return ra_hours(sign * whole * 10000 + minutes * 100 + seconds) * 15
+        value = whole + minutes / 60 + seconds / 3600
         return sign * value * (15 if hours else 1)
     except (ValueError, IndexError, TypeError):
         return None
@@ -982,12 +993,51 @@ class Indexer:
             meta_set(self.db, 'health', report)
         return report
 
+    def measure_local(self, limit=300):
+        """The local S/N the review page shows, measured once on the snippet of each open queued candidate."""
+        rows = self.db.execute("""SELECT c.key, s.path FROM candidates c JOIN snippets s ON s.key=c.key
+            WHERE c.kind='sp' AND c.type IN ('candidate', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
+            AND NOT EXISTS (SELECT 1 FROM sp_local l WHERE l.key=c.key)
+            AND NOT EXISTS (SELECT 1 FROM review_state.reviews v WHERE v.key=c.key AND v.reviewer != 'auto-triage')
+            LIMIT ?""", (limit,)).fetchall()
+        if not rows:
+            return 0
+        from web.dynspec import Snippet
+        measured = []
+        for key, path in rows:
+            try:
+                snr = float(Snippet(path).view()['peak_snr'])
+            except Exception as error:     # a snippet that cannot be read is measured again next time
+                logger.warning('Could not measure %s: %s', key, error)
+                continue
+            measured.append((key, snr if math.isfinite(snr) else None, time.time()))
+        with self.db:
+            self.db.executemany('INSERT OR REPLACE INTO sp_local VALUES (?,?,?)', measured)
+        return len(measured)
+
+    def repair_positions(self):
+        """Read again the right ascension of beams recorded outside 0-360 degrees (sexagesimal); returns how many."""
+        rows = self.db.execute('SELECT dir FROM beams WHERE ra_deg < 0 OR ra_deg >= 360').fetchall()
+        fixed = []
+        for (directory,) in rows:
+            try:
+                info = json.loads((Path(directory) / 'metadata.json').read_text()).get('observation_info') or {}
+            except (OSError, ValueError):
+                continue
+            ra = sexagesimal(info.get('RA (J2000)'), hours=True)
+            if ra is not None and 0 <= ra < 360:
+                fixed.append((ra, directory))
+        with self.db:
+            self.db.executemany('UPDATE beams SET ra_deg=? WHERE dir=?', fixed)
+        return len(fixed)
+
     def run_pass(self, full=False):
         started = time.time()
         timings = {}
         for name, step in (('state', self.sync_state), ('ledger', self.sync_ledger),
                            ('results', lambda: self.scan_results(full)), ('low_dm', self.sync_low_dm),
-                           ('snippets', self.sync_snippets), ('derive', self.derive), ('triage', self.triage),
+                           ('snippets', self.sync_snippets), ('positions', self.repair_positions),
+                           ('derive', self.derive), ('local', self.measure_local), ('triage', self.triage),
                            ('counts', self.count_candidates), ('forecast', self.forecast), ('health', self.health)):
             begun = time.time()
             try:

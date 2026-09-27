@@ -9,19 +9,33 @@ observation shows, not by looking at the candidate:
   pulsar is there. Verdict 'known'.
 - an undispersed burst that reached many beams at once: the same moment in
   COINCIDENT_BEAMS or more beams at scattered DMs (indexer.derive_coincidence),
-  with a quarter or more of the events there below DM 1, or in beams of all
-  three SAPs, which point about 4 degrees apart: no one position on the sky is
-  in all of them (a burst in L611408 reached 92 beams at S/N up to 68, bright
-  enough to register at every DM, so fewer than a quarter lay below DM 1).
-  Verdict 'rfi'.
+  with a quarter or more of the events there below DM 1. Verdict 'rfi'.
+- the same moment in COINCIDENT_BEAMS or more beams of all three SAPs, which
+  point about 4 degrees apart, whatever the DMs: no one position on the sky
+  is in all of them, so it came in through the station beam's sidelobes
+  (a burst in L611408 reached 92 beams at S/N up to 68; on 27 September a
+  0.75 s band-limited burst reached 59 beams of L556848 at one DM, and a
+  train of sparks 171 beams of L603714 at DM ~3). Known pulsars are
+  attributed first. Verdict 'rfi'.
 - an undispersed burst in the candidate's own beam: a burst of events there
   at one moment at scattered DMs, none standing out (indexer.sweeps), where a
   pulse would peak at its DM and fall away. Verdict 'rfi'.
+- a candidate the search put at S/N 7 or more whose own data show under
+  LOCAL_MIN at its time, DM and width (the review page's local S/N,
+  indexer.measure_local). The search fills each 7.9 s channel block its RFI
+  mask flags at a level that can lift the dedispersed baseline for the whole
+  block; an event on such a step reached S/N 7 with no pulse there (27
+  September: 7.09 for L543457 SAP000 B013 DM 3.0, 1.4 without the mask, and
+  as many such events at negative DMs as at positive ones). Verdict 'noise'.
 
 A periodic fold is settled too when it is a catalogued pulsar at its own
 period (not a harmonic: those stay for a person) and DM, within 5 degrees: B0823+26
 was folded in 92 beams of L611400, 3.3 degrees away in its other SAP, where the
-pipeline's own catalogue match does not reach. Verdict 'known'.
+pipeline's own catalogue match does not reach. Verdict 'known'. So is a fold
+that repeats a catalogued fold of its own beam at least five times stronger
+(euroflash.findings.relative): at a harmonic or subharmonic of it at any DM,
+or at an alias of a harmonic above the Nyquist frequency of a downsampled
+trial at the DM that alias takes (B2217+47 in L543473 SAP001, 27 September).
 
 Each verdict is recorded by REVIEWER with its evidence in the note. A person's
 verdict is never written over, and a person's later verdict replaces this one
@@ -36,6 +50,8 @@ from web.indexer import COINCIDENT_BEAMS
 
 REVIEWER = 'auto-triage'
 ALL_SAPS = 3                  # a LOTAAS pointing's SAPs
+LOCAL_MIN = 4.0               # local S/N below which a search S/N of SEARCH_MIN or more had nothing there
+SEARCH_MIN = 7.0
 ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
           'rotation': 'the pulses keep its rotation'}
 LATEST = '(SELECT {0} FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
@@ -62,13 +78,16 @@ def settled(db):
                                   f"DM; this observation shows it: {seen}{z}. A known pulsar seen away from its own "
                                   f"beam.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, x.beams, x.saps, x.near_zero, x.events, x.dm_min, x.dm_max,
-            {earlier} AS earlier FROM candidates c JOIN sp_coincidence x ON x.key=c.key WHERE {QUEUED} AND {OPEN}
-            AND x.beams >= ? AND NOT x.consistent AND (4 * x.near_zero >= x.events OR x.saps >= ?)
-            AND {NOT_KNOWN}""", (COINCIDENT_BEAMS, ALL_SAPS)):
+            x.consistent, {earlier} AS earlier FROM candidates c JOIN sp_coincidence x ON x.key=c.key
+            WHERE {QUEUED} AND {OPEN} AND x.beams >= ?
+            AND ((NOT x.consistent AND 4 * x.near_zero >= x.events) OR x.saps >= ?) AND {NOT_KNOWN}""",
+            (COINCIDENT_BEAMS, ALL_SAPS)):
         where = 'all three SAPs' if r['saps'] >= ALL_SAPS else f"{r['saps']} SAP(s)"
+        spread = 'at one DM' if r['consistent'] else 'at scattered DMs'
+        why = (' No one position on the sky is in beams of all three SAPs.' if r['saps'] >= ALL_SAPS else '')
         out.setdefault(r['key'], (r['key'], 'rfi', f"Interference: the same moment in {r['beams']} beams of {where} "
-                                  f"at scattered DMs ({r['dm_min']:.1f}-{r['dm_max']:.1f}), {r['near_zero']} of the "
-                                  f"{r['events']} events there below DM 1.", r['dm'], r['earlier']))
+                                  f"{spread} ({r['dm_min']:.1f}-{r['dm_max']:.1f}), {r['near_zero']} of the "
+                                  f"{r['events']} events there below DM 1.{why}", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, s.events, s.expected, s.dm_min, s.dm_max, s.peak_ratio,
             {earlier} AS earlier FROM candidates c JOIN sp_sweep s ON s.key=c.key WHERE {QUEUED} AND {OPEN}
             AND {NOT_KNOWN}"""):
@@ -76,6 +95,13 @@ def settled(db):
                                   f"moment ({r['expected']:.1f} expected from the beam's own rate) at DM "
                                   f"{r['dm_min']:.1f}-{r['dm_max']:.1f}, the strongest {r['peak_ratio']:.2f} times the "
                                   f"median S/N: no DM stands out as a pulse's would.", r['dm'], r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, c.snr, l.local_snr, {earlier} AS earlier FROM candidates c
+            JOIN sp_local l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND l.local_snr IS NOT NULL
+            AND l.local_snr < ? AND c.snr >= ? AND {NOT_KNOWN}""", (LOCAL_MIN, SEARCH_MIN)):
+        out.setdefault(r['key'], (r['key'], 'noise', f"Search S/N {r['snr']:.1f}, but S/N {r['local_snr']:.1f} on its "
+                                  f"own data at its time, DM and width (the local S/N of the review page): no pulse "
+                                  f"there. The search's RFI-mask fill can lift the dedispersed baseline for a 7.9 s "
+                                  f"block, and an event on that step reaches S/N 7.", r['dm'], r['earlier']))
     return list(out.values())
 
 
@@ -109,10 +135,47 @@ def periodic_settled(db):
     return out
 
 
+def periodic_relatives(db):
+    """[(key, 'known', note, dm, earlier)] of open folds that repeat a catalogued fold of their beam at least
+    RELATIVE_RATIO times stronger (euroflash.findings.relative)."""
+    import json
+    from euroflash.findings import LOTAAS_TSAMP, RELATIVE_RATIO, relative
+    parents = {}
+    for r in db.execute("""SELECT key, dir, period, dm, statistic, catalogue FROM periodic
+            WHERE catalogue IS NOT NULL AND catalogue != '' AND period > 0 AND statistic > 0"""):
+        parents.setdefault(r['dir'], []).append(r)
+    out = []
+    if not parents:
+        return out
+    for r in db.execute(f"""SELECT c.key, c.dm, c.period, c.statistic, p.dir, p.row, b.tsamp,
+            {LATEST.format('label')} AS earlier
+            FROM candidates c JOIN periodic p ON p.key=c.key JOIN beams b ON b.dir=p.dir
+            WHERE c.kind='periodic' AND c.type='periodic' AND COALESCE(c.pilot, 0)=0 AND c.period > 0
+            AND c.dm IS NOT NULL AND {OPEN}"""):
+        for parent in parents.get(r['dir'], ()):
+            if parent['key'] == r['key'] or parent['statistic'] < RELATIVE_RATIO * (r['statistic'] or 0):
+                continue
+            try:
+                resolution = json.loads(r['row'] or '{}').get('frequency_resolution_hz') or 1 / 3600.
+            except ValueError:
+                resolution = 1 / 3600.
+            how = relative(1 / r['period'], r['dm'], 1 / parent['period'], parent['dm'],
+                           r['tsamp'] or LOTAAS_TSAMP, resolution)
+            if how:
+                out.append((r['key'], 'known', f"{parent['catalogue']} seen again: {how} of its fold at P "
+                            f"{parent['period']:.6f} s, DM {parent['dm']:g} (statistic {parent['statistic']:.0f}) in this "
+                            f"beam.", r['dm'], r['earlier']))
+                break
+    return out
+
+
 def record(cfg, db):
     """Record the verdicts settled() finds that differ from the latest; returns how many."""
+    first = {}
+    for key, label, note, dm, earlier in settled(db) + periodic_settled(db) + periodic_relatives(db):
+        first.setdefault(key, (key, label, note, dm, earlier))    # one verdict per candidate and pass
     rows = [(key, label, note if earlier is None else f"{note} (Replaces this triage's earlier '{earlier}'.)", dm)
-            for key, label, note, dm, earlier in settled(db) + periodic_settled(db) if label != earlier]
+            for key, label, note, dm, earlier in first.values() if label != earlier]
     if rows:
         reviews = store.reviews(cfg)
         try:
