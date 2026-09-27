@@ -1067,7 +1067,9 @@ class Campaign:
                 if excluded(path, beams):
                     path.unlink()
             if sap['state'] == 'attention' and (sap['detail'] or '').endswith(' beams not searched in ' + str(sap['run_name'])):
-                if not self.unsearched(sap['key']):
+                # Only when no beam but excluded ones is left: a converted beam whose data are gone
+                # is unsearched too (three SAPs were released on 27 September as if excluded).
+                if not self.state.rows("SELECT 1 FROM files WHERE sap_key=? AND state='converted' LIMIT 1", sap['key']):
                     self.state.set_sap(sap['key'], state='searched', detail='only excluded beams were unsearched')
                     self.state.event('searched', sap['key'], 'released: only the excluded beam had failed')
 
@@ -1204,6 +1206,10 @@ def parser():
     retry = sub.add_parser('retry', help='Queue SAPs in attention for another search of their unsearched beams')
     retry.add_argument('--root', type=Path, required=True)
     retry.add_argument('keys', nargs='*', help='SAP keys; all SAPs in attention with prepared beams if omitted')
+    restage = sub.add_parser('restage', help='Stage again the lost beams of SAPs in attention and finish them')
+    restage.add_argument('--root', type=Path, required=True)
+    restage.add_argument('--reason', required=True)
+    restage.add_argument('keys', nargs='+')
     requeue = sub.add_parser('requeue', help='Stage and search searched SAPs again from the archive')
     requeue.add_argument('--root', type=Path, required=True)
     requeue.add_argument('--reason', required=True, help='Recorded with each SAP')
@@ -1253,6 +1259,40 @@ def requeue_saps(root, keys, reason):
     return queued
 
 
+def restage_lost(root, keys, reason):
+    """Stage again the beams of SAPs in attention recorded as converted whose data are gone.
+
+    A late beam converted while its SAP was being flatfielded was deleted with
+    the unflattened files (fixed in c6d2e24): beams of L1271370 SAP002,
+    L1275137 SAP000 and L1275358 SAP001 on 25-26 September. The SAP resumes as
+    'partial': its lost beams are staged, converted, flatfielded with the SAP's
+    saved flatfield and searched, and a beam still on disk unflattened goes
+    with them. Only SAPs holding that saved flatfield are taken; returns their keys.
+    """
+    state = State(Path(root)/'campaign-state.sqlite')
+    queued = []
+    for key in keys:
+        found = state.rows("SELECT * FROM saps WHERE key=? AND state='attention' AND sap_dir IS NOT NULL", key)
+        if not found or not (Path(found[0]['sap_dir'])/MEAN).is_file():
+            continue
+        lost = []
+        for f in state.rows("SELECT surl,beam,fil FROM files WHERE sap_key=? AND state='converted'", key):
+            raw = [Path(p) for p in json.loads(f['fil'] or '[]')]
+            if raw and not any(p.is_file() or flattened(p).is_file() for p in raw):
+                lost.append(f)
+        if not lost:
+            continue
+        beams = sorted(f['beam'] for f in lost)
+        with state.db() as db:
+            db.executemany("UPDATE files SET state='pending',request_id=NULL,failures=0,locality=NULL,checked=NULL,"
+                           "fil=NULL,detail=?,updated=? WHERE surl=?",
+                           [(f'restaged: {reason}'[:2000], time.time(), f['surl']) for f in lost])
+        state.set_sap(key, state='partial', run_name=None, detail=f'restaging lost beams {beams}')
+        state.event('restaged', key, f'beams {beams}: {reason}')
+        queued.append(key)
+    return queued
+
+
 def rekeep(root, reviews=None, apply=False):
     """Judge every kept beam under the current rule: what would be (or was) released."""
     root = Path(root)
@@ -1278,6 +1318,9 @@ def main(argv=None):
         return
     if a.command == 'retry':
         print('Queued for another search:', ' '.join(retry_saps(a.root, a.keys)) or 'nothing')
+        return
+    if a.command == 'restage':
+        print('Staging lost beams again for:', ' '.join(restage_lost(a.root, a.keys, a.reason)) or 'nothing')
         return
     if a.command == 'requeue':
         print('Queued to be staged and searched again:', ' '.join(requeue_saps(a.root, a.keys, a.reason)) or 'nothing')

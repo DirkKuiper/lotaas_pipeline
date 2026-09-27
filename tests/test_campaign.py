@@ -913,3 +913,36 @@ def test_a_beam_converted_while_its_sap_is_flatfielded_is_kept_for_the_saved_fla
     assert sap['state'] == 'prepared' and (Path(sap['sap_dir'])/C.MEAN).is_file()
     raw = sorted(p.parent.name for p in Path(sap['sap_dir']).glob('B*/*_32bit.fil'))
     assert raw == ['B038', 'B058'], 'only the flatfielded beams lose their unflattened file'
+
+
+def test_lost_late_beams_are_staged_again_and_their_sap_is_finished(tmp_path, monkeypatch):
+    # L1275137 SAP000 on 25-26 September: beams 6 and 47 were deleted unsearched, beam 49 was left
+    # unflattened, and the restart released the SAP as if only an excluded beam had failed.
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], partial_after_hours=2.0, partial_missing=3)
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    sap_dir = Path(sap['sap_dir'])
+    (sap_dir/C.MEAN).write_bytes(b'mean')
+    with campaign.state.db() as db:                   # the rest of the SAP was searched
+        db.execute("UPDATE files SET state='searched' WHERE state='converted' AND beam NOT IN (38, 58)")
+    lost = campaign.state.rows("SELECT surl,fil FROM files WHERE beam IN (38, 58)")
+    for f in lost:
+        for p in json.loads(f['fil']):
+            Path(p).with_name(Path(p).stem + '_ff.fil').unlink()
+        campaign.state.set_file(f['surl'], state='converted')
+    campaign.state.set_sap(sap['key'], state='attention', run_name='run-x', detail='2 beams not searched in run-x')
+    campaign.apply_exclusions()
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'attention', 'lost beams are not excluded ones'
+    assert C.restage_lost(tmp_path/'campaign', [sap['key']], 'deleted before their search') == [sap['key']]
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'partial'
+    assert {r['state'] for r in campaign.state.rows('SELECT state FROM files WHERE beam IN (38, 58)')} == {'pending'}
+    campaign.tick()                                   # requested again
+    assert campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE beam IN (38, 58) AND state='requested'")[0]['n'] == 2
+    campaign.tick()
+    settle(campaign)
+    settle(campaign)
+    assert [p.parent.name for p in campaign.unsearched(sap['key'])] == ['B038', 'B058']
+    assert campaign.runner.flatfielded[-1][3] == str(sap_dir/C.MEAN), 'flatfielded with the saved flatfield'
