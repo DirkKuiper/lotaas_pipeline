@@ -440,6 +440,30 @@ class Indexer:
             self.db.execute('DELETE FROM snippets')
             self.db.executemany('INSERT OR REPLACE INTO snippets VALUES (?,?,?,?)', rows)
 
+    def link_snippets(self):
+        """Point candidates at the snippets synced since the last derive, without deriving again."""
+        with self.db:
+            self.db.execute("""UPDATE candidates SET snippet=(SELECT path FROM snippets WHERE snippets.key=candidates.key)
+                WHERE key IN (SELECT key FROM snippets)""")
+
+    def count_candidates(self):
+        """Single-pulse candidates per type under each on/off filter of the list (web.app.counted).
+
+        The list's type selector counts every type under the page's filters, and
+        over the 2 million events of 27 September, most of them of low local
+        significance, that took 28 s a page. Counted once a pass here instead.
+        """
+        from euroflash.beams import INCOHERENT_BEAMS
+        incoherent = ' OR '.join("c.item LIKE ? ESCAPE '\\'" for _ in INCOHERENT_BEAMS) or '0'
+        counts = self.db.execute(f"""SELECT c.type, COALESCE(c.pilot, 0) != 0, {incoherent},
+                EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key AND x.beams >= ? AND NOT x.consistent),
+                EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key), COUNT(*)
+            FROM candidates c WHERE c.kind='sp' GROUP BY 1, 2, 3, 4, 5""",
+            [f'%\\_BEAM{beam:03d}\\_%' for beam in INCOHERENT_BEAMS] + [COINCIDENT_BEAMS]).fetchall()
+        with self.db:
+            self.db.execute('DELETE FROM candidate_counts')
+            self.db.executemany('INSERT INTO candidate_counts VALUES (?,?,?,?,?,?)', counts)
+
     def derive(self):
         db = self.db
         with db:
@@ -964,7 +988,7 @@ class Indexer:
         for name, step in (('state', self.sync_state), ('ledger', self.sync_ledger),
                            ('results', lambda: self.scan_results(full)), ('low_dm', self.sync_low_dm),
                            ('snippets', self.sync_snippets), ('derive', self.derive), ('triage', self.triage),
-                           ('forecast', self.forecast), ('health', self.health)):
+                           ('counts', self.count_candidates), ('forecast', self.forecast), ('health', self.health)):
             begun = time.time()
             try:
                 step()

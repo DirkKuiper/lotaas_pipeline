@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 import json
 import logging
 import math
+import multiprocessing
 import os
 from pathlib import Path
 import secrets
@@ -108,6 +109,34 @@ def number(params, name):
     except ValueError:
         return None
     return value if math.isfinite(value) else None
+
+
+def chosen_types(kind, chosen):
+    """The candidate types a list's type selector stands for."""
+    return KINDS[kind]['queue'] if chosen == 'queue' else KINDS[kind]['types'] if chosen == 'all' else (chosen,)
+
+
+# The on/off filters of the single-pulse list that indexer.count_candidates counts under.
+COUNTED_FLAGS = ('pilot', 'incoherent', 'coincident', 'known')
+
+
+def counted(db, params, **overrides):
+    """{type: n} of single-pulse candidates under the page's filters, as the last index pass counted them.
+
+    None when the page also filters on what no pass counts (a review state, a
+    number, a beam name) or no pass has counted yet: the page counts those itself.
+    """
+    params = dict(params, **overrides)
+    if (params.get('review', 'all') != 'all' or params.get('q')
+            or any(number(params, name) is not None
+                   for name in ('min_snr', 'min_dm', 'max_dm', 'min_period', 'max_period'))):
+        return None
+    hidden = [f'{flag}=0' for flag in COUNTED_FLAGS if params.get(flag) != 'include']
+    found = db.execute('SELECT type, SUM(n) FROM candidate_counts'
+                       + (' WHERE ' + ' AND '.join(hidden) if hidden else '') + ' GROUP BY type').fetchall()
+    if not found and not db.execute('SELECT 1 FROM candidate_counts LIMIT 1').fetchone():
+        return None
+    return dict(found)
 
 
 def token(cfg):
@@ -314,10 +343,24 @@ def background(cfg, stop):
             if any(result.values()):
                 logger.info('Snippets: %s', result)
                 indexer.sync_snippets()
-                indexer.derive()
+                # Only the snippet paths changed since the pass derived (4 min a derive on 27 September).
+                indexer.link_snippets()
         except Exception:
             logger.exception('Background pass failed')
         stop.wait(max(5.0, cfg.index_seconds - (time.time() - begun)))
+
+
+def index_process(cfg, stop, parent):
+    """The background loop in a process of its own, gone with the server that started it."""
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+
+    def orphaned():
+        # A server killed outright leaves no one to set stop: leave rather than index beside its successor.
+        while not stop.wait(30):
+            if os.getppid() != parent:
+                os._exit(0)
+    threading.Thread(target=orphaned, daemon=True, name='parent-watch').start()
+    background(cfg, stop)
 
 
 def create_app(cfg, run_background=True):
@@ -325,13 +368,24 @@ def create_app(cfg, run_background=True):
     store.index(cfg).close()
     store.reviews(cfg).close()
     secret = token(cfg) if cfg.auth else None
-    stop = threading.Event()
     @asynccontextmanager
     async def lifespan(app):
+        worker = None
         if run_background:
-            threading.Thread(target=background, args=(cfg, stop), daemon=True, name='index').start()
+            # Not a thread: the index pass is mostly Python, and a page sharing its
+            # interpreter waits for it at every row and file it reads (the overview's
+            # stat of 4,057 kept filterbanks: 0.05 s alone, 55 s beside a pass).
+            context = multiprocessing.get_context('spawn')
+            stop = context.Event()
+            worker = context.Process(target=index_process, args=(cfg, stop, os.getpid()), daemon=True,
+                                     name='index')
+            worker.start()
         yield
-        stop.set()
+        if worker is not None:
+            stop.set()
+            worker.join(timeout=10)
+            if worker.is_alive():
+                worker.terminate()
 
     app = FastAPI(title='LOTAAS campaign', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     templates = Jinja2Templates(directory=str(HERE / 'templates'))
@@ -609,8 +663,7 @@ def create_app(cfg, run_background=True):
         kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
         clauses, args = ['c.kind=?'], [kind]
         chosen = params.get('type', 'queue')
-        types = (KINDS[kind]['queue'] if chosen == 'queue' else KINDS[kind]['types'] if chosen == 'all'
-                 else (chosen,))
+        types = chosen_types(kind, chosen)
         clauses.append(f"c.type IN ({','.join('?' * len(types))})")
         args.extend(types)
         if params.get('pilot') != 'include':
@@ -694,7 +747,15 @@ def create_app(cfg, run_background=True):
         except ValueError:
             number_ = 1
         with store.reading(cfg) as db:
-            count = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {where}', args).fetchone()[0]
+            def total(**overrides):
+                # From the last index pass when its counts answer the page: counted
+                # here, the 2 million single-pulse events took 28 s a page on 27 September.
+                cached = counted(db, params, **overrides) if kind == 'sp' else None
+                if cached is not None:
+                    return sum(cached.get(t, 0) for t in chosen_types(kind, params['type']))
+                shown, shown_args, _ = candidate_filter(dict(params, **overrides))
+                return db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0]
+            count = total()
             found = rows(db, f"""SELECT c.*, {latest} AS label,
                     (SELECT COUNT(*) FROM r.reviews v WHERE v.key=c.key) AS reviews, p.row AS fold_row,
                     (SELECT (b.nu_min + b.nu_max) / 2 FROM beams b WHERE b.item=c.item LIMIT 1) AS centre_mhz,
@@ -712,18 +773,17 @@ def create_app(cfg, run_background=True):
                 LEFT JOIN sp_known k ON k.key=c.key WHERE {where}
                 ORDER BY {ordering(params)} LIMIT 100 OFFSET ?""", *args, (number_ - 1) * 100)
             # Counts per type under the other filters, for the type selector.
-            every, every_args, _ = candidate_filter(dict(params, type='all'))
-            types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
-                                    every_args).fetchall())
+            types = counted(db, params) if kind == 'sp' else None
+            if types is None:
+                every, every_args, _ = candidate_filter(dict(params, type='all'))
+                types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
+                                        every_args).fetchall())
             triage_counts = {}
             hidden = known_hidden = 0
             if kind == 'sp' and params.get('coincident') != 'include':
-                shown, shown_args, _ = candidate_filter(dict(params, coincident='include'))
-                hidden = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0] - count
+                hidden = total(coincident='include') - count
             if kind == 'sp' and params.get('known') != 'include':
-                shown, shown_args, _ = candidate_filter(dict(params, known='include'))
-                known_hidden = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}',
-                                          shown_args).fetchone()[0] - count
+                known_hidden = total(known='include') - count
             if kind == 'periodic':
                 all_where, all_args, _ = candidate_filter(dict(params, triage='all'))
                 triage_counts = dict(db.execute(f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)

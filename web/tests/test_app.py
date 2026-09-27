@@ -506,3 +506,74 @@ def test_a_redetection_inside_a_burst_is_not_the_pulsar(cfg, campaign, monkeypat
     assert [v['reviewer'] for v in recorded if v['key'] == positive] == ['Dirk']      # a person's stands
     indexer.run_pass()
     assert len(verdicts(cfg)) == len(recorded)                                          # nothing repeated
+
+
+def test_the_single_pulse_list_counts_from_the_index_pass_as_it_would_itself(cfg, campaign):
+    import itertools
+    from urllib.parse import urlencode
+    from web.app import COUNTED_FLAGS
+    # A level step in six beams at scattered DMs (coincident), a pulse in the incoherent beam,
+    # and an event not sent to FETCH.
+    step = [(40 + i, dm, 35.0, 6, 'unconfirmed', None, 40.0 - 0.0489 * dm) for i, dm in
+            enumerate((3.7, 22.4, 85.9, 139.9, 5.8))]
+    add_detections(campaign, step + [(45, 22.6, 36.0, 6, 'candidate', None, 40.0 - 0.0489 * 22.6),
+                                     (12, 30.0, 9.0, 2, 'candidate', None, 700.0),
+                                     (30, 50.0, 8.0, 2, 'unclassified', None, 900.0)])
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    # A pulse of a pulsar seen away from its beam (indexer.derive_known), and a pilot run's event.
+    with indexer.db:
+        key = indexer.db.execute("SELECT key FROM candidates WHERE type='rejected'").fetchone()[0]
+        indexer.db.execute("INSERT INTO sp_known VALUES (?, 'J0850+6625', 'B0845+66', 2.0, 'fold', NULL)", (key,))
+        indexer.db.execute("UPDATE candidates SET pilot=1 WHERE type='unclassified'")
+    indexer.count_candidates()
+    client = client_for(cfg)
+    for flags in itertools.product(('', 'include'), repeat=len(COUNTED_FLAGS)):
+        query = urlencode({name: value for name, value in zip(COUNTED_FLAGS, flags) if value})
+        for chosen in ('queue', 'all', 'candidate', 'unconfirmed', 'rejected', 'unclassified'):
+            cached = client.get(f'/single-pulse?type={chosen}&{query}').context
+            live = client.get(f'/single-pulse?type={chosen}&min_snr=0&{query}').context   # a filter no pass counts
+            for name in ('types', 'count', 'coincident_hidden', 'known_hidden'):
+                assert cached[name] == live[name], (chosen, query, name)
+    assert client.get('/single-pulse?type=all').context['coincident_hidden'] == 6
+    # The pages read the pass's counts rather than counting again.
+    with indexer.db:
+        indexer.db.execute("UPDATE candidate_counts SET n = n + 1000 WHERE type='unconfirmed'")
+    assert client.get('/single-pulse?type=unconfirmed&coincident=include').context['count'] == 5 + 1000
+    assert client.get('/single-pulse?type=unconfirmed&min_snr=0&coincident=include').context['count'] == 5
+
+
+def test_snippets_are_linked_without_deriving_again(cfg, campaign):
+    synthetic_filterbank(cfg.source_roots[0] / f'{ITEM}.fil')
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    assert Snippets(cfg).run_pass()['backfilled'] == 1       # cut from the source filterbank
+    assert indexer.db.execute("SELECT snippet FROM candidates WHERE type='candidate'").fetchone()[0] is None
+    indexer.sync_snippets()
+    indexer.link_snippets()
+    linked = indexer.db.execute("SELECT snippet FROM candidates WHERE type='candidate'").fetchone()[0]
+    assert linked and linked.endswith('.fil')
+
+
+def test_the_index_runs_in_a_process_of_its_own(cfg, campaign):
+    import multiprocessing
+    import os
+    import sqlite3
+    import time
+    with TestClient(create_app(cfg)):                      # runs the lifespan, and so the background
+        workers = [p for p in multiprocessing.active_children() if p.name == 'index']
+        assert len(workers) == 1 and workers[0].pid != os.getpid()
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                db = sqlite3.connect(cfg.index_db)
+                done = db.execute("SELECT 1 FROM meta WHERE name='last_index'").fetchone()
+                db.close()
+            except sqlite3.Error:
+                done = None
+            if done:
+                break
+            time.sleep(0.5)
+        assert done, 'the index process never finished a pass'
+    workers[0].join(timeout=15)
+    assert not workers[0].is_alive()

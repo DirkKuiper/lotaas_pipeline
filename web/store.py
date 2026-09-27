@@ -95,6 +95,10 @@ CREATE TABLE IF NOT EXISTS candidates (key TEXT PRIMARY KEY, id TEXT UNIQUE, kin
     plot_id INTEGER, dir TEXT, snippet TEXT, detections INTEGER, found TEXT);
 CREATE INDEX IF NOT EXISTS candidates_type ON candidates(type, snr);
 CREATE INDEX IF NOT EXISTS candidates_item ON candidates(item, kind);
+-- Single-pulse candidates per type under the list's on/off filters, counted once a pass
+-- (indexer.count_candidates) so a page need not walk every candidate (web.app.counted).
+CREATE TABLE IF NOT EXISTS candidate_counts (type TEXT, pilot INTEGER, incoherent INTEGER, coincident INTEGER,
+    known INTEGER, n INTEGER);
 CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, meta TEXT);
 -- derive() looks up every candidate's snippet by key: 150 s a pass over 280,000 candidates without it.
 CREATE INDEX IF NOT EXISTS snippets_key ON snippets(key);
