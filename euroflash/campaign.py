@@ -1023,10 +1023,13 @@ class Campaign:
             if (Path(sap['sap_dir'])/MEAN).is_file() and self.state.rows(
                     "SELECT 1 FROM files WHERE sap_key=? AND state IN ('searched','kept') LIMIT 1", sap['key']):
                 self.state.set_sap(sap['key'], state='partial')
-        # Searched before per-beam states existed: both filterbanks deleted. Only in a SAP that finished: in
-        # any other a converted beam with no data is lost, not searched (eight late beams on 27 September).
+        # Searched before per-beam states existed: both filterbanks deleted. Only in a SAP none of whose
+        # beams has a per-beam state: in one that has, a converted beam with no data is lost, not searched
+        # (eight late beams on 27 September).
         for f in self.state.rows("""SELECT f.surl,f.fil FROM files f JOIN saps s ON s.key=f.sap_key
-                                    WHERE f.state='converted' AND s.state='searched'"""):
+                                    WHERE f.state='converted' AND s.state NOT IN ('staging','flatfielding')
+                                    AND NOT EXISTS (SELECT 1 FROM files g WHERE g.sap_key=f.sap_key
+                                                    AND g.state IN ('searched','kept'))"""):
             paths = [Path(p) for p in json.loads(f['fil'] or '[]')]
             if paths and not any(p.is_file() or flattened(p).is_file() for p in paths):
                 self.state.set_file(f['surl'], state='searched', detail='searched before per-beam states')
