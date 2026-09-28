@@ -52,6 +52,9 @@ COINCIDENCE_SECONDS = 0.5
 CHANCE_MAX = 1e-6
 RATE_SPAN_SECONDS = 600.0
 KINDS_QUEUED = ('candidate', 'dispersed', 'known_pulsar')
+# A candidate is 'beyond the Milky Way' when its DM exceeds the disc's largest along its line of sight
+# (NE2001, YMW16; the classifier records it) by more than the halo's share, taken as 50.
+HALO_DM = 50.0
 K_DM = 4148.808
 COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is interference
 # The classifier records nothing below its min_dm, so an undispersed burst leaves only
@@ -305,12 +308,14 @@ class Indexer:
                     low = max(0, db.execute('SELECT COALESCE(MAX(id),0) FROM detections').fetchone()[0] - 2000)
                     db.execute('DELETE FROM detections WHERE id>?', (low,))
                     # Each model's score, where the ledger has them (release 28 September 2026 on).
-                    models = ('model_probabilities' if 'model_probabilities' in
-                              {r[1] for r in db.execute('PRAGMA lg.table_info(detections)')} else 'NULL')
+                    present = {r[1] for r in db.execute('PRAGMA lg.table_info(detections)')}
+                    models = 'model_probabilities' if 'model_probabilities' in present else 'NULL'
+                    galactic = 'dm_galactic' if 'dm_galactic' in present else 'NULL'
                     db.execute(f"""INSERT INTO detections SELECT id,beam_id,item_of(beam_id),
                         key_of(detection_type,item_of(beam_id),candidate_dm,width_samples,snr),
                         candidate_dm,snr,width_samples,detection_type,pulsar_name,classification_probability,
-                        beam_run_id,time_seconds,sample_number,{models} FROM lg.detections WHERE id>?""", (low,))
+                        beam_run_id,time_seconds,sample_number,{models},{galactic} FROM lg.detections WHERE id>?""",
+                               (low,))
                 if 'archive_beams' in tables:
                     last = meta_get(db, 'archive_rowid', 0)
                     db.execute('INSERT OR REPLACE INTO archive_beams SELECT uri,raw_path,item,observation,sap,beam '
@@ -538,12 +543,13 @@ class Indexer:
         db = self.db
         with db:
             db.execute('DELETE FROM candidates')
-            db.execute("""INSERT INTO candidates(key,id,kind,type,item,dm,snr,width,time,probability,pulsar,
-                    fp16,run_name,detections,found,models,votes,d_only)
+            db.execute(f"""INSERT INTO candidates(key,id,kind,type,item,dm,snr,width,time,probability,pulsar,
+                    fp16,run_name,detections,found,models,votes,d_only,dm_galactic,extragalactic)
                 SELECT d.key, short_id(d.key), 'sp', d.detection_type, d.item, d.candidate_dm, d.snr,
                        d.width_samples, d.time_seconds, d.classification_probability, d.pulsar_name,
                        b.fp16, b.run_name, g.n, f.processing_timestamp, d.model_probabilities,
-                       fetch_votes(d.model_probabilities), fetch_d_only(d.model_probabilities)
+                       fetch_votes(d.model_probabilities), fetch_d_only(d.model_probabilities), d.dm_galactic,
+                       COALESCE(d.candidate_dm > d.dm_galactic + {HALO_DM}, 0)
                 FROM (SELECT key, MAX(id) AS last, MIN(beam_run_id) AS first, COUNT(*) AS n
                       FROM detections WHERE key IS NOT NULL GROUP BY key) g
                 JOIN detections d ON d.id=g.last

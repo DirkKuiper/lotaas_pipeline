@@ -723,8 +723,10 @@ def create_app(cfg, run_background=True):
     def ordering(params):
         """Candidates without a verdict first, then the chosen order, in every list and queue."""
         kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
-        # Among those, positives only FETCH's model d passed come last (web.indexer.fetch_d_only).
-        return f'({LATEST} IS NOT NULL), COALESCE(c.d_only, 0), ' + ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']])
+        # Among those, what would be extragalactic comes first (web.indexer.HALO_DM), and positives only
+        # FETCH's model d passed come last (web.indexer.fetch_d_only).
+        return (f'({LATEST} IS NOT NULL), COALESCE(c.extragalactic, 0) DESC, COALESCE(c.d_only, 0), '
+                + ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']]))
 
     def queue_rows(db, params):
         """[(id, reviewed)] of a queue, in its order."""
