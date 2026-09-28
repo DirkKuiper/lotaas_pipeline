@@ -113,17 +113,21 @@ classification:
   min_own_snr: 4.0
   min_own_fraction: 0.5
   # FETCH accepts almost no burst wider than 150 ms, the width most FRBs have at 135 MHz: at DM >= 100
-  # it is not asked about anything wider than 0.15 s. What it rejects, or was not asked about, that its
-  # own data show (own S/N) and that fades when dedispersed at 0.5 and 0.75 x its DM (dispersion ratio)
-  # is kept as 'dispersed' and queued, with cuts by width. On 803 FRB-like bursts injected into a real
-  # SAP, 67% reached the queue (the single cut own >= 8, ratio <= 0.5: 62%), 4 real clusters of the
-  # SAP did, and classification took half the time (benchmarks/frb-injection-2026-09-28).
+  # it is not asked about anything wider than 0.15 s, nor about clusters between S/N 7 and 8. What it
+  # rejects, or was not asked about, that its own data show (own S/N) and that fades when dedispersed
+  # at 0.5 and 0.75 x its DM (dispersion ratio) is kept as 'dispersed' and queued, with cuts by width
+  # and stricter ones below S/N 8. Through the whole chain, 558 of 803 FRB-like bursts injected into a
+  # real SAP reached the queue (29% before 28 September), with 5 real clusters of the SAP
+  # (benchmarks/frb-injection-2026-09-28).
   dispersed:
     min_dm: 100.0
+    min_snr: 7.0
+    faint: {min_own_snr: 7.0, max_ratio: 0.5}
     fetch_max_width_seconds: 0.15
     tiers:
       - {max_width_seconds: 0.13, min_own_snr: 5.0, max_ratio: 0.8}
       - {max_width_seconds: 0.26, min_own_snr: 8.0, max_ratio: 0.6}
       - {max_width_seconds: 0.5, min_own_snr: 8.0, max_ratio: 0.5}
+      - {max_width_seconds: 1.0, min_own_snr: 10.0, max_ratio: 0.4}
   # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
   max_fetch_candidates: 200
