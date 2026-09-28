@@ -8,7 +8,7 @@ from your.utils.math import normalise
 from your.candidate import crop
 from fetch.utils import get_model
 from lotaas_reprocessing.filterbank import FilterbankFile
-from lotaas_reprocessing.own_data import measure as measure_own
+from lotaas_reprocessing.own_data import dispersion_ratio, load as load_own, measure as measure_own
 from matplotlib.gridspec import GridSpec
 import pygedm
 from astropy.coordinates import SkyCoord
@@ -34,7 +34,7 @@ VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 # Without a width cap or budget every cluster above the floors is classified.
 DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
                   "max_fetch_candidates": None, "min_local_snr": None, "min_raw_local_snr": None,
-                  "min_own_snr": None, "min_own_fraction": None}
+                  "min_own_snr": None, "min_own_fraction": None, "dispersed": None}
 
 
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
@@ -158,12 +158,21 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     on it: 78% of what FETCH rejected on 27 September, 84% of its positives the
     page showed nothing in, and none of 444 pulsar pulses or 51 injected ones.
     Each FETCH model's score is kept with what FETCH judged (model_probabilities).
+
+    With `dispersed` ({min_dm, min_own_snr, max_ratio}) a cluster FETCH rejects
+    that its own data show (own S/N >= min_own_snr) at DM >= min_dm, and that
+    fades when dedispersed too little (own_data.dispersion_ratio <= max_ratio),
+    is recorded as 'dispersed' instead of 'rejected'. FETCH accepted 23% of
+    FRB-like bursts injected at DM 300-2500 that the search found, and almost
+    none wider than 150 ms, the width most FRBs have at 135 MHz; this route kept
+    91% of those it rejected, and 2 of 7,565 real clusters it rejected in three
+    SAPs (min_dm 100, min_own_snr 5.5, max_ratio 0.7; 28 September 2026).
     """
     limits = dict(DEFAULT_LIMITS, **{k: v for k, v in (limits or {}).items() if k in DEFAULT_LIMITS})
     from lotaas_reprocessing.single_pulse_quality import candidate_key, evidence_route, review_route
     if limits['min_local_snr'] is not None and evidence is None:
         raise ValueError('Local S/N screening requires single_pulse_evidence.json')
-    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0}
+    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0, "dispersed": 0}
     own_check = limits['min_own_snr'] is not None and limits['min_own_fraction'] is not None and bool(plan)
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
@@ -300,6 +309,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     detection_type=reason,
                 )
                 continue
+            own = None
             if own_check:
                 try:
                     own = measure_own(filterbank_file, dm, tcand, width, plan, bad_channels, baseline_seconds,
@@ -355,6 +365,18 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 logger.info(
                     "FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
                     dm, tcand, snr, width, highest_prob)
+                route, ratio = limits['dispersed'], None
+                if route and own is not None and dm >= route['min_dm'] and own >= route['min_own_snr']:
+                    try:
+                        ratio, _ = dispersion_ratio(load_own(filterbank_file, dm, tcand, width, plan, bad_channels),
+                                                    baseline_seconds=baseline_seconds or 2.0,
+                                                    baseline_widths=baseline_widths or 64)
+                    except Exception as error:
+                        logger.warning("Dispersion not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)
+                dispersed = ratio is not None and ratio <= route['max_ratio']
+                if dispersed:
+                    counts["dispersed"] += 1
+                    logger.info("Dispersed at DM=%.2f t=%.3f: own S/N %.1f, ratio %.2f", dm, tcand, own, ratio)
                 insert_detection(
                     beam_id=beam_id,
                     beam_run_id=beam_run_id,
@@ -363,24 +385,28 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     candidate_dm=dm,
                     snr=snr,
                     width_samples=width,
-                    detection_type="rejected",
+                    detection_type="dispersed" if dispersed else "rejected",
                     classification_probability=highest_prob,
                     model_probabilities=fetch_probs,
+                    own_snr=own,
+                    dispersion_ratio=ratio,
                 )
-                continue
-
-            insert_detection(
-                beam_id=beam_id,
-                beam_run_id=beam_run_id,
-                time_seconds=tcand,
-                sample_number=sample_number,
-                candidate_dm=dm,
-                snr=snr,
-                width_samples=width,
-                detection_type="candidate",
-                classification_probability=highest_prob,
-                model_probabilities=fetch_probs,
-            )
+                if not dispersed:
+                    continue
+            else:
+                insert_detection(
+                    beam_id=beam_id,
+                    beam_run_id=beam_run_id,
+                    time_seconds=tcand,
+                    sample_number=sample_number,
+                    candidate_dm=dm,
+                    snr=snr,
+                    width_samples=width,
+                    detection_type="candidate",
+                    classification_probability=highest_prob,
+                    model_probabilities=fetch_probs,
+                    own_snr=own,
+                )
 
             # Galactic info
             l = skycoord.galactic.l.deg
@@ -441,7 +467,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             ax_fetch = fig.add_subplot(gs[1,0:5])
             ax_fetch.axis("off")
             ax_fetch.text(0.5,0.5,
-                "FETCH: "+" | ".join([f"{k}:{v:.2f}" for k,v in fetch_probs.items()]),
+                "FETCH: "+" | ".join([f"{k}:{v:.2f}" for k,v in fetch_probs.items()])
+                + (f"   | rejected, but dispersed: own S/N {own:.1f}, ratio {ratio:.2f}" if highest_prob <= 0.5 else ""),
                 ha="center",va="center",fontsize=9,family="monospace")
 
             ax_gal = fig.add_subplot(gs[2,3:5])

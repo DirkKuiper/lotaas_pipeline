@@ -34,6 +34,8 @@ SEARCH_BASELINE_WIDTHS = 64
 RFI_BLOCK_SAMPLES = 1000
 # No pulse reaches this in one channel and sample (S/N 1000 one sample wide: 40).
 MAX_CELL_SIGMA = 50.0
+# Trial DMs, as fractions of the candidate's, at which a dispersed pulse must fade (dispersion_ratio).
+DISPERSION_FACTORS = (0.5, 0.75)
 
 
 def sweep_seconds(dm, freqs):
@@ -244,11 +246,62 @@ class OwnData:
                                 radius=round(self.analysis / self.tsamp))['local_snr']
 
 
-def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None, baseline_widths=None):
-    """A candidate's local S/N on its own data in a flatfielded beam, measured as the search measures it."""
+def _window_sums(series, width):
+    """Sums of every width-sample window of series; NaN where a window holds a non-finite sample."""
+    finite = np.isfinite(series)
+    sums = np.concatenate([[0.0], np.cumsum(np.where(finite, series, 0.0), dtype=np.float64)])
+    counts = np.concatenate([[0], np.cumsum(finite)])
+    return np.where(counts[width:] - counts[:-width] == width, sums[width:] - sums[:-width], np.nan)
+
+
+def dispersion_ratio(own, factors=DISPERSION_FACTORS, baseline_seconds=SEARCH_BASELINE_SECONDS,
+                     baseline_widths=SEARCH_BASELINE_WIDTHS):
+    """How much of a candidate's signal survives dedispersion at too low a DM: (ratio, S/N at its DM).
+
+    At f x DM each channel's signal lands (1 - f) x its delay later than at DM, so the strongest
+    same-width boxcar from the candidate's time to (1 - f) x the sweep after it is compared with
+    the one at the candidate's time and DM, both against the scatter of same-width sums outside
+    those windows. A dispersed pulse is smeared over the sweep error and fades; interference in a
+    few channels only moves and keeps its S/N. On 28 September 2026 the ratio (the larger over
+    f = 0.5 and 0.75) was 0.23-0.47 (quartiles) for injected FRB-like bursts FETCH rejected and
+    0.86-1.7 for real clusters FETCH rejected at DM >= 300 (benchmarks/frb-injection-2026-09-28).
+    None when the stretch leaves too little noise to judge.
+    """
+    w, dt = own.width, own.tsamp
+    sweep = float(sweep_seconds(own.dm, own.freqs).max())
+    centres = own.t0 + (np.arange(own.data.shape[0] - w + 1) + (w - 1) / 2) * dt
+    slack = max(2 * w * dt, 0.1)
+    windows = {1.0: np.abs(centres) <= slack}
+    for f in factors:
+        windows[f] = (centres >= -slack) & (centres <= (1 - f) * sweep + slack)
+    outside = ~np.logical_or.reduce(list(windows.values()))
+    snrs = {}
+    for f, window in windows.items():
+        sums = _window_sums(own.search_series(f * own.dm, (), True, baseline_seconds, baseline_widths), w)
+        reference = sums[outside & np.isfinite(sums)]
+        inside = sums[window & np.isfinite(sums)]
+        if len(reference) < 32 or not len(inside):
+            return None, None
+        centre = np.median(reference)
+        scale = 1.4826 * np.median(np.abs(reference - centre))
+        if scale <= 0:
+            return None, None
+        snrs[f] = float((inside.max() - centre) / scale)
+    if snrs[1.0] <= 0:
+        return None, snrs[1.0]
+    return max(snrs[f] for f in factors) / snrs[1.0], snrs[1.0]
+
+
+def load(source, dm, tcand, width_samples, plan, bad=()):
+    """The OwnData of a candidate in a flatfielded beam: the stretch the page cuts and the classifier measures."""
     header, block, start, k, _, _, _ = stretch(source, dm, tcand, width_samples, plan)
     tsamp = float(header['tsamp'])
-    own = OwnData(block, sigproc.channel_frequencies(header), tsamp * k, start * tsamp - float(tcand), dm,
-                  round(int(width_samples) / k), start // k, bad, k)
-    return own.local_snr(baseline_seconds=baseline_seconds or SEARCH_BASELINE_SECONDS,
-                         baseline_widths=baseline_widths or SEARCH_BASELINE_WIDTHS)
+    return OwnData(block, sigproc.channel_frequencies(header), tsamp * k, start * tsamp - float(tcand), dm,
+                   round(int(width_samples) / k), start // k, bad, k)
+
+
+def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None, baseline_widths=None):
+    """A candidate's local S/N on its own data in a flatfielded beam, measured as the search measures it."""
+    return load(source, dm, tcand, width_samples, plan, bad).local_snr(
+        baseline_seconds=baseline_seconds or SEARCH_BASELINE_SECONDS,
+        baseline_widths=baseline_widths or SEARCH_BASELINE_WIDTHS)
