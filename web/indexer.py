@@ -67,8 +67,11 @@ LOW_DM = 2.0
 # DMs, none standing out, where a pulse would peak at its DM and fall away from it. L606808
 # SAP002 B073 gave seven at DM 3-148, all at S/N 7.0-7.3. At least SWEEP_MIN_EVENTS within
 # SWEEP_SECONDS, SWEEP_EXCESS times the beam's own rate (a busy beam is not a burst), over a DM
-# span of at least max(SWEEP_DM_SPAN), the strongest within SWEEP_FLAT of the median S/N.
+# span of at least max(SWEEP_DM_SPAN), the strongest within SWEEP_FLAT of the median S/N, and
+# reaching down to SWEEP_LOW_DM: an undispersed signal shows at low DM. An FRB-like burst injected
+# at DM 546 met the rest with events at DM 547-3015 and was called interference (28 September 2026).
 SWEEP_SECONDS = 1.5
+SWEEP_LOW_DM = 50.0
 SWEEP_MIN_EVENTS = 4
 SWEEP_EXCESS = 5.0
 SWEEP_DM_SPAN = (20.0, 0.5)
@@ -726,7 +729,7 @@ class Indexer:
                 if len(near) < needed:
                     continue
                 dms = [e[2] for e in near]
-                if max(dms) - min(dms) < max(SWEEP_DM_SPAN[0], SWEEP_DM_SPAN[1] * max(dms)):
+                if max(dms) - min(dms) < max(SWEEP_DM_SPAN[0], SWEEP_DM_SPAN[1] * max(dms)) or min(dms) > SWEEP_LOW_DM:
                     continue
                 snrs = sorted(e[6] for e in near)
                 median = statistics.median(snrs)

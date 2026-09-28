@@ -94,8 +94,8 @@ def test_what_fetch_rejected_but_its_own_data_show_dispersed_is_queued_with_its_
     with campaign['ledger'].connect() as db:
         run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
         db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
-                   "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
-                   "(?,830.0,12.4,32,'dispersed',NULL,0.2,?,300.0,38147)", (ITEM + '.fil', run))
+                   "classification_probability,beam_run_id,time_seconds,sample_number,dm_galactic) VALUES "
+                   "(?,830.0,12.4,32,'dispersed',NULL,0.2,?,300.0,38147,41.5)", (ITEM + '.fil', run))
     (campaign['beam_dir'] / 'candidate_plots' / 'DM830.0_Width32_SNR12.4.png').write_bytes(b'\x89PNG\r\n\x1a\n')
     indexer = Indexer(cfg)
     indexer.run_pass()
@@ -106,6 +106,10 @@ def test_what_fetch_rejected_but_its_own_data_show_dispersed_is_queued_with_its_
     assert 'dispersed, FETCH said no' in listed and '830.00' in listed
     queue = client.get('/single-pulse').text                        # the queue: beside FETCH's positives
     assert 'dispersed, FETCH said no' in queue and 'FETCH positive' in queue
+    # Its DM is far beyond the Milky Way's here (41.5): badged, and first to review.
+    assert 'beyond the Milky Way' in queue and queue.index('830.00') < queue.index('30.00')
+    first = client.get('/verify?kind=sp', follow_redirects=False)
+    assert 'beyond the Milky Way' in client.get(first.headers['location']).text
 
 
 def test_reviews_are_kept_apart_and_validated(cfg, campaign):
@@ -481,7 +485,11 @@ def test_a_burst_at_scattered_dms_in_one_beam_is_interference(cfg, campaign):
             enumerate(x for x in range(20, 3600, 3) if abs(x - 2600) > 20)]
     busy += [(42, dm, 7.2, 2, kind, None, 2600.0 - dm * PER_DM) for dm, kind in
              ((12.0, 'candidate'), (55.0, 'rejected'), (90.0, 'rejected'), (140.0, 'rejected'))]
-    add_detections(campaign, burst + pulse + busy)
+    # Events at one moment that never reach low DM: nothing undispersed (an injected FRB-like burst at DM 546).
+    high = [(43, dm, snr, 3, kind, None, 3000.0 - dm * PER_DM) for dm, snr, kind in
+            ((546.8, 11.0, 'candidate'), (700.0, 9.5, 'rejected'), (1200.0, 9.3, 'rejected'), (2000.0, 9.4, 'rejected'),
+             (3014.8, 9.2, 'rejected'))]
+    add_detections(campaign, burst + pulse + busy + high)
     indexer = Indexer(cfg)
     indexer.run_pass()
     from web.keys import parse_item
