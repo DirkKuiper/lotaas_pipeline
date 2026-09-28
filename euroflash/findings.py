@@ -176,14 +176,14 @@ def periodic_items(run_dir):
     return items
 
 
-def candidate_key(beam_id, dm, width, snr):
-    """The web layer's key for a FETCH candidate (web.keys.sp_key): its verdicts carry it.
+def candidate_key(beam_id, dm, width, snr, kind='candidate'):
+    """The web layer's key for a candidate of this detection type (web.keys.sp_key): its verdicts carry it.
 
     None when the ledger lacks a value: no verdict can reach that candidate, so it holds its beam.
     """
     if None in (dm, width, snr):
         return None
-    return f'candidate|{Path(beam_id).stem}|DM{float(dm):.3f}|W{int(width)}|SN{float(snr):.3f}'
+    return f'{kind}|{Path(beam_id).stem}|DM{float(dm):.3f}|W{int(width)}|SN{float(snr):.3f}'
 
 
 def run_candidate_keys(run_dir):
@@ -195,9 +195,10 @@ def run_candidate_keys(run_dir):
         try:
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if 'detections' in tables:
-                for beam, dm, width, snr in db.execute("SELECT beam_id, candidate_dm, width_samples, snr "
-                                                       "FROM detections WHERE detection_type IN ('candidate', 'dispersed')"):
-                    keys.setdefault(Path(beam).stem, []).append(candidate_key(beam, dm, width, snr))
+                for beam, dm, width, snr, kind in db.execute(
+                        "SELECT beam_id, candidate_dm, width_samples, snr, detection_type "
+                        "FROM detections WHERE detection_type IN ('candidate', 'dispersed')"):
+                    keys.setdefault(Path(beam).stem, []).append(candidate_key(beam, dm, width, snr, kind))
         finally:
             db.close()
     return keys
