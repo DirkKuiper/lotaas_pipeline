@@ -122,7 +122,7 @@ def test_the_classifier_keeps_what_fetch_rejects_but_its_own_data_show_dispersed
     candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n'
                           f'300.0\t20.0\t{60.0 + centre}\t7630\t{width}\n30.0\t20.0\t{140.0 + centre}\t17802\t{width}\n')
     limits = {'min_dm': 2.0, 'min_snr': 8.0, 'min_own_snr': 4.0, 'min_own_fraction': 0.5}
-    route = {'min_dm': 100.0, 'min_own_snr': 5.5, 'max_ratio': 0.7}
+    route = {'min_dm': 100.0, 'min_own_snr': 8.0, 'max_ratio': 0.5, 'max_width_seconds': 0.5}
     info = {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'}
     counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'), info,
                                           limits=dict(limits, dispersed=route), tsamp=TSAMP, plan=PLAN,
@@ -131,9 +131,14 @@ def test_the_classifier_keeps_what_fetch_rejects_but_its_own_data_show_dispersed
     with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
         rows = {round(dm): (kind, own, ratio) for dm, kind, own, ratio in db.execute(
             'SELECT candidate_dm, detection_type, own_snr, dispersion_ratio FROM detections')}
-    assert rows[300][0] == 'dispersed' and rows[300][1] > 5.5 and rows[300][2] < 0.3
+    assert rows[300][0] == 'dispersed' and rows[300][1] > 8 and rows[300][2] < 0.3
     assert rows[30] == ('rejected', rows[30][1], None)        # below the route's DM: FETCH decides
     assert len(list((tmp_path / 'plots').glob('DM300.0_*.png'))) == 1   # plotted for review, as FETCH positives are
+    # Wider than the route judges: FETCH's verdict stands.
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots3'), info,
+                                          limits=dict(limits, dispersed=dict(route, max_width_seconds=0.05)),
+                                          tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert counts['dispersed'] == 0
     # Without the route FETCH's verdict stands.
     counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots2'), info,
                                           limits=limits, tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)

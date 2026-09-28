@@ -161,14 +161,16 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     page showed nothing in, and none of 444 pulsar pulses or 51 injected ones.
     Each FETCH model's score is kept with what FETCH judged (model_probabilities).
 
-    With `dispersed` ({min_dm, min_own_snr, max_ratio}) a cluster FETCH rejects
-    that its own data show (own S/N >= min_own_snr) at DM >= min_dm, and that
-    fades when dedispersed too little (own_data.dispersion_ratio <= max_ratio),
-    is recorded as 'dispersed' instead of 'rejected'. FETCH accepted 23% of
-    FRB-like bursts injected at DM 300-2500 that the search found, and almost
-    none wider than 150 ms, the width most FRBs have at 135 MHz; this route kept
-    91% of those it rejected, and 2 of 7,565 real clusters it rejected in three
-    SAPs (min_dm 100, min_own_snr 5.5, max_ratio 0.7; 28 September 2026).
+    With `dispersed` ({min_dm, min_own_snr, max_ratio, max_width_seconds}) a
+    cluster FETCH rejects that its own data show (own S/N >= min_own_snr) at
+    DM >= min_dm and no wider than max_width_seconds, and that fades when
+    dedispersed too little (own_data.dispersion_ratio <= max_ratio), is recorded
+    as 'dispersed' instead of 'rejected'. FETCH accepted 23% of FRB-like bursts
+    injected at DM 300-2500 that the search found, and almost none wider than
+    150 ms, the width most FRBs have at 135 MHz. With min_dm 100, min_own_snr 8,
+    max_ratio 0.5 and max_width_seconds 0.5 this route kept 352 of the 485 such
+    bursts FETCH rejected in a SAP searched with baseline_widths 8, and 1 of that
+    SAP's 3,495 real clusters FETCH rejected at DM >= 100 (28 September 2026).
     """
     limits = dict(DEFAULT_LIMITS, **{k: v for k, v in (limits or {}).items() if k in DEFAULT_LIMITS})
     from lotaas_reprocessing.single_pulse_quality import candidate_key, evidence_route, review_route
@@ -368,7 +370,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     "FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
                     dm, tcand, snr, width, highest_prob)
                 route, ratio = limits['dispersed'], None
-                if route and own is not None and dm >= route['min_dm'] and own >= route['min_own_snr']:
+                if (route and own is not None and dm >= route['min_dm'] and own >= route['min_own_snr']
+                        and (tsamp is None or width * tsamp <= route.get('max_width_seconds', float('inf')))):
                     try:
                         ratio, _ = dispersion_ratio(load_own(filterbank_file, dm, tcand, width, plan, bad_channels),
                                                     baseline_seconds=baseline_seconds or 2.0,
