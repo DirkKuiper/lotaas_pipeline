@@ -82,6 +82,64 @@ def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
     return plane.reshape(dmsteps, time_size, decimate).mean(2)
 
 
+def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_size=256, freq_size=256, dm_size=256):
+    """The candidate and FETCH's two inputs, the frequency-time plane X and the DM-time plane Y.
+
+    Returns (cand, X, Y, time_decimate_factor); cand keeps both planes for the plot.
+    """
+    cand = Candidate(
+        fp=filterbank_file,
+        dm=dm,
+        tcand=tcand,
+        width=width,
+        label=-1,
+        snr=snr,
+        min_samp=256,
+        device=-1,
+    )
+    cand.get_chunk()
+    if bad_channels:
+        bad = np.asarray(bad_channels, dtype=int)
+        if np.any((bad < 0) | (bad >= cand.data.shape[1])):
+            raise ValueError('Classifier channel mask is outside the filterbank')
+        # Honour the search's file-order channel mask in both FETCH
+        # planes; a noisy channel must not reappear at classification.
+        good = np.ones(cand.data.shape[1], dtype=bool)
+        good[bad] = False
+        if not good.any():
+            raise ValueError('No usable channels for classification')
+        baseline = np.median(cand.data[::max(1, len(cand.data) // 8192), good])
+        cand.data[:, bad] = baseline
+    time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
+    cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size)
+    cand.dedisperse()
+
+    # Decimate, crop, and normalize FT
+    cand.decimate(key="ft", axis=0, pad=True, decimate_factor=max(1, width // 2), mode="median")
+    cand.dedispersed = crop(cand.dedispersed, cand.dedispersed.shape[0] // 2 - time_size // 2, time_size, 0)
+    cand.decimate(key="ft", axis=1, pad=True, decimate_factor=max(1, cand.dedispersed.shape[1] // freq_size), mode="median")
+    cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
+    cand.dedispersed = normalise(cand.dedispersed)
+
+    # The DM-time plane is already decimated and cropped in time.
+    # Crop along the DM axis
+    crop_start_dm = cand.dmt.shape[0] // 2 - dm_size // 2
+    cand.dmt = crop(cand.dmt, crop_start_dm, dm_size, axis=0)
+
+    # Resize
+    cand.resize(key="dmt", size=dm_size, axis=1, anti_aliasing=True, mode="constant")
+
+    # Normalize `dmt`
+    cand.dmt = normalise(cand.dmt)
+
+    # Prepare data for FETCH classification
+    X = np.reshape(cand.dedispersed, (1, 256, 256, 1))
+    Y = np.reshape(cand.dmt, (1, 256, 256, 1))  # Ensure `dmt` is included
+    if not np.isfinite(X).all() or not np.isfinite(Y).all():
+        raise ValueError(f"Nonfinite FETCH input at DM={dm}, time={tcand}")
+    return cand, X, Y, time_decimate_factor
+
+
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
                         limits=None, tsamp=None, evidence=None, bad_channels=()):
     """Classify one beam's clusters; returns how many went to FETCH and why others did not.
@@ -239,62 +297,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             # Proceed with classification of non-pulsar candidates
             time_size, freq_size, dm_size = 256, 256, 256
-
-            cand = Candidate(
-                fp=filterbank_file,
-                dm=dm,
-                tcand=tcand,
-                width=width,
-                label=-1,
-                snr=snr,
-                min_samp=256,
-                device=-1,
-            )
-            cand.get_chunk()
-            if bad_channels:
-                bad = np.asarray(bad_channels, dtype=int)
-                if np.any((bad < 0) | (bad >= cand.data.shape[1])):
-                    raise ValueError('Classifier channel mask is outside the filterbank')
-                # Honour the search's file-order channel mask in both FETCH
-                # planes; a noisy channel must not reappear at classification.
-                good = np.ones(cand.data.shape[1], dtype=bool)
-                good[bad] = False
-                if not good.any():
-                    raise ValueError('No usable channels for classification')
-                baseline = np.median(cand.data[::max(1, len(cand.data) // 8192), good])
-                cand.data[:, bad] = baseline
-            time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
-            cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size)
-            cand.dedisperse()
+            cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
+                                                            time_size, freq_size, dm_size)
 
             fil = FilterbankFile(filterbank_file, "read")
             f_start, delta_f, nchan = fil.fch1, fil.foff, fil.nchans
             fil.close()
             frequency_axis = np.flip(f_start + np.arange(nchan) * delta_f)
-
-            # Decimate, crop, and normalize FT
-            cand.decimate(key="ft", axis=0, pad=True, decimate_factor=max(1, width // 2), mode="median")
-            cand.dedispersed = crop(cand.dedispersed, cand.dedispersed.shape[0] // 2 - time_size // 2, time_size, 0)
-            cand.decimate(key="ft", axis=1, pad=True, decimate_factor=max(1, cand.dedispersed.shape[1] // freq_size), mode="median")
-            cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
-            cand.dedispersed = normalise(cand.dedispersed)
-
-            # The DM-time plane is already decimated and cropped in time.
-            # Crop along the DM axis
-            crop_start_dm = cand.dmt.shape[0] // 2 - dm_size // 2
-            cand.dmt = crop(cand.dmt, crop_start_dm, dm_size, axis=0)
-
-            # Resize
-            cand.resize(key="dmt", size=dm_size, axis=1, anti_aliasing=True, mode="constant")
-
-            # Normalize `dmt`
-            cand.dmt = normalise(cand.dmt)
-
-            # Prepare data for FETCH classification
-            X = np.reshape(cand.dedispersed, (1, 256, 256, 1))
-            Y = np.reshape(cand.dmt, (1, 256, 256, 1))  # Ensure `dmt` is included
-            if not np.isfinite(X).all() or not np.isfinite(Y).all():
-                raise ValueError(f"Nonfinite FETCH input at DM={dm}, time={tcand}")
 
             fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
                            for name, model in fetch_models.items()}
