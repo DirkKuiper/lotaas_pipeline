@@ -241,6 +241,21 @@ def test_a_fetch_candidate_holds_its_beam_until_a_verdict_settles_it(tmp_path):
     assert campaign.state.rows('SELECT state FROM files')[0]['state'] == 'searched'
 
 
+def test_a_dispersed_candidate_holds_its_beam_under_its_own_key(tmp_path):
+    # FETCH rejected it, its own data show it dispersed (classify 'dispersed'): kept for review like a positive.
+    reviews = tmp_path/'reviews.sqlite'
+    campaign, ff = campaign_with_kept(tmp_path, reviews)
+    results = campaign.root/'results'
+    run = 'campaign-20260928-150000-gpu00'
+    item = beam(results, run, 'L603686', 0, 40)
+    snapshot(results, run, [(item + '.fil', 830.0, 32, 12.4, 'dispersed'), (item + '.fil', 60.0, 3, 7.5, 'rejected')])
+    key = findings.candidate_key(item + '.fil', 830.0, 32, 12.4, 'dispersed')
+    assert key == f'dispersed|{item}|DM830.000|W32|SN12.400'          # web.keys.sp_key of its type
+    assert campaign.release_kept({'L999999'}) == [] and ff.exists()
+    verdict(reviews, key, 'rfi', 1.)
+    assert [name for name, _ in campaign.release_kept({'L999999'}, run)] == ['L1263256_SAP000_B040_P000_bf.tar']
+
+
 def test_the_keep_rule_runs_without_numpy(monkeypatch):
     """The campaign driver judges beams on the head's own Python, which has no numpy."""
     import importlib
