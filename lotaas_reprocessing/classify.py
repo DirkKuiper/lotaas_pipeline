@@ -84,9 +84,11 @@ def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
     return plane.reshape(dmsteps, time_size, decimate).mean(2)
 
 
-def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_size=256, freq_size=256, dm_size=256):
+def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_size=256, freq_size=256, dm_size=256,
+                 range_dm=5.0):
     """The candidate and FETCH's two inputs, the frequency-time plane X and the DM-time plane Y.
 
+    Y spans DM +- range_dm (`your`, which FETCH was trained with, spans +-DM).
     Returns (cand, X, Y, time_decimate_factor); cand keeps both planes for the plot.
     """
     cand = Candidate(
@@ -113,7 +115,7 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
         baseline = np.median(cand.data[::max(1, len(cand.data) // 8192), good])
         cand.data[:, bad] = baseline
     time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
-    cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size)
+    cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size, range_dm)
     cand.dedisperse()
 
     # Decimate, crop, and normalize FT
