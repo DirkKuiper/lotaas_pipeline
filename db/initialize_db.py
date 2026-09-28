@@ -54,7 +54,9 @@ def initialize_database(db_path="db/processing.db"):
     columns = {r[1] for r in c.execute("PRAGMA table_info(detections)")}
     if "beam_run_id" not in columns:
         c.execute("ALTER TABLE detections ADD COLUMN beam_run_id INTEGER REFERENCES beam_runs(id)")
-    for name, kind in [("time_seconds", "REAL"), ("sample_number", "INTEGER")]:
+    # model_probabilities: each FETCH model's score as JSON, since 28 September 2026 (the
+    # classifier takes the highest; model d alone passed 95% of the junk that reached review).
+    for name, kind in [("time_seconds", "REAL"), ("sample_number", "INTEGER"), ("model_probabilities", "TEXT")]:
         if name not in columns:
             c.execute(f"ALTER TABLE detections ADD COLUMN {name} {kind}")
     for row_id,value in c.execute("SELECT id,classification_probability FROM detections WHERE typeof(classification_probability)='blob'").fetchall():

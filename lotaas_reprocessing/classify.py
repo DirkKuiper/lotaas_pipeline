@@ -8,6 +8,7 @@ from your.utils.math import normalise
 from your.candidate import crop
 from fetch.utils import get_model
 from lotaas_reprocessing.filterbank import FilterbankFile
+from lotaas_reprocessing.own_data import measure as measure_own
 from matplotlib.gridspec import GridSpec
 import pygedm
 from astropy.coordinates import SkyCoord
@@ -32,7 +33,8 @@ VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 # Which clusters reach FETCH; settings.yaml `classification` overrides these.
 # Without a width cap or budget every cluster above the floors is classified.
 DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
-                  "max_fetch_candidates": None, "min_local_snr": None, "min_raw_local_snr": None}
+                  "max_fetch_candidates": None, "min_local_snr": None, "min_raw_local_snr": None,
+                  "min_own_snr": None, "min_own_fraction": None}
 
 
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
@@ -141,19 +143,28 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
 
 
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
-                        limits=None, tsamp=None, evidence=None, bad_channels=()):
+                        limits=None, tsamp=None, evidence=None, bad_channels=(), plan=None,
+                        baseline_seconds=None):
     """Classify one beam's clusters; returns how many went to FETCH and why others did not.
 
     A cluster wider than `max_width_seconds` (needs `tsamp`, the native sample
     time), or beyond the `max_fetch_candidates` strongest, is recorded as
     'unclassified'. Locally weak events remain auditable as 'unconfirmed'.
     Known pulsars never use the budget.
+
+    With `min_own_snr` and `min_own_fraction` (and the search's dedispersion
+    `plan`), a cluster whose S/N on its own data (own_data.measure, the review
+    page's local S/N) is below both is also 'unconfirmed', and FETCH never runs
+    on it: 78% of what FETCH rejected on 27 September, 84% of its positives the
+    page showed nothing in, and none of 444 pulsar pulses or 51 injected ones.
+    Each FETCH model's score is kept with what FETCH judged (model_probabilities).
     """
     limits = dict(DEFAULT_LIMITS, **{k: v for k, v in (limits or {}).items() if k in DEFAULT_LIMITS})
     from lotaas_reprocessing.single_pulse_quality import candidate_key, evidence_route, review_route
     if limits['min_local_snr'] is not None and evidence is None:
         raise ValueError('Local S/N screening requires single_pulse_evidence.json')
-    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0}
+    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0}
+    own_check = limits['min_own_snr'] is not None and limits['min_own_fraction'] is not None and bool(plan)
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
     beam_id = os.path.basename(filterbank_file)
@@ -289,6 +300,28 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     detection_type=reason,
                 )
                 continue
+            if own_check:
+                try:
+                    own = measure_own(filterbank_file, dm, tcand, width, plan, bad_channels, baseline_seconds)
+                except Exception as error:
+                    # Unmeasurable (a stretch past the beam's end, say): FETCH decides, as before.
+                    logger.warning("Own-data S/N not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)
+                    own = None
+                if own is not None and own < limits['min_own_snr'] and own < limits['min_own_fraction'] * snr:
+                    counts["own_data"] += 1
+                    logger.info("Own data show nothing at DM=%.2f t=%.3f S/N=%.2f width=%d: S/N %.1f there",
+                                dm, tcand, snr, width, own)
+                    insert_detection(
+                        beam_id=beam_id,
+                        beam_run_id=beam_run_id,
+                        time_seconds=tcand,
+                        sample_number=sample_number,
+                        candidate_dm=dm,
+                        snr=snr,
+                        width_samples=width,
+                        detection_type="unconfirmed",
+                    )
+                    continue
             counts["fetch"] += 1
 
             if fetch_models is None:
@@ -331,6 +364,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     width_samples=width,
                     detection_type="rejected",
                     classification_probability=highest_prob,
+                    model_probabilities=fetch_probs,
                 )
                 continue
 
@@ -343,7 +377,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 snr=snr,
                 width_samples=width,
                 detection_type="candidate",
-                classification_probability=highest_prob
+                classification_probability=highest_prob,
+                model_probabilities=fetch_probs,
             )
 
             # Galactic info

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import datetime
 import os
@@ -48,21 +49,23 @@ def update_beam_run(row_id, outcome, num_candidates=None, num_redetections=None,
     conn.commit()
     conn.close()
 
-def insert_detection(beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name=None, classification_probability=None, beam_run_id=None, time_seconds=None, sample_number=None):
+def insert_detection(beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name=None, classification_probability=None, beam_run_id=None, time_seconds=None, sample_number=None, model_probabilities=None):
     """
-    Inserts a detection record.
+    Inserts a detection record. model_probabilities: {model: probability} of each FETCH model.
     """
     conn = sqlite3.connect(DB_PATH, timeout=120)
     c = conn.cursor()
     c.execute("""
         INSERT INTO detections (
-            beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name, classification_probability, beam_run_id, time_seconds, sample_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name, classification_probability, beam_run_id, time_seconds, sample_number, model_probabilities
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         beam_id, float(candidate_dm), float(snr), int(width_samples), detection_type, pulsar_name,
         probability_value(classification_probability), beam_run_id,
         None if time_seconds is None else float(time_seconds),
-        None if sample_number is None else int(sample_number)
+        None if sample_number is None else int(sample_number),
+        None if model_probabilities is None else json.dumps(
+            {name: round(probability_value(p), 4) for name, p in sorted(model_probabilities.items())})
     ))
     conn.commit()
     conn.close()
