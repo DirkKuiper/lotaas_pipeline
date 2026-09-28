@@ -54,3 +54,17 @@ def test_no_detection_bounds_the_rate_and_a_better_system_bounds_it_harder(tmp_p
     assert saps == 1 and beams == 73 and 0 < low < high
     # One SAP-hour, about 4 square degrees: at most (4 / 41253) / 24 sky-days, less what is too faint.
     assert high < 4.5 / frb_rate.SKY_DEG2 / 24
+
+
+def test_a_survey_can_be_projected_from_injected_bursts_and_one_sap_s_layout(tmp_path, capsys):
+    fake_web(tmp_path / 'web.sqlite')
+    rng = np.random.default_rng(3)
+    bursts = []
+    for _ in range(300):
+        snr = float(np.exp(rng.uniform(math.log(6), math.log(60))))
+        bursts.append({'tau135': 0.01, 'snr_ideal': snr, 'fluence_units': snr * 1e-3, 'level': 1.0, 'queued': int(snr > 12)})
+    (tmp_path / 'bursts.json').write_text(json.dumps(bursts))
+    frb_rate.main(['--web', str(tmp_path / 'web.sqlite'), '--bursts', str(tmp_path / 'bursts.json'),
+                   '--project-saps', '100', '--sefd', '400'])
+    out = capsys.readouterr().out
+    assert '100 SAPs (7300 beams)' in out and 'R(>100 Jy ms) <' in out

@@ -160,15 +160,25 @@ def main(argv=None):
     p.add_argument('--tab-fwhm', type=float, default=0.40, help='degrees at 135 MHz')
     p.add_argument('--station-fwhm', type=float, default=4.3, help='degrees at 135 MHz')
     p.add_argument('--hours', type=float, default=1.0, help='per SAP')
+    p.add_argument('--bursts', type=Path, nargs='+', help='injected bursts as JSON lists instead of the lane')
+    p.add_argument('--project-saps', type=int, help='the exposure of this many SAPs laid out as a searched one')
     a = p.parse_args(argv)
-    bursts = load_bursts(a.lane, a.fingerprint)
+    if a.bursts:
+        bursts = [b for path in a.bursts for b in json.loads(Path(path).read_text())]
+    else:
+        bursts = load_bursts(a.lane, a.fingerprint)
     model = completeness_model(bursts)
     print(f'{len(bursts)} injected bursts; completeness by scattering at 135 MHz (S/N at half the plateau):')
     for (lo, hi), (x50, sigma, top, n) in model.items():
         print(f'  tau {lo:g}-{hi:g} s: n {n}, S/N50 {10 ** x50:.1f}, plateau {top:.2f}, width {sigma:.2f} dex')
-    fields = sap_fields(a.web, a.fingerprint)
+    fields = sap_fields(a.web, None if a.project_saps else a.fingerprint)
+    if a.project_saps:                                     # one complete SAP's layout, as many times as asked
+        layout = next(v for v in fields.values() if len(v) >= 70)
+        fields = {('projected', 0): layout}
     for sefd in a.sefd:
         exp, saps, beams = exposure(bursts, model, fields, sefd, a.alpha, a.tab_fwhm, a.station_fwhm, a.hours)
+        if a.project_saps:
+            exp, saps, beams = exp * a.project_saps, a.project_saps, beams * a.project_saps
         limit = 3.0 / exp if exp > 0 else float('inf')
         print(f'SEFD {sefd:.0f} Jy: {saps} SAPs ({beams} beams), effective exposure {exp:.3g} sky-days for '
               f'N(>1 Jy ms); none found gives R(>1 Jy ms) < {limit:.3g} per sky per day (95%), '
