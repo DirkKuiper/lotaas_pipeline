@@ -51,7 +51,7 @@ COINCIDENCE_SECONDS = 0.5
 # moment, below which the moment is shared; and the shortest span a rate is taken over.
 CHANCE_MAX = 1e-6
 RATE_SPAN_SECONDS = 600.0
-KINDS_QUEUED = ('candidate', 'known_pulsar')
+KINDS_QUEUED = ('candidate', 'dispersed', 'known_pulsar')
 K_DM = 4148.808
 COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is interference
 # The classifier records nothing below its min_dm, so an undispersed burst leaves only
@@ -562,7 +562,9 @@ class Indexer:
                     AND beams.fp16=candidates.fp16 ORDER BY mtime DESC LIMIT 1) WHERE kind='sp'""")
             db.execute("""UPDATE candidates SET pilot=(SELECT pilot FROM beams WHERE beams.dir=candidates.dir)
                     WHERE kind='sp'""")
-            db.execute("""UPDATE candidates SET plot_id=(SELECT id FROM plots WHERE plots.key=candidates.key
+            # The classifier plots FETCH positives and 'dispersed' clusters alike; plots carry candidate| keys.
+            db.execute("""UPDATE candidates SET plot_id=(SELECT id FROM plots
+                    WHERE plots.key='candidate|' || substr(candidates.key, instr(candidates.key, '|') + 1)
                     ORDER BY id DESC LIMIT 1)""")
             db.execute('UPDATE candidates SET snippet=(SELECT path FROM snippets WHERE snippets.key=candidates.key)')
             db.execute("""UPDATE candidates SET sap_key=(SELECT key FROM obs_sap o
@@ -909,7 +911,7 @@ class Indexer:
                 singles.setdefault((parsed[0], r['pulsar']), []).append((r['snr'], r['item']))
         known = {}
         for r in self.db.execute(f"""SELECT c.item, c.dm, c.snr FROM candidates c WHERE c.kind='sp'
-                AND c.type='candidate' AND COALESCE(c.pilot, 0)=0 AND {latest}='known'"""):
+                AND c.type IN ('candidate', 'dispersed') AND COALESCE(c.pilot, 0)=0 AND {latest}='known'"""):
             parsed = parse_item(r['item'])
             if parsed:
                 known.setdefault(parsed[0], []).append((r['dm'], r['snr'], r['item']))
@@ -1049,7 +1051,8 @@ class Indexer:
                               'WHERE ra_deg IS NOT NULL'):
             positions.setdefault((row['observation'], row['sap']), []).append(row)
         found = {r['sap_key']: (r['n'], r['snr']) for r in db.execute(
-            "SELECT sap_key, COUNT(*) AS n, MAX(snr) AS snr FROM candidates WHERE type='candidate' GROUP BY sap_key")}
+            "SELECT sap_key, COUNT(*) AS n, MAX(snr) AS snr FROM candidates WHERE type IN ('candidate', 'dispersed') "
+            "GROUP BY sap_key")}
         rows = []
         for mapping in db.execute('SELECT observation,sap,key FROM obs_sap'):
             place = positions.get((mapping['observation'], mapping['sap']), [])
@@ -1079,7 +1082,7 @@ class Indexer:
     def measure_local(self, limit=300):
         """The local S/N the review page shows, measured once on the snippet of each open queued candidate."""
         rows = self.db.execute("""SELECT c.key, s.path FROM candidates c JOIN snippets s ON s.key=c.key
-            WHERE c.kind='sp' AND c.type IN ('candidate', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
+            WHERE c.kind='sp' AND c.type IN ('candidate', 'dispersed', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
             AND NOT EXISTS (SELECT 1 FROM sp_local_snr l WHERE l.key=c.key)
             AND NOT EXISTS (SELECT 1 FROM review_state.reviews v WHERE v.key=c.key AND v.reviewer != 'auto-triage')
             LIMIT ?""", (limit,)).fetchall()

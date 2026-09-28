@@ -41,8 +41,9 @@ STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding',
 FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
 # Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
 # what waits for a person; the other types can be listed but are not queued.
-KINDS = {'sp': {'types': ('candidate', 'known_pulsar', 'rejected', 'unclassified', 'unconfirmed'),
-                'queue': ('candidate', 'known_pulsar'),
+# 'dispersed': FETCH said no, but its own data show a dispersed pulse (classify, 28 September 2026).
+KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar', 'rejected', 'unclassified', 'unconfirmed'),
+                'queue': ('candidate', 'dispersed', 'known_pulsar'),
                 'page': '/single-pulse', 'sort': 'recent'},
          'periodic': {'types': ('periodic', 'periodic_rfi'), 'queue': ('periodic',),
                       'page': '/periodic', 'sort': 'evidence'}}
@@ -396,6 +397,7 @@ def create_app(cfg, run_background=True):
     env = templates.env
     env.filters.update(ago=ago, duration=duration, when=when, size=size, beam=beam_label, fromjson=json.loads,
                        kind=lambda t: {'candidate': 'FETCH positive', 'known_pulsar': 'known pulsar',
+                                       'dispersed': 'dispersed, FETCH said no',
                                        'rejected': 'FETCH reject', 'periodic': 'periodic',
                                        'unclassified': 'not sent to FETCH',
                                        'unconfirmed': 'low local significance',
@@ -468,7 +470,7 @@ def create_app(cfg, run_background=True):
             events = rows(db, 'SELECT * FROM events ORDER BY time DESC LIMIT 40')
             dispatched = rows(db, "SELECT key, run_name, updated FROM saps WHERE state='dispatched'")
             review = rows(db, """SELECT c.*, (SELECT label FROM r.reviews v WHERE v.key=c.key
-                ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.type='candidate'
+                ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.type IN ('candidate', 'dispersed')
                 ORDER BY c.found DESC LIMIT 8""")
             _, lotaas = lotaas_summary(db)
             _, pulsars = pulsar_summary(db)
@@ -593,7 +595,8 @@ def create_app(cfg, run_background=True):
                 prefix = f'downsampled_{info["observation"]}_SAP{info["sap"]:03d}_BEAM%'
                 beams = rows(db, """SELECT b.*, (SELECT status FROM attempts a WHERE a.item=b.item AND a.stage='classify'
                         ORDER BY a.id DESC LIMIT 1) AS classify,
-                        (SELECT COUNT(*) FROM candidates c WHERE c.item=b.item AND c.type='candidate') AS positives
+                        (SELECT COUNT(*) FROM candidates c WHERE c.item=b.item
+                         AND c.type IN ('candidate', 'dispersed')) AS positives
                     FROM beams b WHERE b.item LIKE ? ORDER BY b.beam, b.mtime DESC""", prefix)
                 stages = rows(db, """SELECT item, stage, status, fingerprint, seconds, finished FROM attempts
                     WHERE id IN (SELECT MAX(id) FROM attempts WHERE item LIKE ? GROUP BY item, stage)""", prefix)

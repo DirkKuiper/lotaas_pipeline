@@ -89,6 +89,25 @@ def test_single_pulse_and_periodic_are_listed_and_queued_apart(cfg, campaign):
     assert client.get('/candidates', follow_redirects=False).headers['location'] == '/single-pulse'
 
 
+def test_what_fetch_rejected_but_its_own_data_show_dispersed_is_queued_with_its_plot(cfg, campaign):
+    # classify's 'dispersed' route (28 September 2026): wide FRB-like bursts FETCH cannot judge.
+    with campaign['ledger'].connect() as db:
+        run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
+        db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
+                   "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
+                   "(?,830.0,12.4,32,'dispersed',NULL,0.2,?,300.0,38147)", (ITEM + '.fil', run))
+    (campaign['beam_dir'] / 'candidate_plots' / 'DM830.0_Width32_SNR12.4.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    row = indexer.db.execute("SELECT key, plot_id FROM candidates WHERE type='dispersed'").fetchone()
+    assert row['key'].startswith('dispersed|') and row['plot_id'] is not None
+    client = client_for(cfg)
+    listed = client.get('/single-pulse?type=dispersed').text
+    assert 'dispersed, FETCH said no' in listed and '830.00' in listed
+    queue = client.get('/single-pulse').text                        # the queue: beside FETCH's positives
+    assert 'dispersed, FETCH said no' in queue and 'FETCH positive' in queue
+
+
 def test_reviews_are_kept_apart_and_validated(cfg, campaign):
     Indexer(cfg).run_pass()
     client = client_for(cfg)

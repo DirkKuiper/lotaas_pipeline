@@ -39,7 +39,7 @@ class Config:
     # Hard-link prepared filterbanks so they outlive the campaign's clean-up
     # until the snippets are cut. Costs no space until the campaign deletes its copy.
     hold: bool = True
-    snippet_types: list = field(default_factory=lambda: ['candidate', 'known_pulsar'])
+    snippet_types: list = field(default_factory=lambda: ['candidate', 'dispersed', 'known_pulsar'])
     # Also keep snippets of FETCH rejects scoring above this; None keeps none.
     rejected_above: float | None = None
     exclude_beams: list = field(default_factory=lambda: [12])

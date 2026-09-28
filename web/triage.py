@@ -61,7 +61,7 @@ ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetec
 LATEST = '(SELECT {0} FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
 # No verdict yet, or only this triage's own.
 OPEN = f"COALESCE({LATEST.format('reviewer')}, '{REVIEWER}') = '{REVIEWER}'"
-QUEUED = "c.kind='sp' AND c.type IN ('candidate', 'known_pulsar') AND COALESCE(c.pilot, 0)=0"
+QUEUED = "c.kind='sp' AND c.type IN ('candidate', 'dispersed', 'known_pulsar') AND COALESCE(c.pilot, 0)=0"
 NOT_KNOWN = 'NOT EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key)'
 
 
