@@ -221,6 +221,12 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
         )
         ra_str = skycoord.ra.to_string(unit=u.hour, sep=':', pad=True, precision=2)
         dec_str = skycoord.dec.to_string(unit=u.deg, sep=':', alwayssign=True, pad=True, precision=2)
+        # The Milky Way's largest DM along this line of sight (NE2001, YMW16): a candidate well beyond
+        # it would be extragalactic, and the review queue shows it first.
+        l, b = skycoord.galactic.l.deg, skycoord.galactic.b.deg
+        dm_ne2001, _ = pygedm.dist_to_dm(l, b, 5e4, method='ne2001')
+        dm_ymw16, _ = pygedm.dist_to_dm(l, b, 5e4, method='ymw16')
+        dm_galactic = float(max(getattr(dm_ne2001, 'value', dm_ne2001), getattr(dm_ymw16, 'value', dm_ymw16)))
 
         from lotaas_reprocessing.atnf import query_atnf
         query = query_atnf(
@@ -412,6 +418,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     model_probabilities=fetch_probs,
                     own_snr=own,
                     dispersion_ratio=ratio,
+                    dm_galactic=dm_galactic,
                 )
                 if not dispersed:
                     continue
@@ -428,6 +435,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     classification_probability=highest_prob,
                     model_probabilities=fetch_probs,
                     own_snr=own,
+                    dm_galactic=dm_galactic,
                 )
 
             fil = FilterbankFile(filterbank_file, "read")
@@ -436,10 +444,6 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             frequency_axis = np.flip(f_start + np.arange(nchan) * delta_f)
 
             # Galactic info
-            l = skycoord.galactic.l.deg
-            b = skycoord.galactic.b.deg
-            dm_ne2001, _ = pygedm.dist_to_dm(l, b, 5e4, method='ne2001')
-            dm_ymw16, _ = pygedm.dist_to_dm(l, b, 5e4, method='ymw16')
             galactic_info = (
                 f"RA: {observation_info['RA (J2000)']}  DEC: {observation_info['DEC (J2000)']} | "
                 f"l: {l:.2f} b: {b:.2f}\n"

@@ -171,7 +171,8 @@ def test_fetch_is_not_asked_about_what_is_wider_than_it_judges_and_tiers_set_the
                                           baseline_seconds=2.0)
     assert counts['unjudged'] == 1 and counts['fetch'] == 0 and counts['dispersed'] == 1 and not asked
     with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
-        kind, probability = db.execute('SELECT detection_type, classification_probability FROM detections').fetchone()
-    assert kind == 'dispersed' and probability is None
+        kind, probability, galactic = db.execute('SELECT detection_type, classification_probability, dm_galactic '
+                                                 'FROM detections').fetchone()
+    assert kind == 'dispersed' and probability is None and 10 < galactic < 300     # l 140, b 71: high latitude
     assert classify.dispersed_tier(route, 0.1)['min_own_snr'] == 5.0 and classify.dispersed_tier(route, 0.6) is None
     assert classify.dispersed_tier({'min_dm': 100, 'min_own_snr': 8, 'max_ratio': 0.5}, 2.0)['max_ratio'] == 0.5
