@@ -143,3 +143,35 @@ def test_the_classifier_keeps_what_fetch_rejects_but_its_own_data_show_dispersed
     counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots2'), info,
                                           limits=limits, tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
     assert counts['dispersed'] == 0
+
+
+
+def test_fetch_is_not_asked_about_what_is_wider_than_it_judges_and_tiers_set_the_cuts(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    from lotaas_reprocessing import fetch_models
+    classify = classifier(tmp_path, monkeypatch)
+    width = 26                                     # 0.2 s at DM 300
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 0.6)])
+    asked = []
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: asked.append(names) or {})
+    planes = type('Candidate', (), {'tsamp': TSAMP, 'dmt': np.zeros((256, 256)), 'dedispersed': np.zeros((256, NCHANS))})()
+    monkeypatch.setattr(classify, 'fetch_inputs', lambda *args, **kwargs: (planes, None, None, 1))
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n'
+                          f'300.0\t20.0\t{60.0 + (width - 1) / 2 * TSAMP}\t7640\t{width}\n')
+    info = {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'}
+    limits = {'min_dm': 2.0, 'min_snr': 8.0, 'min_own_snr': 4.0, 'min_own_fraction': 0.5}
+    route = {'min_dm': 100.0, 'fetch_max_width_seconds': 0.15,
+             'tiers': [{'max_width_seconds': 0.13, 'min_own_snr': 5.0, 'max_ratio': 0.8},
+                       {'max_width_seconds': 0.5, 'min_own_snr': 8.0, 'max_ratio': 0.5}]}
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'), info,
+                                          limits=dict(limits, dispersed=route), tsamp=TSAMP, plan=PLAN,
+                                          baseline_seconds=2.0)
+    assert counts['unjudged'] == 1 and counts['fetch'] == 0 and counts['dispersed'] == 1 and not asked
+    with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
+        kind, probability = db.execute('SELECT detection_type, classification_probability FROM detections').fetchone()
+    assert kind == 'dispersed' and probability is None
+    assert classify.dispersed_tier(route, 0.1)['min_own_snr'] == 5.0 and classify.dispersed_tier(route, 0.6) is None
+    assert classify.dispersed_tier({'min_dm': 100, 'min_own_snr': 8, 'max_ratio': 0.5}, 2.0)['max_ratio'] == 0.5

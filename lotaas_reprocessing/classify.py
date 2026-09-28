@@ -37,6 +37,17 @@ DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
                   "min_own_snr": None, "min_own_fraction": None, "dispersed": None}
 
 
+def dispersed_tier(route, width_seconds):
+    """The dispersed route's cuts for a cluster this wide: the first of its tiers (by max_width_seconds) the
+    cluster fits, or its single set of cuts; None beyond them all."""
+    tiers = route.get('tiers') or [{'max_width_seconds': route.get('max_width_seconds', float('inf')),
+                                    'min_own_snr': route['min_own_snr'], 'max_ratio': route['max_ratio']}]
+    for tier in sorted(tiers, key=lambda t: t['max_width_seconds']):
+        if width_seconds is None or width_seconds <= tier['max_width_seconds']:
+            return tier
+    return None
+
+
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
     """The decimated, time-cropped DM-time plane FETCH receives.
 
@@ -159,11 +170,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     page showed nothing in, and none of 444 pulsar pulses or 51 injected ones.
     Each FETCH model's score is kept with what FETCH judged (model_probabilities).
 
-    With `dispersed` ({min_dm, min_own_snr, max_ratio, max_width_seconds}) a
-    cluster FETCH rejects that its own data show (own S/N >= min_own_snr) at
-    DM >= min_dm and no wider than max_width_seconds, and that fades when
-    dedispersed too little (own_data.dispersion_ratio <= max_ratio), is recorded
-    as 'dispersed' instead of 'rejected'. FETCH accepted 23% of FRB-like bursts
+    With `dispersed` ({min_dm, tiers: [{max_width_seconds, min_own_snr,
+    max_ratio}], fetch_max_width_seconds}; or one tier's keys at top level) a
+    cluster FETCH rejects at DM >= min_dm that its own data show (own S/N >=
+    the tier's min_own_snr for its width) and that fades when dedispersed too
+    little (own_data.dispersion_ratio <= max_ratio) is recorded as 'dispersed'
+    instead of 'rejected'. Wider than fetch_max_width_seconds at those DMs,
+    FETCH is not asked ('unjudged'): only the route judges. FETCH accepted 23% of FRB-like bursts
     injected at DM 300-2500 that the search found, and almost none wider than
     150 ms, the width most FRBs have at 135 MHz. With min_dm 100, min_own_snr 8,
     max_ratio 0.5 and max_width_seconds 0.5 this route kept 352 of the 485 such
@@ -174,7 +187,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     from lotaas_reprocessing.single_pulse_quality import candidate_key, evidence_route, review_route
     if limits['min_local_snr'] is not None and evidence is None:
         raise ValueError('Local S/N screening requires single_pulse_evidence.json')
-    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0, "dispersed": 0}
+    counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0, "dispersed": 0,
+              "unjudged": 0}
     own_check = limits['min_own_snr'] is not None and limits['min_own_fraction'] is not None and bool(plan)
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
@@ -335,51 +349,56 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                         detection_type="unconfirmed",
                     )
                     continue
-            counts["fetch"] += 1
-
-            if fetch_models is None:
-                from lotaas_reprocessing.fetch_models import load_models
-                fetch_models = load_models(model_names, factory=get_model)
-
-            # Proceed with classification of non-pulsar candidates
+            route = limits['dispersed']
+            width_seconds = width * tsamp if tsamp else None
+            # FETCH accepted almost none of the injected bursts wider than 150 ms: at the route's
+            # DMs, past its fetch_max_width_seconds, only the route judges a cluster.
+            unjudged = bool(route and route.get('fetch_max_width_seconds') is not None and width_seconds is not None
+                            and dm >= route['min_dm'] and width_seconds > route['fetch_max_width_seconds'])
             time_size, freq_size, dm_size = 256, 256, 256
-            cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
-                                                            time_size, freq_size, dm_size)
+            fetch_probs = highest_prob = None
+            if unjudged:
+                counts["unjudged"] += 1
+            else:
+                counts["fetch"] += 1
+                if fetch_models is None:
+                    from lotaas_reprocessing.fetch_models import load_models
+                    fetch_models = load_models(model_names, factory=get_model)
+                # Proceed with classification of non-pulsar candidates
+                cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
+                                                                time_size, freq_size, dm_size)
+                fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
+                               for name, model in fetch_models.items()}
+                if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
+                    raise ValueError(f"Invalid FETCH probabilities at DM={dm}, time={tcand}")
+                highest_prob = max(fetch_probs.values())
 
-            fil = FilterbankFile(filterbank_file, "read")
-            f_start, delta_f, nchan = fil.fch1, fil.foff, fil.nchans
-            fil.close()
-            frequency_axis = np.flip(f_start + np.arange(nchan) * delta_f)
-
-            fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
-                           for name, model in fetch_models.items()}
-            if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
-                raise ValueError(f"Invalid FETCH probabilities at DM={dm}, time={tcand}")
-            highest_prob = max(fetch_probs.values())
-
-            if highest_prob <= 0.5:
+            if unjudged or highest_prob <= 0.5:
                 # Record the rejection. A bare `continue` left no plot, no row
                 # and no log line, so a candidate the classifier discarded was
                 # indistinguishable in the outputs from one never found. An
                 # injected pulse recovered at S/N 14.7 scored 0.374 here while
                 # three fainter ones from the same beam scored above 0.97, and
                 # nothing recorded that it had been considered at all.
-                logger.info(
-                    "FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
-                    dm, tcand, snr, width, highest_prob)
-                route, ratio = limits['dispersed'], None
-                if (route and own is not None and dm >= route['min_dm'] and own >= route['min_own_snr']
-                        and (tsamp is None or width * tsamp <= route.get('max_width_seconds', float('inf')))):
+                if not unjudged:
+                    logger.info("FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
+                                dm, tcand, snr, width, highest_prob)
+                tier = dispersed_tier(route, width_seconds) if route and dm >= route['min_dm'] else None
+                ratio = None
+                if tier and own is not None and own >= tier['min_own_snr']:
                     try:
                         ratio, _ = dispersion_ratio(load_own(filterbank_file, dm, tcand, width, plan, bad_channels),
                                                     baseline_seconds=baseline_seconds or 2.0,
                                                     baseline_widths=baseline_widths or 64)
                     except Exception as error:
                         logger.warning("Dispersion not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)
-                dispersed = ratio is not None and ratio <= route['max_ratio']
+                dispersed = ratio is not None and ratio <= tier['max_ratio']
                 if dispersed:
                     counts["dispersed"] += 1
                     logger.info("Dispersed at DM=%.2f t=%.3f: own S/N %.1f, ratio %.2f", dm, tcand, own, ratio)
+                    if unjudged:                       # the review plot shows what FETCH would have seen
+                        cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr,
+                                                                        bad_channels, time_size, freq_size, dm_size)
                 insert_detection(
                     beam_id=beam_id,
                     beam_run_id=beam_run_id,
@@ -410,6 +429,11 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     model_probabilities=fetch_probs,
                     own_snr=own,
                 )
+
+            fil = FilterbankFile(filterbank_file, "read")
+            f_start, delta_f, nchan = fil.fch1, fil.foff, fil.nchans
+            fil.close()
+            frequency_axis = np.flip(f_start + np.arange(nchan) * delta_f)
 
             # Galactic info
             l = skycoord.galactic.l.deg
@@ -469,10 +493,13 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
 
             ax_fetch = fig.add_subplot(gs[1,0:5])
             ax_fetch.axis("off")
-            ax_fetch.text(0.5,0.5,
-                "FETCH: "+" | ".join([f"{k}:{v:.2f}" for k,v in fetch_probs.items()])
-                + (f"   | rejected, but dispersed: own S/N {own:.1f}, ratio {ratio:.2f}" if highest_prob <= 0.5 else ""),
-                ha="center",va="center",fontsize=9,family="monospace")
+            if fetch_probs is None:
+                verdict = f"FETCH not asked (wider than it judges) | dispersed: own S/N {own:.1f}, ratio {ratio:.2f}"
+            else:
+                verdict = ("FETCH: " + " | ".join([f"{k}:{v:.2f}" for k, v in fetch_probs.items()])
+                           + (f"   | rejected, but dispersed: own S/N {own:.1f}, ratio {ratio:.2f}"
+                              if highest_prob <= 0.5 else ""))
+            ax_fetch.text(0.5,0.5,verdict,ha="center",va="center",fontsize=9,family="monospace")
 
             ax_gal = fig.add_subplot(gs[2,3:5])
             ax_gal.axis("off")
