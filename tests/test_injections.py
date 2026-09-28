@@ -63,7 +63,14 @@ def test_twins_are_made_on_cpu_nodes_and_settled_when_they_end(tmp_path):
     ln.make()
     node, command, log = ln.started[0]
     assert node in injections.CPU_NODES and 'lotaas_reprocessing.frb_injection' in command
-    assert str(o['settings']['lta']) in command                    # the search's own channel mask
+    assert str(tmp_path / 'snapshot' / 'settings' / 'lta.yaml') in command    # the search's mask, on the shared disk
+    # A failure is tried again, holding the beam, until MAKE_ATTEMPTS.
+    Path(str(log) + '.exit').write_text('1\n')
+    ln.make()
+    sample = ln.rows('SELECT * FROM samples')[0]
+    assert sample['attempts'] == 1 and Path(sample['link']).exists()
+    ln.make()
+    node, command, log = ln.started[-1]
     sample = ln.rows('SELECT * FROM samples')[0]
     Path(sample['twin']).write_bytes(b'twin')
     Path(sample['truth']).write_text('{}')

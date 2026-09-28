@@ -38,6 +38,7 @@ BATCH = 24
 MAX_WAIT = 6 * 3600.0
 MAKE_PARALLEL = 4
 MAKE_TIMEOUT = 3600.0
+MAKE_ATTEMPTS = 3
 GPU_NODE = 'efc-gpu-00'
 CPU_NODES = ('efc-cpu-03', 'efc-cpu-04', 'efc-cpu-05', 'efc-cpu-06')
 EXCLUDE_BEAMS = (12,)
@@ -45,7 +46,8 @@ SOURCES = ('lta', 'spider')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (sap TEXT PRIMARY KEY, source TEXT, beam INTEGER, origin TEXT, link TEXT,
-    twin TEXT, truth TEXT, seed INTEGER, state TEXT, node TEXT, batch TEXT, staged REAL, made REAL, detail TEXT);
+    twin TEXT, truth TEXT, seed INTEGER, state TEXT, node TEXT, batch TEXT, staged REAL, made REAL, detail TEXT,
+    attempts INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS batches (name TEXT PRIMARY KEY, source TEXT, node TEXT, checkout TEXT, fingerprint TEXT,
     settings TEXT, started REAL, finished REAL, state TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS bursts (twin TEXT, idx INTEGER, sap TEXT, batch TEXT, source TEXT, fingerprint TEXT,
@@ -91,6 +93,8 @@ class Lane:
         self.db = sqlite3.connect(self.root / 'lane.sqlite', timeout=60)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        if 'attempts' not in {r[1] for r in self.db.execute('PRAGMA table_info(samples)')}:
+            self.db.execute('ALTER TABLE samples ADD COLUMN attempts INTEGER DEFAULT 0')
 
     def rows(self, sql, *args):
         return [dict(r) for r in self.db.execute(sql, args)]
@@ -102,8 +106,14 @@ class Lane:
                             [*values.values(), key])
 
     # ------------------------------------------------------------------ code and image the jobs run
+    def settings(self, snapshot, source):
+        """Production's settings for a source, as the snapshot holds them on the shared disk (nodes lack /home)."""
+        return snapshot / 'settings' / f'{source}.yaml'
+
     def code(self):
-        """(snapshot of the production checkout's HEAD on the shared disk, its commit, the image copied beside it)."""
+        """(snapshot of the production checkout's HEAD on the shared disk, its commit, the image copied beside it).
+
+        The snapshot also holds production's settings for each source, as they were when it was taken."""
         commit = run(['git', '-C', str(self.o['checkout']), 'rev-parse', 'HEAD']).stdout.strip()
         snapshot = self.root / 'code' / commit[:12]
         if not snapshot.is_dir():
@@ -114,6 +124,9 @@ class Lane:
                                         'db', 'euroflash', 'pipeline'], stdout=subprocess.PIPE)
             subprocess.run(['tar', '-x', '-C', str(partial)], stdin=archive.stdout, check=True)
             archive.wait()
+            (partial / 'settings').mkdir()
+            for source, path in self.o['settings'].items():
+                shutil.copy(path, partial / 'settings' / f'{source}.yaml')
             partial.rename(snapshot)
         stat = self.o['image'].stat()
         image = self.root / 'code' / f"runtime-{stat.st_size}-{int(stat.st_mtime)}.sif"
@@ -181,9 +194,14 @@ class Lane:
             exit_file = Path(s['twin'] + '.log.exit')
             if exit_file.exists():
                 ok = exit_file.read_text().strip() == '0' and Path(s['twin']).is_file() and Path(s['truth']).is_file()
-                Path(s['link']).unlink(missing_ok=True)
-                self.set('samples', s['sap'], state='ready' if ok else 'failed', made=self.now(),
-                         detail=None if ok else Path(s['twin'] + '.log').read_text()[-2000:])
+                attempts = (s.get('attempts') or 0) + 1
+                if ok or attempts >= MAKE_ATTEMPTS:
+                    Path(s['link']).unlink(missing_ok=True)
+                log = Path(s['twin'] + '.log')
+                self.set('samples', s['sap'], state='ready' if ok else 'failed' if attempts >= MAKE_ATTEMPTS else 'staged',
+                         made=self.now(), attempts=attempts,
+                         detail=None if ok else (log.read_text()[-2000:] if log.exists() else 'no log'))
+                exit_file.unlink()
                 finished.append(s['sap'])
             elif self.now() - (s['staged'] or 0) > MAKE_TIMEOUT + 3600:
                 Path(s['link']).unlink(missing_ok=True)
@@ -199,7 +217,7 @@ class Lane:
             twin.parent.mkdir(exist_ok=True)
             node = CPU_NODES[(busy + i) % len(CPU_NODES)]
             command = self.container(snapshot, image, 'lotaas_reprocessing.frb_injection', s['link'], twin, truth,
-                                     s['seed'], self.o['settings'][s['source']], BURSTS)
+                                     s['seed'], self.settings(snapshot, s['source']), BURSTS)
             Path(str(twin) + '.log.exit').unlink(missing_ok=True)
             if self.remote(node, command, Path(str(twin) + '.log')):
                 self.set('samples', s['sap'], state='making', twin=str(twin), truth=str(truth), node=node)
@@ -259,7 +277,7 @@ class Lane:
                 snapshot, _, image = self.code()
                 command = self.container(snapshot, image, 'lotaas_reprocessing.injection_fates',
                                          self.root / 'results' / b['name'], self.root / 'batches' / b['name'] / 'truth',
-                                         b['settings'], fates, self.root / 'batches' / b['name'])
+                                         self.settings(snapshot, b['source']), fates, self.root / 'batches' / b['name'])
                 analysis_log = self.root / 'logs' / f"{b['name']}.fates.log"
                 if self.remote(CPU_NODES[0], command, analysis_log):
                     self.set('batches', b['name'], state='analysing',
