@@ -1,0 +1,179 @@
+"""What the survey's searched beams say about the FRB rate at 135 MHz, from the injection lane's completeness.
+
+    python -m euroflash.frb_rate [--lane LANE_DB] [--web WEB_DB] [--fingerprint PREFIX] [--sefd 250 400 600]
+                                 [--alpha -1.4] [--tab-fwhm 0.40] [--station-fwhm 4.3] [--hours 1.0]
+
+Ingredients, each stated so that it can be replaced:
+  completeness  C(S/N) of an injected burst reaching the review queue (euroflash.injections), a logistic in
+                log S/N fitted per class of scattering time at 135 MHz, where S/N is the burst's ideal
+                (radiometer) S/N in the beam it lands in;
+  S/N per Jy s  each injected burst's ideal S/N per unit fluence, snr_ideal / (fluence_units / level) in units
+                of the system's power, over the SEFD: bursts of the population are drawn from the injected
+                ones, so its scattering, widths, DMs and spectra are theirs;
+  beams         the tied-array beams at their recorded positions (web.sqlite), Gaussian of TAB_FWHM, inside
+                a Gaussian station beam of STATION_FWHM centred on the SAP's 61-beam core: an FRB anywhere
+                in a SAP's field is seen by its best beam at that beam's relative gain;
+  exposure      searched beams of the chosen code fingerprint, grouped into SAPs, HOURS each;
+  population    N(>F) = R (F / 1 Jy ms)^alpha per sky per day at 135 MHz, fluence F in Jy ms.
+The expected number of detections is R times the survey's effective exposure in sky x days; with none
+found, R < 3.0 / exposure at 95% confidence.
+"""
+import argparse
+import json
+import math
+import sqlite3
+from pathlib import Path
+
+import numpy as np
+
+LANE_DB = Path('/shared/results/dkuiper/lotaas/injections/lane.sqlite')
+WEB_DB = Path('/shared/results/dkuiper/lotaas/web/web.sqlite')
+SKY_DEG2 = 4 * math.pi * (180 / math.pi) ** 2
+TAU_CLASSES = (0.0, 0.05, 0.2, 0.5, 1.0, 1e9)
+# Fluences are drawn from this up (Jy ms), well below what the search sees, and rescaled to N(>1 Jy ms).
+F_MIN = 10.0
+
+
+def logistic(x, x50, sigma, top):
+    return top / (1 + np.exp(-(x - x50) / sigma))
+
+
+def fit_completeness(snr, found):
+    """(log10 S/N at half the plateau, width in log10 S/N, plateau) maximising the Bernoulli likelihood."""
+    x, y = np.log10(np.asarray(snr, dtype=float)), np.asarray(found, dtype=float)
+    best = (-np.inf, None)
+    for x50 in np.linspace(0.6, 1.8, 61):
+        for sigma in np.linspace(0.02, 0.4, 20):
+            p = np.clip(logistic(x, x50, sigma, 1.0), 1e-9, 1 - 1e-9)
+            for top in np.linspace(0.5, 1.0, 26):
+                q = np.clip(top * p, 1e-9, 1 - 1e-9)
+                ll = float((y * np.log(q) + (1 - y) * np.log(1 - q)).sum())
+                if ll > best[0]:
+                    best = (ll, (float(x50), float(sigma), float(top)))
+    return best[1]
+
+
+def load_bursts(lane_db, fingerprint=None):
+    db = sqlite3.connect(f'file:{lane_db}?mode=ro', uri=True)
+    db.row_factory = sqlite3.Row
+    sql, args = 'SELECT * FROM bursts', []
+    if fingerprint:
+        sql += ' WHERE fingerprint LIKE ?'
+        args.append(fingerprint + '%')
+    rows = [dict(json.loads(r['record']), queued=int(r['queued'])) for r in db.execute(sql, args)]
+    db.close()
+    return rows
+
+
+def completeness_model(bursts, minimum=20):
+    """{(tau low, tau high): (x50, sigma, plateau, n)} fitted on the injected bursts of that class."""
+    model = {}
+    for lo, hi in zip(TAU_CLASSES, TAU_CLASSES[1:]):
+        sel = [b for b in bursts if lo <= b['tau135'] < hi]
+        if len(sel) >= minimum:
+            model[(lo, hi)] = fit_completeness([b['snr_ideal'] for b in sel], [b['queued'] for b in sel]) + (len(sel),)
+    return model
+
+
+def completeness(model, tau, snr):
+    """C for bursts of scattering times `tau` at ideal S/N `snr` (arrays); 0 in classes without a fit."""
+    tau, snr = np.asarray(tau, dtype=float), np.asarray(snr, dtype=float)
+    out = np.zeros_like(snr)
+    for (lo, hi), (x50, sigma, top, _) in model.items():
+        sel = (tau >= lo) & (tau < hi)
+        out[sel] = logistic(np.log10(np.maximum(snr[sel], 1e-3)), x50, sigma, top)
+    return out
+
+
+def snr_per_jy_s(bursts, sefd):
+    """(ideal S/N per Jy s of fluence at this SEFD, scattering time) of the bursts whose truth records fluence."""
+    kappa, tau = [], []
+    for b in bursts:
+        if b.get('fluence_units') and b.get('level'):
+            kappa.append(b['snr_ideal'] * b['level'] / b['fluence_units'] / sefd)
+            tau.append(b['tau135'])
+    return np.array(kappa), np.array(tau)
+
+
+def sap_fields(web_db, fingerprint=None):
+    """{(observation, sap): {beam: (ra, dec)}} of the SAPs searched (by that code), from the web's index."""
+    db = sqlite3.connect(f'file:{web_db}?mode=ro', uri=True)
+    fields = {}
+    for obs, sap, beam, ra, dec, fp in db.execute('SELECT observation, sap, beam, ra_deg, dec_deg, fingerprint FROM '
+                                                   'beams WHERE ra_deg IS NOT NULL AND sp_complete = 1'):
+        if fingerprint and not (fp or '').startswith(fingerprint):
+            continue
+        fields.setdefault((obs, sap), {}).setdefault(beam, (ra, dec))
+    db.close()
+    return fields
+
+
+def gain_samples(positions, core, tab_fwhm, station_fwhm, rng, n=2000, radius=2.5):
+    """(relative gains of the best beam at n random points within `radius` degrees of the core, that area).
+
+    positions: (beams, 2) [ra, dec] in degrees; core: the station beam's centre."""
+    ra0, dec0 = core
+    x = (positions[:, 0] - ra0) * math.cos(math.radians(dec0))
+    y = positions[:, 1] - dec0
+    r = radius * np.sqrt(rng.random(n))
+    phi = 2 * math.pi * rng.random(n)
+    px, py = r * np.cos(phi), r * np.sin(phi)
+    k = 4 * math.log(2)
+    station = np.exp(-k * (px ** 2 + py ** 2) / station_fwhm ** 2)
+    tab = np.exp(-k * ((px[:, None] - x[None, :]) ** 2 + (py[:, None] - y[None, :]) ** 2) / tab_fwhm ** 2).max(axis=1)
+    return station * tab, math.pi * radius ** 2
+
+
+def exposure(bursts, model, fields, sefd, alpha, tab_fwhm, station_fwhm, hours, draws=4000, seed=0):
+    """(effective exposure in sky x days, SAPs, beams): the expected detections per unit R of N(>1 Jy ms)."""
+    rng = np.random.default_rng(seed)
+    kappa, taus = snr_per_jy_s(bursts, sefd)
+    if not len(kappa):
+        raise ValueError('no injected burst records its fluence yet (the lane truth has it from 94e7a4f on)')
+    total, saps, beams = 0.0, 0, 0
+    for beams_of in fields.values():
+        coherent = {b: v for b, v in beams_of.items() if b != 12}
+        if not coherent:
+            continue
+        positions = np.array(list(coherent.values()))
+        core = np.array([v for b, v in coherent.items() if b >= 13] or list(coherent.values())).mean(axis=0)
+        gains, area = gain_samples(positions, core, tab_fwhm, station_fwhm, rng)
+        # Fluences from N(>F) ~ F^alpha above F_MIN: the detected fraction of what arrives in the field,
+        # times the fraction of N(>1 Jy ms) above F_MIN.
+        f = F_MIN * rng.random(draws) ** (1 / alpha)                     # Jy ms, Pareto of index -alpha
+        i = rng.integers(len(kappa), size=draws)
+        g = gains[rng.integers(len(gains), size=draws)]
+        detected = completeness(model, taus[i], kappa[i] * g * f * 1e-3).mean()
+        total += F_MIN ** alpha * area / SKY_DEG2 * hours / 24.0 * detected
+        saps += 1
+        beams += len(coherent)
+    return total, saps, beams
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--lane', type=Path, default=LANE_DB)
+    p.add_argument('--web', type=Path, default=WEB_DB)
+    p.add_argument('--fingerprint', help='code fingerprint prefix of the searches (and injections) to count')
+    p.add_argument('--sefd', type=float, nargs='+', default=[250.0, 400.0, 600.0], help='Jy, per beam')
+    p.add_argument('--alpha', type=float, default=-1.4)
+    p.add_argument('--tab-fwhm', type=float, default=0.40, help='degrees at 135 MHz')
+    p.add_argument('--station-fwhm', type=float, default=4.3, help='degrees at 135 MHz')
+    p.add_argument('--hours', type=float, default=1.0, help='per SAP')
+    a = p.parse_args(argv)
+    bursts = load_bursts(a.lane, a.fingerprint)
+    model = completeness_model(bursts)
+    print(f'{len(bursts)} injected bursts; completeness by scattering at 135 MHz (S/N at half the plateau):')
+    for (lo, hi), (x50, sigma, top, n) in model.items():
+        print(f'  tau {lo:g}-{hi:g} s: n {n}, S/N50 {10 ** x50:.1f}, plateau {top:.2f}, width {sigma:.2f} dex')
+    fields = sap_fields(a.web, a.fingerprint)
+    for sefd in a.sefd:
+        exp, saps, beams = exposure(bursts, model, fields, sefd, a.alpha, a.tab_fwhm, a.station_fwhm, a.hours)
+        limit = 3.0 / exp if exp > 0 else float('inf')
+        print(f'SEFD {sefd:.0f} Jy: {saps} SAPs ({beams} beams), effective exposure {exp:.3g} sky-days for '
+              f'N(>1 Jy ms); none found gives R(>1 Jy ms) < {limit:.3g} per sky per day (95%), '
+              f'R(>100 Jy ms) < {limit * 100 ** a.alpha:.3g}')
+
+
+if __name__ == '__main__':
+    main()
