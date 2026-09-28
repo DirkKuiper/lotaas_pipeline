@@ -1,4 +1,4 @@
-"""Read SIGPROC filterbank files, with the samples mapped by numpy.
+"""Read and write SIGPROC filterbank files, with the samples mapped by numpy.
 
 The pipeline's FilterbankFile decodes header strings as text and fails on the
 flatfielded beams, so this reads the header as bytes. Data are returned as
@@ -15,6 +15,9 @@ INTEGERS = {'telescope_id', 'machine_id', 'data_type', 'nchans', 'nbits', 'nifs'
             'ibeam', 'barycentric', 'pulsarcentric', 'nbins', 'nsamples'}
 STRINGS = {'rawdatafile', 'source_name'}
 DTYPES = {32: np.float32, 8: np.uint8}
+ORDER = ['telescope_id', 'machine_id', 'data_type', 'rawdatafile', 'source_name', 'barycentric',
+         'pulsarcentric', 'src_raj', 'src_dej', 'az_start', 'za_start', 'tstart', 'tsamp',
+         'fch1', 'foff', 'nchans', 'nbeams', 'ibeam', 'nbits', 'nifs']
 
 
 def _string(stream):
@@ -55,3 +58,28 @@ def open_data(path):
 
 def channel_frequencies(header):
     return header['fch1'] + np.arange(header['nchans']) * header['foff']
+
+
+def _encode(key):
+    return struct.pack('<i', len(key)) + key.encode('latin-1')
+
+
+def write(path, header, data):
+    """Write 32-bit (time, channel) samples under a header copied from the source, keys in SIGPROC order."""
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    header = dict(header, nbits=32, nchans=data.shape[1], nifs=1)
+    header.pop('nsamples', None)
+    keys = [k for k in ORDER if k in header] + sorted(set(header) - set(ORDER))
+    with open(path, 'wb') as stream:
+        stream.write(_encode('HEADER_START'))
+        for key in keys:
+            value = header[key]
+            stream.write(_encode(key))
+            if key in INTEGERS:
+                stream.write(struct.pack('<i', int(value)))
+            elif key in STRINGS:
+                stream.write(_encode(str(value)))
+            else:
+                stream.write(struct.pack('<d', float(value)))
+        stream.write(_encode('HEADER_END'))
+        data.tofile(stream)
