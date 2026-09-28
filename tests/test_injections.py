@@ -125,7 +125,9 @@ def test_a_finished_batch_is_followed_to_its_fates_and_its_twins_go(tmp_path):
     burst = {'twin': twin.stem, 'index': 0, 'dm': 500.0, 'tau135': 0.01, 'width': 0.001, 'snr_ideal': 12.0,
              'spectrum': 'flat', 'stage': 'dispersed', 'cluster': {'snr': 10.5}, 'own_snr': 9.0,
              'dispersion_ratio': 0.3, 'fetch': 0.2, 'page': 9.5, 'queued': True}
-    (ln.root / 'fates' / f'{name}.json').write_text(json.dumps({'bursts': [burst], 'others': []}))
+    other = {'twin': twin.stem, 'type': 'dispersed', 'dm': 322.3, 'snr': 19.7, 'width': 60, 'time': 12.0}
+    (ln.root / 'fates' / f'{name}.json').write_text(json.dumps({'bursts': [burst], 'others': [
+        other, dict(other, type='rejected')]}))
     Path(str(log) + '.exit').write_text('0\n')
     assert ln.collect() == [name]
     row = ln.rows('SELECT * FROM bursts')[0]
@@ -133,3 +135,4 @@ def test_a_finished_batch_is_followed_to_its_fates_and_its_twins_go(tmp_path):
     assert not twin.exists() and not (ln.root / 'batches' / name).exists()
     assert ln.rows('SELECT state FROM batches')[0]['state'] == 'done'
     assert 'reached the review queue' in injections.report(ln)
+    assert ln.status()['real candidates per twin'] == {'dispersed': 1.0}

@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS samples (sap TEXT PRIMARY KEY, source TEXT, beam INTE
     attempts INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS batches (name TEXT PRIMARY KEY, source TEXT, node TEXT, checkout TEXT, fingerprint TEXT,
     settings TEXT, started REAL, finished REAL, state TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS others (twin TEXT, batch TEXT, source TEXT, fingerprint TEXT, type TEXT, dm REAL,
+    snr REAL, width INTEGER, time REAL);
 CREATE TABLE IF NOT EXISTS bursts (twin TEXT, idx INTEGER, sap TEXT, batch TEXT, source TEXT, fingerprint TEXT,
     dm REAL, tau135 REAL, width REAL, snr_ideal REAL, spectrum TEXT, stage TEXT, search_snr REAL, own_snr REAL,
     dispersion_ratio REAL, fetch REAL, page REAL, queued INTEGER, record TEXT, PRIMARY KEY (twin, idx));
@@ -306,6 +308,12 @@ class Lane:
                                  batch['fingerprint'], r['dm'], r['tau135'], r['width'], r['snr_ideal'], r['spectrum'],
                                  r['stage'], c.get('snr'), r.get('own_snr'), r.get('dispersion_ratio'), r.get('fetch'),
                                  page, int(bool(r.get('queued'))), json.dumps(r)))
+            # What the twins' real data sent for review: the queue's cost per beam, across the survey.
+            for o in result.get('others', []):
+                if o['type'] in ('candidate', 'dispersed'):
+                    self.db.execute('INSERT INTO others VALUES (?,?,?,?,?,?,?,?,?)',
+                                    (o['twin'], batch['name'], batch['source'], batch['fingerprint'], o['type'],
+                                     o['dm'], o['snr'], o['width'], o.get('time')))
 
     def finish(self, batch, state):
         for s in self.rows('SELECT * FROM samples WHERE batch=?', batch['name']):
@@ -322,7 +330,10 @@ class Lane:
     def status(self):
         return {'samples': dict(self.db.execute('SELECT state, COUNT(*) FROM samples GROUP BY state').fetchall()),
                 'batches': dict(self.db.execute('SELECT state, COUNT(*) FROM batches GROUP BY state').fetchall()),
-                'bursts': self.db.execute('SELECT COUNT(*) FROM bursts').fetchone()[0]}
+                'bursts': self.db.execute('SELECT COUNT(*) FROM bursts').fetchone()[0],
+                'real candidates per twin': dict(self.db.execute(
+                    'SELECT type, ROUND(1.0 * COUNT(*) / (SELECT COUNT(DISTINCT twin) FROM bursts), 3) FROM others '
+                    'GROUP BY type').fetchall())}
 
 
 def completeness(bursts, key, edges):
