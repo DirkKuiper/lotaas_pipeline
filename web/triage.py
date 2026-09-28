@@ -46,12 +46,16 @@ replaced when its evidence changes: two classifier 'redetections' first called
 import time
 
 from web import store
-from web.indexer import COINCIDENT_BEAMS
+from web.indexer import CHANCE_MAX, COINCIDENT_BEAMS
 
 REVIEWER = 'auto-triage'
 ALL_SAPS = 3                  # a LOTAAS pointing's SAPs
 LOCAL_MIN = 4.0               # local S/N below which a search S/N of SEARCH_MIN or more had nothing there
 SEARCH_MIN = 7.0
+# Or below this fraction of the search's S/N. Pulses injected into a pilot beam of 27 September
+# 2026 read 0.8-1.4 times their search S/N on the review page; interference the search saw
+# through read a quarter to a half.
+LOCAL_FRACTION = 0.6
 ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
           'rotation': 'the pulses keep its rotation'}
 LATEST = '(SELECT {0} FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
@@ -78,15 +82,16 @@ def settled(db):
                                   f"DM; this observation shows it: {seen}{z}. A known pulsar seen away from its own "
                                   f"beam.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, x.beams, x.saps, x.near_zero, x.events, x.dm_min, x.dm_max,
-            x.consistent, {earlier} AS earlier FROM candidates c JOIN sp_coincidence x ON x.key=c.key
-            WHERE {QUEUED} AND {OPEN} AND x.beams >= ?
+            x.consistent, x.expected, {earlier} AS earlier FROM candidates c JOIN sp_coincidence x ON x.key=c.key
+            WHERE {QUEUED} AND {OPEN} AND x.beams >= ? AND COALESCE(x.chance, 0) < ?
             AND ((NOT x.consistent AND 4 * x.near_zero >= x.events) OR x.saps >= ?) AND {NOT_KNOWN}""",
-            (COINCIDENT_BEAMS, ALL_SAPS)):
+            (COINCIDENT_BEAMS, CHANCE_MAX, ALL_SAPS)):
         where = 'all three SAPs' if r['saps'] >= ALL_SAPS else f"{r['saps']} SAP(s)"
         spread = 'at one DM' if r['consistent'] else 'at scattered DMs'
         why = (' No one position on the sky is in beams of all three SAPs.' if r['saps'] >= ALL_SAPS else '')
-        out.setdefault(r['key'], (r['key'], 'rfi', f"Interference: the same moment in {r['beams']} beams of {where} "
-                                  f"{spread} ({r['dm_min']:.1f}-{r['dm_max']:.1f}), {r['near_zero']} of the "
+        chance = f" ({r['expected']:.0f} by chance)" if r['expected'] is not None else ''
+        out.setdefault(r['key'], (r['key'], 'rfi', f"Interference: the same moment in {r['beams']} beams{chance} of "
+                                  f"{where} {spread} ({r['dm_min']:.1f}-{r['dm_max']:.1f}), {r['near_zero']} of the "
                                   f"{r['events']} events there below DM 1.{why}", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, s.events, s.expected, s.dm_min, s.dm_max, s.peak_ratio,
             {earlier} AS earlier FROM candidates c JOIN sp_sweep s ON s.key=c.key WHERE {QUEUED} AND {OPEN}
@@ -97,11 +102,13 @@ def settled(db):
                                   f"median S/N: no DM stands out as a pulse's would.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, c.snr, l.local_snr, {earlier} AS earlier FROM candidates c
             JOIN sp_local_snr l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND l.local_snr IS NOT NULL
-            AND l.local_snr < ? AND c.snr >= ? AND {NOT_KNOWN}""", (LOCAL_MIN, SEARCH_MIN)):
+            AND (l.local_snr < ? OR l.local_snr < ? * c.snr) AND c.snr >= ? AND {NOT_KNOWN}""",
+            (LOCAL_MIN, LOCAL_FRACTION, SEARCH_MIN)):
         out.setdefault(r['key'], (r['key'], 'noise', f"Search S/N {r['snr']:.1f}, but S/N {r['local_snr']:.1f} on its "
-                                  f"own data at its time, DM and width (the local S/N of the review page): no pulse "
-                                  f"there. The search's RFI-mask fill can lift the dedispersed baseline for a 7.9 s "
-                                  f"block, and an event on that step reaches S/N 7.", r['dm'], r['earlier']))
+                                  f"own data at its time, DM and width, measured as the search measures (the local "
+                                  f"S/N of the review page): no pulse there. A pulse reads 0.8-1.4 times its search "
+                                  f"S/N there; what the search found was the rest of interference it saw through.",
+                                  r['dm'], r['earlier']))
     return list(out.values())
 
 
@@ -169,20 +176,42 @@ def periodic_relatives(db):
     return out
 
 
+def stale(db, current):
+    """Keys of queued single-pulse candidates whose latest verdict is this triage's own and
+    which no rule gives this pass (current); none when the pass derived no candidates.
+
+    Chance coincidences took 3,459 'rfi' verdicts in the first night of the search of 27
+    September 2026, whose far busier beams put some 24 others at any moment by chance.
+    """
+    if db.execute("SELECT 1 FROM candidates WHERE kind='sp' LIMIT 1").fetchone() is None:
+        return []
+    latest = LATEST.format('reviewer')
+    return [r['key'] for r in db.execute(f'SELECT c.key FROM candidates c WHERE {QUEUED} AND {latest} = ?',
+                                         (REVIEWER,)) if r['key'] not in current]
+
+
 def record(cfg, db):
-    """Record the verdicts settled() finds that differ from the latest; returns how many."""
+    """Record the verdicts settled() finds that differ from the latest, and take back this
+    triage's own where no rule gives them any more; returns how many changed."""
     first = {}
     for key, label, note, dm, earlier in settled(db) + periodic_settled(db) + periodic_relatives(db):
         first.setdefault(key, (key, label, note, dm, earlier))    # one verdict per candidate and pass
     rows = [(key, label, note if earlier is None else f"{note} (Replaces this triage's earlier '{earlier}'.)", dm)
             for key, label, note, dm, earlier in first.values() if label != earlier]
-    if rows:
+    withdrawn = stale(db, first)
+    if rows or withdrawn:
         reviews = store.reviews(cfg)
         try:
             now = time.time()
             with reviews:
                 reviews.executemany('INSERT INTO reviews(key,reviewer,label,note,dm,created) VALUES (?,?,?,?,?,?)',
                                     [(key, REVIEWER, label, note, dm, now) for key, label, note, dm in rows])
+                # Taken back, not overwritten: the candidate is open again, and the record is kept.
+                for key in withdrawn:
+                    reviews.execute("""INSERT INTO triage_withdrawals(key,label,note,created,withdrawn,why)
+                        SELECT key, label, note, created, ?, 'no rule gives it any more' FROM reviews
+                        WHERE key=? AND reviewer=?""", (now, key, REVIEWER))
+                    reviews.execute('DELETE FROM reviews WHERE key=? AND reviewer=?', (key, REVIEWER))
         finally:
             reviews.close()
-    return len(rows)
+    return len(rows) + len(withdrawn)

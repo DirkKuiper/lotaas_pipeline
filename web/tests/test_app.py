@@ -1,4 +1,5 @@
 import json
+import numpy as np
 import pytest
 
 from fastapi.testclient import TestClient
@@ -642,17 +643,84 @@ def test_beams_recorded_with_a_garbled_right_ascension_are_repaired(cfg, campaig
     assert abs(ra - 15 * (23 + 52 / 60 + 25 / 3600)) < 1e-6
 
 
-@pytest.mark.parametrize('amplitude, settled', [(1.2, False), (0.0, True)])
+@pytest.mark.parametrize('amplitude, settled', [(1.2, False), (0.0, True), (0.65, True)])
 def test_a_candidate_its_own_data_do_not_show_is_noise(cfg, campaign, amplitude, settled):
-    # The search put it at S/N 12; the snippet either holds the pulse or none (a baseline step of the mask fill).
+    # The search put it at S/N 12; the snippet holds the pulse, none, or one too faint to be what the search saw.
     synthetic_filterbank(cfg.source_roots[0] / f'{ITEM}.fil', amplitude=amplitude)
     indexer = Indexer(cfg)
     indexer.run_pass()
     Snippets(cfg).run_pass()
     indexer.run_pass()
     local = indexer.db.execute('SELECT local_snr FROM sp_local_snr').fetchall()
-    assert len(local) == 1 and (local[0][0] < 4) == settled
+    assert len(local) == 1 and (local[0][0] < max(4.0, 0.6 * 12.0)) == settled
+    if amplitude == 0.65:
+        assert local[0][0] > 4                    # only the fraction of the search's S/N settles it
     noise = [v for v in verdicts(cfg) if v['label'] == 'noise']
     assert bool(noise) == settled
     if settled:
         assert noise[0]['reviewer'] == 'auto-triage' and 'Search S/N 12.0, but S/N' in noise[0]['note']
+
+
+def insert_events(campaign, rows):
+    """(sap, beam number, dm, snr, width, type, time) detections of ITEM's observation in the ledger."""
+    with campaign['ledger'].connect() as db:
+        run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
+        db.executemany("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
+                       "classification_probability,beam_run_id,time_seconds,sample_number) VALUES "
+                       "(?,?,?,?,?,NULL,NULL,?,?,1)",
+                       [(ITEM.replace('SAP000', f'SAP{sap:03d}').replace('BEAM025', f'BEAM{number:03d}') + '.fil',
+                         dm, snr, width, kind, run, time) for sap, number, dm, snr, width, kind, time in rows])
+
+
+def test_moments_the_beams_share_by_chance_are_not_interference(cfg, campaign):
+    # The search of 27 September 2026 records hundreds of events a beam an hour, so some 24
+    # other beams share any moment by chance; 3,459 FETCH positives of its first night were
+    # called interference for that. A moment counts as shared beyond each beam's own rate.
+    rng = np.random.default_rng(7)
+    background = [(sap, number, float(rng.uniform(2, 500)), 7.2, 4, 'unconfirmed', float(t))
+                  for sap in range(3) for number in range(20, 32) for t in rng.uniform(0, 3600, 600)]
+    queued = [(0, 20 + i, 57.0, 8.0, 3, 'candidate', 400.0 + 300 * i) for i in range(8)]
+    burst = [(n % 3, 20 + n // 3, 5.0 + 3 * n, 20.0, 4, 'candidate' if n == 0 else 'unconfirmed',
+              3100.0 - (5.0 + 3 * n) * PER_DM) for n in range(30)]
+    insert_events(campaign, background + queued + burst)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    rows = {r['key']: dict(r) for r in indexer.db.execute(
+        "SELECT x.*, c.time FROM sp_coincidence x JOIN candidates c ON c.key=x.key WHERE c.type='candidate'")}
+    by_chance = [r for r in rows.values() if abs(r['time'] - 3100) > 60]
+    # The old rule, at least five beams of all three SAPs, fires on chance alone here.
+    assert sum(r['beams'] >= 5 and r['saps'] >= 3 for r in by_chance) >= 2
+    assert all(r['chance'] > 1e-3 and 3 < r['expected'] < 8 for r in by_chance)
+    recorded = {v['key']: v for v in verdicts(cfg)}
+    assert not any(key in recorded for key in (r['key'] for r in by_chance))
+    [shared] = [r for r in rows.values() if abs(r['time'] - 3100) <= 60]
+    assert shared['chance'] < 1e-12 and recorded[shared['key']]['label'] == 'rfi'
+    assert '30 beams (' in recorded[shared['key']]['note'] and 'by chance) of all three SAPs' in recorded[shared['key']]['note']
+
+
+def test_the_triage_takes_back_its_own_verdict_when_no_rule_gives_it(cfg, campaign):
+    from web import store
+    add_detections(campaign, [(40, 57.0, 8.0, 3, 'candidate', None, 1000.0), (41, 60.0, 8.0, 3, 'candidate', None, 2000.0),
+                              (42, 30.0, 8.0, 3, 'candidate', None, 2500.0)])
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    keys = sorted(r[0] for r in indexer.db.execute("SELECT key FROM candidates WHERE type='candidate' AND key LIKE '%BEAM04%'"))
+    assert len(keys) == 3 and not verdicts(cfg)
+    db = store.reviews(cfg)
+    with db:
+        db.execute("INSERT INTO reviews(key,reviewer,label,note,dm,created) VALUES (?,'auto-triage','rfi',"
+                   "'Interference: the same moment in 21 beams of all three SAPs',57.0,1.0)", (keys[0],))
+        db.execute("INSERT INTO reviews(key,reviewer,label,note,dm,created) VALUES (?,'Dirk','rfi','mine',60.0,2.0)",
+                   (keys[1],))
+    db.close()
+    indexer.run_pass()
+    left = [v for v in verdicts(cfg) if v['key'] in keys]
+    assert [(v['key'], v['reviewer']) for v in left] == [(keys[1], 'Dirk')]      # a person's verdict stays
+    db = store.reviews(cfg)
+    try:
+        taken = [dict(r) for r in db.execute('SELECT key, label, note FROM triage_withdrawals')]
+    finally:
+        db.close()
+    assert taken == [{'key': keys[0], 'label': 'rfi', 'note': 'Interference: the same moment in 21 beams of all three SAPs'}]
+    indexer.run_pass()
+    assert [v['reviewer'] for v in verdicts(cfg) if v['key'] in keys] == ['Dirk']

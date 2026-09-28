@@ -105,7 +105,7 @@ CREATE INDEX IF NOT EXISTS snippets_key ON snippets(key);
 -- A single-pulse candidate and the events at its moment in other beams of its observation:
 -- near_zero of those events (its own included) lie below DM 1.
 CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, saps INTEGER,
-    dm_min REAL, dm_max REAL, consistent INTEGER, near_zero INTEGER, events INTEGER);
+    dm_min REAL, dm_max REAL, consistent INTEGER, near_zero INTEGER, events INTEGER, expected REAL, chance REAL);
 -- Cluster centres below the classifier's min_dm, which no candidate records; read from each
 -- beam's clustered_candidates.txt (sp_low_dm_read: the beams read so far).
 CREATE TABLE IF NOT EXISTS sp_low_dm (dir TEXT, item TEXT, dm REAL, snr REAL, time REAL, width INTEGER);
@@ -143,6 +143,9 @@ REVIEWS = '''
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, key TEXT NOT NULL, reviewer TEXT NOT NULL,
     label TEXT NOT NULL, note TEXT, dm REAL, created REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS reviews_key ON reviews(key, created);
+-- The automatic triage's own verdicts it took back when their evidence no longer held (web.triage).
+CREATE TABLE IF NOT EXISTS triage_withdrawals (id INTEGER PRIMARY KEY, key TEXT NOT NULL, label TEXT NOT NULL,
+    note TEXT, created REAL NOT NULL, withdrawn REAL NOT NULL, why TEXT);
 -- Explicit, audited dashboard removals. Keep these outside the rebuildable index.
 CREATE TABLE IF NOT EXISTS candidate_removals (key TEXT PRIMARY KEY, reason TEXT NOT NULL,
     evidence TEXT NOT NULL, removed_by TEXT NOT NULL, created REAL NOT NULL);
@@ -157,7 +160,8 @@ RETIRED = {'candidates': ('slack_sent',), 'reviews': ('slack_ts',)}
 # Columns added since, given to databases made before them: a SAP's source is 'lta' or
 # 'spider' (early-cycle beams fetched from SPIDER, euroflash.spider).
 ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
-         'sp_coincidence': (('near_zero', 'INTEGER'), ('events', 'INTEGER'))}
+         'sp_coincidence': (('near_zero', 'INTEGER'), ('events', 'INTEGER'), ('expected', 'REAL'),
+                            ('chance', 'REAL'))}
 
 
 # Reads through a memory map of the file, and a larger page cache for what the

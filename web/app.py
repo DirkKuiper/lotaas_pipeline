@@ -55,8 +55,11 @@ MULTIBEAM_BEAMS = 4
 
 # A single-pulse event at the same (DM-aligned) moment in this many beams of its
 # observation, at scattered DMs, is interference: hidden from the queue and list
-# unless asked for (?coincident=include), like multi-beam periods.
+# unless asked for (?coincident=include), like multi-beam periods. The beams must be
+# well beyond what their own event rates put there by chance (web.indexer.CHANCE_MAX):
+# since 27 September 2026 some 24 other beams share any moment by chance alone.
 COINCIDENT_BEAMS = 5
+CHANCE_MAX = 1e-6
 
 
 # How indexer.derive_known saw that a pulsar was in the observation.
@@ -69,7 +72,8 @@ MIN_PERIOD_SECONDS = 0.016
 
 
 def coincident_sql(alias):
-    return f'({alias}.beams >= {COINCIDENT_BEAMS} AND NOT {alias}.consistent)'
+    return (f'({alias}.beams >= {COINCIDENT_BEAMS} AND NOT {alias}.consistent '
+            f'AND COALESCE({alias}.chance, 0) < {CHANCE_MAX})')
 
 
 def multibeam_sql(alias):

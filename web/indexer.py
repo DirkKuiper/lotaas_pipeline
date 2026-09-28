@@ -42,8 +42,15 @@ FAMILY_TOLERANCE = 5e-4  # relative period difference within one periodic family
 # Single-pulse coincidence: events within this many seconds (or 1.5 widths), once
 # aligned for their DM, are one moment. With the ~0.85 events a second of an
 # RFI-rich observation, four other beams fall inside +-0.5 s by chance 1.2% of
-# the time, five 0.25%.
+# the time, five 0.25%. The search of 27 September 2026 records ~26 a second (a
+# true noise scale puts far more events above the gates): some 24 other beams then
+# have one inside +-0.5 s by chance, and a moment counts as shared only when the
+# beams that share it are well beyond what each one's own rate gives (CHANCE_MAX).
 COINCIDENCE_SECONDS = 0.5
+# The chance, from each beam's own event rate, of at least as many other beams at one
+# moment, below which the moment is shared; and the shortest span a rate is taken over.
+CHANCE_MAX = 1e-6
+RATE_SPAN_SECONDS = 600.0
 KINDS_QUEUED = ('candidate', 'known_pulsar')
 K_DM = 4148.808
 COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is interference
@@ -164,6 +171,27 @@ def meta_get(db, name, default=None):
 def meta_set(db, name, value):
     db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', (name, json.dumps(value)))
 
+
+
+def chance_of(k, mean):
+    """P(at least k), Poisson with this mean: the chance that k other beams share a moment.
+
+    Only a count well above the mean is worth the sum; below that the chance is large
+    anyway, and 1.0 stands for it.
+    """
+    if k <= 0:
+        return 1.0
+    if mean <= 0:
+        return 0.0
+    if k <= mean + 3 * math.sqrt(mean) + 1:
+        return 1.0
+    term = math.exp(-mean + k * math.log(mean) - math.lgamma(k + 1))
+    total, i = 0.0, k
+    while term > 1e-300 and i < k + 1000:
+        total += term
+        i += 1
+        term *= mean / i
+    return min(1.0, total)
 
 class Indexer:
     def __init__(self, cfg):
@@ -467,7 +495,8 @@ class Indexer:
         from euroflash.beams import INCOHERENT_BEAMS
         incoherent = ' OR '.join("c.item LIKE ? ESCAPE '\\'" for _ in INCOHERENT_BEAMS) or '0'
         counts = self.db.execute(f"""SELECT c.type, COALESCE(c.pilot, 0) != 0, {incoherent},
-                EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key AND x.beams >= ? AND NOT x.consistent),
+                EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key AND x.beams >= ? AND NOT x.consistent
+                        AND COALESCE(x.chance, 0) < {CHANCE_MAX}),
                 EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key), COUNT(*)
             FROM candidates c WHERE c.kind='sp' GROUP BY 1, 2, 3, 4, 5""",
             [f'%\\_BEAM{beam:03d}\\_%' for beam in INCOHERENT_BEAMS] + [COINCIDENT_BEAMS]).fetchall()
@@ -554,6 +583,11 @@ class Indexer:
     def derive_coincidence(self):
         """Single-pulse events at one moment in other beams of the candidate's observation.
 
+        Each row also holds how many other beams would share the moment by chance
+        (expected, from each beam's own event rate over the observation) and the
+        chance of at least as many (chance_of), which decides whether the moment
+        is shared at all (CHANCE_MAX).
+
         Interference reaches many beams at once and, being undispersed, peaks at
         whatever trial DM suits its shape: the start of L603674 stepped in level
         in every beam, and L603670 jumped 13% at 72-97 s in 32 of 35. Dedispersing
@@ -601,6 +635,18 @@ class Indexer:
             events.sort()
             times = [e[0] for e in events]
             sweeps += self.sweeps(events)
+            span = max(times[-1] - times[0], RATE_SPAN_SECONDS)
+            rates = {}
+            for event in events:
+                rates[event[1]] = rates.get(event[1], 0) + 1 / span
+            totals = {}
+
+            def expected(own, tolerance):
+                """Other beams with an event within +-tolerance of any moment, by chance."""
+                if tolerance not in totals:
+                    totals[tolerance] = sum(1 - math.exp(-2 * tolerance * r) for r in rates.values())
+                return max(0.0, totals[tolerance] - (1 - math.exp(-2 * tolerance * rates.get(own, 0.0))))
+
             for t, beam, dm, key, kind, width, _ in events:
                 if key is None:           # a cluster centre below LOW_DM: a partner only
                     continue
@@ -611,12 +657,14 @@ class Indexer:
                 if len(beams) < 2:
                     continue
                 dms = [dm] + [e[2] for e in others]
+                chance_beams = expected(beam, tolerance)
                 rows.append((key, len(beams), len({b[0] for b in beams}), min(dms), max(dms),
-                             int(dm_consistent(dms, home=dm)), sum(1 for d in dms if d < NEAR_ZERO[0]), len(dms)))
+                             int(dm_consistent(dms, home=dm)), sum(1 for d in dms if d < NEAR_ZERO[0]), len(dms),
+                             chance_beams, chance_of(len(beams) - 1, chance_beams)))
         with self.db:
             self.db.execute('DELETE FROM sp_coincidence')
             self.db.executemany('INSERT OR REPLACE INTO sp_coincidence(key,beams,saps,dm_min,dm_max,consistent,'
-                                'near_zero,events) VALUES (?,?,?,?,?,?,?,?)', rows)
+                                'near_zero,events,expected,chance) VALUES (?,?,?,?,?,?,?,?,?,?)', rows)
             self.db.execute('DELETE FROM sp_sweep')
             self.db.executemany('INSERT OR REPLACE INTO sp_sweep VALUES (?,?,?,?,?,?)', sweeps)
 
