@@ -56,6 +56,11 @@ SEARCH_MIN = 7.0
 # 2026 read 0.8-1.4 times their search S/N on the review page; interference the search saw
 # through read a quarter to a half.
 LOCAL_FRACTION = 0.6
+# ... unless its own data show it at this S/N or more. None of 103 pilot positives the rule removed
+# read above 5.7, while injected FRB-like bursts at DM 300-2500 read 0.4-0.55 times their search S/N
+# (10-11 against 20-27) when the review page's snippet, at the search's resolution, splits a
+# one-sample pulse (benchmarks/frb-injection-2026-09-28).
+LOCAL_CLEAR = 6.0
 ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
           'rotation': 'the pulses keep its rotation'}
 LATEST = '(SELECT {0} FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
@@ -102,8 +107,8 @@ def settled(db):
                                   f"median S/N: no DM stands out as a pulse's would.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, c.snr, l.local_snr, {earlier} AS earlier FROM candidates c
             JOIN sp_local_snr l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND l.local_snr IS NOT NULL
-            AND (l.local_snr < ? OR l.local_snr < ? * c.snr) AND c.snr >= ? AND {NOT_KNOWN}""",
-            (LOCAL_MIN, LOCAL_FRACTION, SEARCH_MIN)):
+            AND (l.local_snr < ? OR (l.local_snr < ? * c.snr AND l.local_snr < ?)) AND c.snr >= ? AND {NOT_KNOWN}""",
+            (LOCAL_MIN, LOCAL_FRACTION, LOCAL_CLEAR, SEARCH_MIN)):
         out.setdefault(r['key'], (r['key'], 'noise', f"Search S/N {r['snr']:.1f}, but S/N {r['local_snr']:.1f} on its "
                                   f"own data at its time, DM and width, measured as the search measures (the local "
                                   f"S/N of the review page): no pulse there. A pulse reads 0.8-1.4 times its search "

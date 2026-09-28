@@ -662,16 +662,17 @@ def test_beams_recorded_with_a_garbled_right_ascension_are_repaired(cfg, campaig
     assert abs(ra - 15 * (23 + 52 / 60 + 25 / 3600)) < 1e-6
 
 
-@pytest.mark.parametrize('amplitude, settled', [(1.2, False), (0.0, True), (0.65, True)])
+@pytest.mark.parametrize('amplitude, settled', [(1.2, False), (0.0, True), (0.65, True), (0.8, False)])
 def test_a_candidate_its_own_data_do_not_show_is_noise(cfg, campaign, amplitude, settled):
-    # The search put it at S/N 12; the snippet holds the pulse, none, or one too faint to be what the search saw.
+    # The search put it at S/N 12; the snippet holds the pulse, none, or one too faint to be what the search saw
+    # (0.65: S/N 5.4), or one clearly there (0.8: 6.6) though below 0.6 of the search's: never called noise.
     synthetic_filterbank(cfg.source_roots[0] / f'{ITEM}.fil', amplitude=amplitude)
     indexer = Indexer(cfg)
     indexer.run_pass()
     Snippets(cfg).run_pass()
     indexer.run_pass()
     local = indexer.db.execute('SELECT local_snr FROM sp_local_snr').fetchall()
-    assert len(local) == 1 and (local[0][0] < max(4.0, 0.6 * 12.0)) == settled
+    assert len(local) == 1 and (local[0][0] < 4.0 or (local[0][0] < 0.6 * 12.0 and local[0][0] < 6.0)) == settled
     if amplitude == 0.65:
         assert local[0][0] > 4                    # only the fraction of the search's S/N settles it
     noise = [v for v in verdicts(cfg) if v['label'] == 'noise']
