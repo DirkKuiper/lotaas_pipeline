@@ -94,7 +94,11 @@ classification:
   # B0950+08 (DM 2.97) and 17 other LOTAAS pulsars sit below DM 10; from DM 2
   # they are recorded as redetections, the pipeline's own sensitivity check.
   min_dm: 2.0
-  min_snr: 7.0
+  # With the local mask fill, zero-DM filter and 2 s baseline (27 September 2026) the noise
+  # scale is the true one, and S/N 7 is where interference residue crowds the queue: the first
+  # night gave ~60 FETCH positives a SAP, 54% of those left for review below S/N 8 (user's
+  # choice, 28 September, as for the early-cycle beams).
+  min_snr: 8.0
   max_width_seconds: 1.0
   min_local_snr: 5.0
   # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
