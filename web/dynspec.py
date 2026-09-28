@@ -21,8 +21,8 @@ from lotaas_reprocessing.single_pulse_quality import local_boxcar_snr
 # The local S/N a candidate is judged by is measured by the same code in the classifier's check
 # before FETCH (lotaas_reprocessing.own_data); the dispersion helpers come with it.
 from lotaas_reprocessing.own_data import (K_DM, MAX_CELL_SIGMA, RFI_BLOCK_SAMPLES,  # noqa: F401
-                                          SEARCH_BASELINE_SECONDS, OwnData, channel_scale, dedisperse, delays,
-                                          rfi_mask, sweep_seconds)
+                                          SEARCH_BASELINE_SECONDS, SEARCH_BASELINE_WIDTHS, OwnData, channel_scale,
+                                          dedisperse, delays, rfi_mask, sweep_seconds)
 
 from web import sigproc
 
@@ -204,6 +204,10 @@ class Snippet(OwnData):
                          float(self.header['tsamp']), float(self.meta['t0_relative']), float(self.meta['dm']),
                          round(self.meta['width_samples'] / self.meta['downsample']),
                          int(self.meta.get('start_sample', 0)) // k, self.meta.get('bad_channels', []), k)
+        # The running baseline the search removed from this beam (snippets.cut records it; older
+        # snippets, and beams searched before baseline_widths was set, had 2 s doubled to 64 widths).
+        self.search_baseline = (self.meta.get('baseline_seconds') or SEARCH_BASELINE_SECONDS,
+                                self.meta.get('baseline_widths') or SEARCH_BASELINE_WIDTHS)
         self.channel_mhz = abs(self.header['foff'])
         self.bandwidth = self.channel_mhz * self.data.shape[1]
         self.centre_ghz = float(np.mean(self.freqs)) / 1e3
@@ -285,8 +289,8 @@ class Snippet(OwnData):
         # peak) and on the band average as displayed (raw).
         radius = round(self.analysis / self.tsamp)
         raw_peak = local_boxcar_snr(series, -self.t0 / self.tsamp, self.width, radius=radius)['local_snr']
-        evidence = local_boxcar_snr(self.search_series(dm, mask, auto_mask), -self.t0 / self.tsamp, self.width,
-                                    radius=radius)
+        evidence = local_boxcar_snr(self.search_series(dm, mask, auto_mask, *self.search_baseline),
+                                    -self.t0 / self.tsamp, self.width, radius=radius)
         peak = evidence['local_snr']
         # The same measurement without the reviewer's own mask. Channels picked
         # while looking at the pulse raise its S/N by chance alone: dropping
@@ -294,8 +298,8 @@ class Snippet(OwnData):
         # noise event to about 6.8.
         unmasked = peak
         if mask:
-            unmasked = local_boxcar_snr(self.search_series(dm, (), auto_mask), -self.t0 / self.tsamp, self.width,
-                                        radius=radius)['local_snr']
+            unmasked = local_boxcar_snr(self.search_series(dm, (), auto_mask, *self.search_baseline),
+                                        -self.t0 / self.tsamp, self.width, radius=radius)['local_snr']
         best_snr, best_width = self.best_width(series, times)
 
         # On/reference spectra use the measured scatter of same-width sums in

@@ -49,8 +49,12 @@ def default_plan(settings):
         return [], []
 
 
-def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None):
-    """Cut one detection's snippet from a flatfielded filterbank; returns its path."""
+def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None, search=None):
+    """Cut one detection's snippet from a flatfielded filterbank; returns its path.
+
+    search: the beam's single_pulse settings (metadata.json); the page removes the running
+    baseline the search removed. Beams searched without baseline_widths used 64.
+    """
     # The stretch the classifier's own-data check measures (own_data.stretch).
     dm = float(detection['dm'])
     tcand = float(detection['time_seconds'])
@@ -78,6 +82,8 @@ def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None):
             'start_sample': start, 't0_relative': start * tsamp - tcand, 'samples': int(block.shape[0]),
             'sweep_seconds': delay, 'margin_seconds': margin,
             'bad_channels': sorted({int(c) for c in bad_channels}),
+            'baseline_seconds': (search or {}).get('baseline_seconds'),
+            'baseline_widths': (search or {}).get('baseline_widths', 64),
             'source': str(source), 'source_bytes': stat.st_size, 'source_mtime': stat.st_mtime,
             'created': time.time(), **(provenance or {})}
     path.with_suffix('.json').write_text(json.dumps(meta, indent=1))
@@ -184,7 +190,7 @@ class Snippets:
             try:
                 cut(source, detection, self.cfg.snippets, plan, bad,
                     {'how': how, 'run_name': detection['run_name'], 'fp16': detection['fp16'],
-                     'detection_id': detection['id']})
+                     'detection_id': detection['id']}, meta.get('single_pulse'))
                 made += 1
                 existing.add(short_id(detection['key']))
             except Exception as error:
