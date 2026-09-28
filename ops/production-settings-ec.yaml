@@ -102,5 +102,10 @@ classification:
   min_snr: 8.0
   max_width_seconds: 1.0
   min_local_snr: 5.0
+  # No FETCH for a cluster whose S/N on its own data, measured as the search measures (the review
+  # page's local S/N, own_data), is below both 4 and half its search S/N: 78% of what FETCH
+  # rejected, none of 444 pulsar pulses or 51 injected ones (28 September 2026).
+  min_own_snr: 4.0
+  min_own_fraction: 0.5
   # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
   max_fetch_candidates: 200
