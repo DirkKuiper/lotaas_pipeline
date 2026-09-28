@@ -59,7 +59,7 @@ def initialize_database(db_path="db/processing.db"):
     # own_snr and dispersion_ratio: own_data's measures, since 28 September 2026 ('dispersed'
     # clusters, FETCH-rejected but shown dispersed by their own data, need both for review).
     for name, kind in [("time_seconds", "REAL"), ("sample_number", "INTEGER"), ("model_probabilities", "TEXT"),
-                       ("own_snr", "REAL"), ("dispersion_ratio", "REAL")]:
+                       ("own_snr", "REAL"), ("dispersion_ratio", "REAL"), ("dm_galactic", "REAL")]:
         if name not in columns:
             c.execute(f"ALTER TABLE detections ADD COLUMN {name} {kind}")
     for row_id,value in c.execute("SELECT id,classification_probability FROM detections WHERE typeof(classification_probability)='blob'").fetchall():
