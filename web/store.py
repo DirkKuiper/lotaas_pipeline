@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS beam_runs (id INTEGER PRIMARY KEY, beam_id TEXT, item
 CREATE INDEX IF NOT EXISTS beam_runs_item ON beam_runs(item);
 CREATE TABLE IF NOT EXISTS detections (id INTEGER PRIMARY KEY, beam_id TEXT, item TEXT, key TEXT,
     candidate_dm REAL, snr REAL, width_samples INTEGER, detection_type TEXT, pulsar_name TEXT,
-    classification_probability REAL, beam_run_id INTEGER, time_seconds REAL, sample_number INTEGER);
+    classification_probability REAL, beam_run_id INTEGER, time_seconds REAL, sample_number INTEGER,
+    model_probabilities TEXT);
 CREATE INDEX IF NOT EXISTS detections_key ON detections(key);
 CREATE INDEX IF NOT EXISTS detections_item ON detections(item);
 CREATE INDEX IF NOT EXISTS detections_run ON detections(beam_run_id);
@@ -92,7 +93,8 @@ CREATE TABLE IF NOT EXISTS sap_info (key TEXT PRIMARY KEY, observation TEXT, sap
 CREATE TABLE IF NOT EXISTS candidates (key TEXT PRIMARY KEY, id TEXT UNIQUE, kind TEXT, type TEXT,
     item TEXT, sap_key TEXT, dm REAL, snr REAL, width INTEGER, time REAL, probability REAL,
     pulsar TEXT, period REAL, statistic REAL, fp16 TEXT, run_name TEXT, pilot INTEGER,
-    plot_id INTEGER, dir TEXT, snippet TEXT, detections INTEGER, found TEXT);
+    plot_id INTEGER, dir TEXT, snippet TEXT, detections INTEGER, found TEXT, models TEXT, votes INTEGER,
+    d_only INTEGER);
 CREATE INDEX IF NOT EXISTS candidates_type ON candidates(type, snr);
 CREATE INDEX IF NOT EXISTS candidates_item ON candidates(item, kind);
 -- Single-pulse candidates per type under the list's on/off filters, counted once a pass
@@ -161,7 +163,12 @@ RETIRED = {'candidates': ('slack_sent',), 'reviews': ('slack_ts',)}
 # 'spider' (early-cycle beams fetched from SPIDER, euroflash.spider).
 ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
          'sp_coincidence': (('near_zero', 'INTEGER'), ('events', 'INTEGER'), ('expected', 'REAL'),
-                            ('chance', 'REAL'))}
+                            ('chance', 'REAL')),
+         # Each FETCH model's score (the classifier keeps them since 28 September 2026), how many of
+         # the six passed 0.5, and whether model d alone did: it passed 95% of the junk that reached
+         # review while the others passed 1-10%.
+         'detections': (('model_probabilities', 'TEXT'),),
+         'candidates': (('models', 'TEXT'), ('votes', 'INTEGER'), ('d_only', 'INTEGER'))}
 
 
 # Reads through a memory map of the file, and a larger page cache for what the

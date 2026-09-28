@@ -747,3 +747,22 @@ def test_a_very_bright_pulsar_is_recognised_further_away(cfg, campaign, monkeypa
     known = {r['key']: dict(r) for r in indexer.db.execute('SELECT * FROM sp_known')}
     assert len(known) == 20 and all(k['name'] == 'B0843+61' for k in known.values())
     assert 6.9 < min(k['separation_deg'] for k in known.values()) < 7.1
+
+
+def test_positives_only_fetch_model_d_passed_come_last_and_say_so(cfg, campaign):
+    # Model d alone passed 95% of the junk that reached review on 27 September; the other five 1-10%.
+    with campaign['ledger'].connect() as db:
+        run = db.execute('SELECT MAX(id) FROM beam_runs').fetchone()[0]
+        for number, snr, models in ((40, 9.0, {'a': 0.1, 'b': 0.2, 'c': 0.1, 'd': 0.9, 'e': 0.3, 'f': 0.1}),
+                                    (41, 8.5, {'a': 0.8, 'b': 0.7, 'c': 0.9, 'd': 0.95, 'e': 0.6, 'f': 0.4})):
+            db.execute("INSERT INTO detections(beam_id,candidate_dm,snr,width_samples,detection_type,pulsar_name,"
+                       "classification_probability,beam_run_id,time_seconds,sample_number,model_probabilities) VALUES "
+                       "(?,57.0,?,3,'candidate',NULL,?,?,?,1,?)",
+                       (ITEM.replace('BEAM025', f'BEAM{number:03d}') + '.fil', snr, max(models.values()), run,
+                        1000.0 + number, json.dumps(models)))
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    flags = dict(indexer.db.execute("SELECT substr(item, 28, 7), d_only FROM candidates WHERE item LIKE '%BEAM04%'"))
+    assert flags == {'BEAM040': 1, 'BEAM041': 0}
+    body = client_for(cfg).get('/single-pulse?sort=snr').text.split('<tbody>')[1]
+    assert body.index('B041') < body.index('B040') and body.count('only model d') == 1

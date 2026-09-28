@@ -394,7 +394,7 @@ def create_app(cfg, run_background=True):
     app = FastAPI(title='LOTAAS campaign', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     templates = Jinja2Templates(directory=str(HERE / 'templates'))
     env = templates.env
-    env.filters.update(ago=ago, duration=duration, when=when, size=size, beam=beam_label,
+    env.filters.update(ago=ago, duration=duration, when=when, size=size, beam=beam_label, fromjson=json.loads,
                        kind=lambda t: {'candidate': 'FETCH positive', 'known_pulsar': 'known pulsar',
                                        'rejected': 'FETCH reject', 'periodic': 'periodic',
                                        'unclassified': 'not sent to FETCH',
@@ -720,7 +720,8 @@ def create_app(cfg, run_background=True):
     def ordering(params):
         """Candidates without a verdict first, then the chosen order, in every list and queue."""
         kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
-        return f'({LATEST} IS NOT NULL), ' + ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']])
+        # Among those, positives only FETCH's model d passed come last (web.indexer.fetch_d_only).
+        return f'({LATEST} IS NOT NULL), COALESCE(c.d_only, 0), ' + ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']])
 
     def queue_rows(db, params):
         """[(id, reviewed)] of a queue, in its order."""

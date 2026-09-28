@@ -178,6 +178,21 @@ def meta_set(db, name, value):
 
 
 
+def fetch_votes(models):
+    """How many FETCH models scored a detection above 0.5 (None without their scores)."""
+    if not models:
+        return None
+    return sum(p > 0.5 for p in json.loads(models).values())
+
+
+def fetch_d_only(models):
+    """1 when FETCH's model d alone scored above 0.5: it passed 95% of the junk that reached review on
+    27 September while the other five passed 1-10%, and 2-3% of real pulses would be lost without it."""
+    if not models:
+        return None
+    scores = json.loads(models)
+    return int(scores.get('d', 0) > 0.5 and not any(p > 0.5 for name, p in scores.items() if name != 'd'))
+
 def known_radius(pulsar):
     """How far from a catalogued pulsar its pulses are recognised (derive_known), by its brightness."""
     from euroflash import psrcat
@@ -213,7 +228,8 @@ class Indexer:
         for name, arity, function in [('item_of', 1, item_of), ('run_of', 1, run_of), ('fp16_of', 1, fp16_of),
                                       ('observation_of', 1, observation_of), ('sap_of', 1, sap_of),
                                       ('archive_item', 1, lambda u: Path(u).stem),
-                                      ('key_of', 5, key_of), ('short_id', 1, short_id)]:
+                                      ('key_of', 5, key_of), ('short_id', 1, short_id),
+                                      ('fetch_votes', 1, fetch_votes), ('fetch_d_only', 1, fetch_d_only)]:
             self.db.create_function(name, arity, function, deterministic=True)
 
     # -------------------------------------------------------------- state
@@ -288,10 +304,13 @@ class Indexer:
                     # Re-import of a node ledger may update recent rows in place.
                     low = max(0, db.execute('SELECT COALESCE(MAX(id),0) FROM detections').fetchone()[0] - 2000)
                     db.execute('DELETE FROM detections WHERE id>?', (low,))
-                    db.execute("""INSERT INTO detections SELECT id,beam_id,item_of(beam_id),
+                    # Each model's score, where the ledger has them (release 28 September 2026 on).
+                    models = ('model_probabilities' if 'model_probabilities' in
+                              {r[1] for r in db.execute('PRAGMA lg.table_info(detections)')} else 'NULL')
+                    db.execute(f"""INSERT INTO detections SELECT id,beam_id,item_of(beam_id),
                         key_of(detection_type,item_of(beam_id),candidate_dm,width_samples,snr),
                         candidate_dm,snr,width_samples,detection_type,pulsar_name,classification_probability,
-                        beam_run_id,time_seconds,sample_number FROM lg.detections WHERE id>?""", (low,))
+                        beam_run_id,time_seconds,sample_number,{models} FROM lg.detections WHERE id>?""", (low,))
                 if 'archive_beams' in tables:
                     last = meta_get(db, 'archive_rowid', 0)
                     db.execute('INSERT OR REPLACE INTO archive_beams SELECT uri,raw_path,item,observation,sap,beam '
@@ -520,10 +539,11 @@ class Indexer:
         with db:
             db.execute('DELETE FROM candidates')
             db.execute("""INSERT INTO candidates(key,id,kind,type,item,dm,snr,width,time,probability,pulsar,
-                    fp16,run_name,detections,found)
+                    fp16,run_name,detections,found,models,votes,d_only)
                 SELECT d.key, short_id(d.key), 'sp', d.detection_type, d.item, d.candidate_dm, d.snr,
                        d.width_samples, d.time_seconds, d.classification_probability, d.pulsar_name,
-                       b.fp16, b.run_name, g.n, f.processing_timestamp
+                       b.fp16, b.run_name, g.n, f.processing_timestamp, d.model_probabilities,
+                       fetch_votes(d.model_probabilities), fetch_d_only(d.model_probabilities)
                 FROM (SELECT key, MAX(id) AS last, MIN(beam_run_id) AS first, COUNT(*) AS n
                       FROM detections WHERE key IS NOT NULL GROUP BY key) g
                 JOIN detections d ON d.id=g.last
