@@ -144,7 +144,7 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
 
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
                         limits=None, tsamp=None, evidence=None, bad_channels=(), plan=None,
-                        baseline_seconds=None):
+                        baseline_seconds=None, baseline_widths=None):
     """Classify one beam's clusters; returns how many went to FETCH and why others did not.
 
     A cluster wider than `max_width_seconds` (needs `tsamp`, the native sample
@@ -302,7 +302,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 continue
             if own_check:
                 try:
-                    own = measure_own(filterbank_file, dm, tcand, width, plan, bad_channels, baseline_seconds)
+                    own = measure_own(filterbank_file, dm, tcand, width, plan, bad_channels, baseline_seconds,
+                                      baseline_widths)
                 except Exception as error:
                     # Unmeasurable (a stretch past the beam's end, say): FETCH decides, as before.
                     logger.warning("Own-data S/N not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)

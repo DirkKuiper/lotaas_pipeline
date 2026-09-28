@@ -64,7 +64,8 @@ def sp_classify(output, metadata):
                                           tsamp=metadata.get('tsamp'), evidence=evidence,
                                           bad_channels=metadata.get('bad_channels', ()),
                                           plan=metadata.get('dedispersion_plan'),
-                                          baseline_seconds=(metadata.get('single_pulse') or {}).get('baseline_seconds'))
+                                          baseline_seconds=(metadata.get('single_pulse') or {}).get('baseline_seconds'),
+                                          baseline_widths=(metadata.get('single_pulse') or {}).get('baseline_widths'))
     summarise(output, 'sp_classify_summary.json', started,
               [output/'clustered_candidates.txt'] + sorted(plots.glob('*.png')), counts=counts or {})
 

@@ -28,6 +28,8 @@ K_DM = 4148.808
 # single_pulse.baseline_seconds) subtracts the mean over channels at each sample and a 2 s running
 # baseline; the local S/N is measured the same way, so the page and the search agree on a pulse.
 SEARCH_BASELINE_SECONDS = 2.0
+# ... doubled until it spans this many boxcar widths (single_pulse.baseline_widths).
+SEARCH_BASELINE_WIDTHS = 64
 # The search's RFI mask judges blocks of this many native samples (settings rfi_block_size).
 RFI_BLOCK_SAMPLES = 1000
 # No pulse reaches this in one channel and sample (S/N 1000 one sample wide: 40).
@@ -204,7 +206,8 @@ class OwnData:
         data[:, sorted(set(self.known_bad) | set(extra) | (set(self.automatic_bad) if auto_mask else set()))] = np.nan
         return data
 
-    def search_series(self, dm, extra=(), auto_mask=True, baseline_seconds=SEARCH_BASELINE_SECONDS):
+    def search_series(self, dm, extra=(), auto_mask=True, baseline_seconds=SEARCH_BASELINE_SECONDS,
+                      baseline_widths=SEARCH_BASELINE_WIDTHS):
         """The band series as the search measures it: RFI-masked cells, and cells no pulse could
         reach, at their channel's level; zero-DM filtered, dedispersed, running baseline removed.
 
@@ -221,7 +224,7 @@ class OwnData:
             usable = max(1, int(np.isfinite(data).any(axis=0).sum()))
             series = np.where(np.isfinite(aligned).sum(axis=1) >= usable, np.nanmean(aligned, axis=1), np.nan)
         finite = np.isfinite(series)
-        window = baseline_window(self.width, self.tsamp, 1, baseline_seconds)
+        window = baseline_window(self.width, self.tsamp, 1, baseline_seconds, baseline_widths)
         if finite.sum() > 2 * window:
             filled = np.where(finite, series, np.nanmedian(series))
             # Baseline blocks on the observation's grid, as the search's over the whole trial.
@@ -230,20 +233,22 @@ class OwnData:
             series = np.where(finite, filled - running_baseline(padded, window)[lead:], np.nan)
         return series
 
-    def local_snr(self, dm=None, extra=(), auto_mask=True, baseline_seconds=SEARCH_BASELINE_SECONDS):
+    def local_snr(self, dm=None, extra=(), auto_mask=True, baseline_seconds=SEARCH_BASELINE_SECONDS,
+                  baseline_widths=SEARCH_BASELINE_WIDTHS):
         """The boxcar at the candidate's own time and width against same-width windows nearby.
 
         The event window is fixed, never a peak selected elsewhere in a large snippet.
         """
-        series = self.search_series(self.dm if dm is None else dm, extra, auto_mask, baseline_seconds)
+        series = self.search_series(self.dm if dm is None else dm, extra, auto_mask, baseline_seconds, baseline_widths)
         return local_boxcar_snr(series, -self.t0 / self.tsamp, self.width,
                                 radius=round(self.analysis / self.tsamp))['local_snr']
 
 
-def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None):
+def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None, baseline_widths=None):
     """A candidate's local S/N on its own data in a flatfielded beam, measured as the search measures it."""
     header, block, start, k, _, _, _ = stretch(source, dm, tcand, width_samples, plan)
     tsamp = float(header['tsamp'])
     own = OwnData(block, sigproc.channel_frequencies(header), tsamp * k, start * tsamp - float(tcand), dm,
                   round(int(width_samples) / k), start // k, bad, k)
-    return own.local_snr(baseline_seconds=baseline_seconds or SEARCH_BASELINE_SECONDS)
+    return own.local_snr(baseline_seconds=baseline_seconds or SEARCH_BASELINE_SECONDS,
+                         baseline_widths=baseline_widths or SEARCH_BASELINE_WIDTHS)
