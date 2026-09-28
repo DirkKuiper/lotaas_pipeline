@@ -186,3 +186,29 @@ def test_the_route_s_own_gate_lets_fainter_clusters_reach_it_but_not_fetch(tmp_p
     assert classify.snr_gate(limits, 300.0) == 7.0 and classify.snr_gate(limits, 50.0) == 8.0
     assert list(classify.snr_gate(limits, pd.Series([50.0, 300.0]))) == [8.0, 7.0]
     assert classify.snr_gate(dict(limits, dispersed={'min_dm': 100.0}), 300.0) == 8.0
+
+
+
+def test_clusters_let_in_by_the_route_s_lower_gate_meet_its_faint_cuts(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    from lotaas_reprocessing import fetch_models
+    classify = classifier(tmp_path, monkeypatch)
+    width = 13
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 1.0)])
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: {})
+    planes = type('Candidate', (), {'tsamp': TSAMP, 'dmt': np.zeros((256, 256)), 'dedispersed': np.zeros((256, NCHANS))})()
+    monkeypatch.setattr(classify, 'fetch_inputs', lambda *args, **kwargs: (planes, None, None, 1))
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n'
+                          f'300.0\t7.5\t{60.0 + (width - 1) / 2 * TSAMP}\t7630\t{width}\n')
+    info = {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'}
+    limits = {'min_dm': 2.0, 'min_snr': 8.0, 'min_own_snr': 4.0, 'min_own_fraction': 0.5}
+    route = {'min_dm': 100.0, 'min_snr': 7.0, 'tiers': [{'max_width_seconds': 0.5, 'min_own_snr': 5.0, 'max_ratio': 0.8}]}
+    kept = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'a'), info, limits=dict(limits, dispersed=route),
+                                        tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    strict = dict(route, faint={'min_own_snr': 1000.0, 'max_ratio': 0.5})
+    dropped = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'b'), info, limits=dict(limits, dispersed=strict),
+                                           tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert kept['dispersed'] == 1 and kept['unjudged'] == 1 and kept['fetch'] == 0 and dropped['dispersed'] == 0
