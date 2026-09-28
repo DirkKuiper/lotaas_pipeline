@@ -188,8 +188,9 @@ def test_the_search_measure_drops_interference_the_search_masks(tmp_path, monkey
     hit = snippet(tmp_path / 'burst', burst=(7, 8.0, 14.0, 2000.0)).view(window=2.0, nsub=16)['peak_snr']
     assert clean > 8 and abs(hit - clean) < 0.15 * clean
     # Without the mask and the cell limit the same burst ruins the measure.
-    monkeypatch.setattr(dynspec, 'MAX_CELL_SIGMA', np.inf)
-    monkeypatch.setattr(dynspec, 'rfi_mask', lambda data, block, phase=0: np.zeros(data.shape, dtype=bool))
+    from lotaas_reprocessing import own_data
+    monkeypatch.setattr(own_data, 'MAX_CELL_SIGMA', np.inf)
+    monkeypatch.setattr(own_data, 'rfi_mask', lambda data, block, phase=0: np.zeros(data.shape, dtype=bool))
     ruined = snippet(tmp_path / 'unmasked', burst=(7, 8.0, 14.0, 2000.0)).view(window=2.0, nsub=16)['peak_snr']
     assert ruined < 0.7 * clean
 

@@ -17,44 +17,14 @@ import warnings
 
 import numpy as np
 
-from lotaas_reprocessing.baseline import baseline_window, running_baseline
-from lotaas_reprocessing.single_pulse_quality import persistent_channels, local_boxcar_snr
+from lotaas_reprocessing.single_pulse_quality import local_boxcar_snr
+# The local S/N a candidate is judged by is measured by the same code in the classifier's check
+# before FETCH (lotaas_reprocessing.own_data); the dispersion helpers come with it.
+from lotaas_reprocessing.own_data import (K_DM, MAX_CELL_SIGMA, RFI_BLOCK_SAMPLES,  # noqa: F401
+                                          SEARCH_BASELINE_SECONDS, OwnData, channel_scale, dedisperse, delays,
+                                          rfi_mask, sweep_seconds)
 
 from web import sigproc
-
-# Dispersion constant in s MHz^2 pc^-1 cm^3; the classifier and your use 4148808 ms.
-K_DM = 4148.808
-
-
-def sweep_seconds(dm, freqs):
-    """Arrival delay of each frequency relative to the highest one."""
-    f = np.asarray(freqs, dtype=float)
-    return K_DM * dm * (1 / f ** 2 - 1 / f.max() ** 2)
-
-
-def delays(dm, freqs, tsamp):
-    return np.round(sweep_seconds(dm, freqs) / tsamp).astype(np.int64)
-
-
-def dedisperse(data, freqs, tsamp, dm):
-    """Each channel shifted back by its delay; samples from beyond the data are NaN."""
-    nt, nf = data.shape
-    out = np.full((nt, nf), np.nan, dtype=np.float32)
-    for channel, shift in enumerate(delays(max(dm, 0.0), freqs, tsamp)):
-        if shift < nt:
-            out[:nt - shift, channel] = data[shift:, channel]
-    return out
-
-
-def channel_scale(data):
-    """Robust per-channel centre and noise; flat or empty channels get a NaN scale."""
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', RuntimeWarning)
-        centre = np.nanmedian(data, axis=0)
-        scale = 1.4826 * np.nanmedian(np.abs(data - centre), axis=0)
-    scale = np.where(scale > 0, scale, np.nan)
-    return centre, scale
-
 
 def scrunch(x, tfactor=1, ffactor=1):
     """Average blocks of tfactor samples and ffactor channels, ignoring NaN; remainders dropped."""
@@ -213,59 +183,9 @@ def smooth_image(image, sigma):
     return smoothed
 
 
-# The single-pulse search since 27 September 2026 (pipeline settings preprocessing.zero_dm and
-# single_pulse.baseline_seconds) subtracts the mean over channels at each sample and a 2 s running
-# baseline; the local S/N is measured the same way, so the page and the search agree on a pulse.
-SEARCH_BASELINE_SECONDS = 2.0
-# The search's RFI mask judges blocks of this many native samples (settings rfi_block_size).
-RFI_BLOCK_SAMPLES = 1000
-# No pulse reaches this in one channel and sample (S/N 1000 one sample wide: 40).
-MAX_CELL_SIGMA = 50.0
-
-
-def _clipped(z, sigma=3.0):
-    """Cells of z (channel, block) within sigma of their block's mean over channels, clipped
-    until nothing changes (lotaas_reprocessing.numpy_utils.sigmaclip_2d)."""
-    keep = np.ones_like(z, dtype=bool)
-    while True:
-        values = np.where(keep, z, np.nan)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            mean, std = np.nanmean(values, axis=0), np.nanstd(values, axis=0)
-            now = (values >= mean - sigma * std) & (values <= mean + sigma * std)
-        if now.sum() == keep.sum():
-            return now
-        keep = now
-
-
-def rfi_mask(data, block, phase=0):
-    """The search's RFI mask of (time, channel) data: channel blocks whose spread, skewness or
-    kurtosis stand out among the channels of their block (numpy_utils.compute_rfi_mask, without
-    scipy). A channel quiet but for strong interference has a small robust scale, so its bursts
-    reach thousands of sigma once normalised; the search never sees them, and the local S/N
-    measured as the search measures must not either. `phase`: samples of the observation's
-    block before the first one here, so blocks fall where the search's did. The search had data
-    where a snippet's edge blocks run past it; they are padded with each channel's median, not
-    its mean, which a burst drags until the padding itself looks like interference."""
-    x = np.asarray(data, dtype=np.float64).T
-    nchan, nsamp = x.shape
-    lead = int(phase) % block
-    blocks = -(-(lead + nsamp) // block)
-    if lead or blocks * block > lead + nsamp:
-        x = np.pad(x, ((0, 0), (lead, blocks * block - lead - nsamp)), mode='median')
-    x = x.reshape(nchan, blocks, block)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', RuntimeWarning)
-        x = x / x.mean(axis=2, keepdims=True)
-        d = x - x.mean(axis=2, keepdims=True)
-        m2, m3, m4 = (d ** 2).mean(axis=2), (d ** 3).mean(axis=2), (d ** 4).mean(axis=2)
-        stats = (np.sqrt(m2), m3 / m2 ** 1.5, m4 / m2 ** 2 - 3.0)
-    good = _clipped(stats[0]) & _clipped(stats[1]) & _clipped(stats[2])
-    return np.repeat(~good, block, axis=1)[:, lead:lead + nsamp].T
-
-
-class Snippet:
-    """A candidate's filterbank snippet with its sidecar, normalised once per channel.
+class Snippet(OwnData):
+    """A candidate's filterbank snippet with its sidecar: its data scaled, masked and measured as
+    own_data.OwnData does for the classifier, and the views of the review page.
 
     Noise is always measured over one fixed stretch around the candidate, the
     analysis window, whatever is displayed: 'guard < |t| <= analysis', where the
@@ -276,34 +196,14 @@ class Snippet:
         path = Path(path)
         self.path = path
         self.header, raw = sigproc.open_data(path)
-        self.data = np.array(raw, dtype=np.float32)
         self.meta = json.loads(path.with_suffix('.json').read_text())
-        self.freqs = sigproc.channel_frequencies(self.header)
-        self.tsamp = float(self.header['tsamp'])
-        self.dm = float(self.meta['dm'])
-        # Time of sample 0 relative to the candidate (arrival at the highest frequency).
-        self.t0 = float(self.meta['t0_relative'])
-        self.width = max(1, int(round(self.meta['width_samples'] / self.meta['downsample'])))
-        self.guard = max(2 * self.width * self.tsamp, 3 * self.tsamp)
-        self.analysis = max(64 * self.width * self.tsamp, 10.0)
-        # Measure each channel on the same local off-pulse interval after
-        # accounting for the candidate's dispersion sweep, not on its entire
-        # (potentially 2000-second) raw snippet.
-        aligned = dedisperse(self.data, self.freqs, self.tsamp, self.dm)
-        off = self.off_pulse(self.times)
-        self.centre, self.scale = channel_scale(aligned[off])
-        known = [c for c in self.meta.get('bad_channels', []) if 0 <= c < self.data.shape[1]]
-        self.flat = np.isnan(self.scale)
-        self.known_bad = sorted(set(known) | set(np.flatnonzero(self.flat).tolist()))
-        self.automatic_bad = persistent_channels(self.data.T)
-        # The observation's sample grid, which the search's RFI blocks and baseline blocks follow.
         k = int(self.meta.get('downsample', 1))
-        self.first = int(self.meta.get('start_sample', 0)) // k
-        block = max(8, round(RFI_BLOCK_SAMPLES / k))
-        self.rfi_mask = rfi_mask(self.data, block, self.first % block)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            self.normalised = (self.data - self.centre) / self.scale
+        # t0: time of sample 0 relative to the candidate (arrival at the highest frequency); the
+        # sample grid is the observation's, which the search's RFI and baseline blocks follow.
+        super().__init__(np.array(raw, dtype=np.float32), sigproc.channel_frequencies(self.header),
+                         float(self.header['tsamp']), float(self.meta['t0_relative']), float(self.meta['dm']),
+                         round(self.meta['width_samples'] / self.meta['downsample']),
+                         int(self.meta.get('start_sample', 0)) // k, self.meta.get('bad_channels', []), k)
         self.channel_mhz = abs(self.header['foff'])
         self.bandwidth = self.channel_mhz * self.data.shape[1]
         self.centre_ghz = float(np.mean(self.freqs)) / 1e3
@@ -318,41 +218,6 @@ class Snippet:
     def default_window(self):
         # Wide enough to compare the pulse with twenty times its width of data on each side.
         return max(1.5, 20 * self.width * self.tsamp, 16 * self.tsamp)
-
-    @property
-    def times(self):
-        return self.t0 + np.arange(self.data.shape[0]) * self.tsamp
-
-    def search_series(self, dm, extra=(), auto_mask=True):
-        """The band series as the search measures it: RFI-masked cells, and cells no pulse could
-        reach, at their channel's level; zero-DM filtered, dedispersed, running baseline removed.
-
-        A pulse of S/N 1000 one sample wide is 40 sigma in each cell. Beyond that it is
-        interference the search's mask removes at full resolution: a broadband burst scaled
-        by a quiet channel's noise reached 1,300 sigma, and its remainder after the zero-DM
-        filter halved an injected pulse's S/N beside it (27 September 2026)."""
-        data = self.masked(extra, auto_mask)
-        data[(self.rfi_mask | (np.abs(data) > MAX_CELL_SIGMA)) & np.isfinite(data)] = 0.0
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            data = data - np.nanmean(data, axis=1, keepdims=True)
-            aligned = dedisperse(data, self.freqs, self.tsamp, dm)
-            usable = max(1, int(np.isfinite(data).any(axis=0).sum()))
-            series = np.where(np.isfinite(aligned).sum(axis=1) >= usable, np.nanmean(aligned, axis=1), np.nan)
-        finite = np.isfinite(series)
-        window = baseline_window(self.width, self.tsamp, 1, SEARCH_BASELINE_SECONDS)
-        if finite.sum() > 2 * window:
-            filled = np.where(finite, series, np.nanmedian(series))
-            # Baseline blocks on the observation's grid, as the search's over the whole trial.
-            lead = self.first % max(1, window // 2)
-            padded = np.concatenate([np.full(lead, np.nanmedian(series), dtype=np.float32), filled])
-            series = np.where(finite, filled - running_baseline(padded, window)[lead:], np.nan)
-        return series
-
-    def masked(self, extra=(), auto_mask=True):
-        data = self.normalised.copy()
-        data[:, sorted(set(self.known_bad) | set(extra) | (set(self.automatic_bad) if auto_mask else set()))] = np.nan
-        return data
 
     def smearing_ms(self, dm=None):
         """Smearing within one channel at the bottom and top of the band."""
@@ -374,10 +239,6 @@ class Snippet:
                 count[:nt - shift] += valid[shift:, channel]
         with np.errstate(invalid='ignore', divide='ignore'):
             return np.where(count >= coverage * usable, total / count, np.nan)
-
-    def off_pulse(self, times, width_seconds=0.0):
-        guard = max(self.guard, 2 * width_seconds)
-        return (np.abs(times) > guard + width_seconds / 2) & (np.abs(times) <= self.analysis)
 
     def snr(self, series, times, width):
         """Boxcar S/N at this width against the scatter of boxcar sums off the pulse."""

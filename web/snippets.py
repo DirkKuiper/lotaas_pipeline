@@ -21,17 +21,15 @@ the same beam still found under the source roots.
 """
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import sqlite3
 import time
 
-import numpy as np
 import yaml
 
 from web import sigproc
-from web.dynspec import K_DM
+from lotaas_reprocessing.own_data import downsample_for, stretch  # noqa: F401
 from web.keys import item_of, parse_item, short_id, sp_key
 
 logger = logging.getLogger(__name__)
@@ -41,14 +39,6 @@ KEEP_STATES = ('prepared', 'dispatched', 'flatfielding', 'staging')
 # Not sources of search input: raw data, our own output, and the results tree.
 PRUNE = {'processed', 'downloads', 'extracted', 'snippets', 'logs', 'catalogue', 'staging',
          'containers', '.git', '__pycache__'}
-
-
-def downsample_for(dm, plan):
-    """The time resolution the search used at this DM, from its dedispersion plan."""
-    for step in plan or []:
-        if step['low_dm'] <= dm < step['high_dm']:
-            return int(step['downsample'])
-    return int(plan[-1]['downsample']) if plan else 1
 
 
 def default_plan(settings):
@@ -61,33 +51,12 @@ def default_plan(settings):
 
 def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None):
     """Cut one detection's snippet from a flatfielded filterbank; returns its path."""
-    header, data = sigproc.open_data(source)
-    freqs = sigproc.channel_frequencies(header)
-    tsamp = float(header['tsamp'])
+    # The stretch the classifier's own-data check measures (own_data.stretch).
     dm = float(detection['dm'])
     tcand = float(detection['time_seconds'])
     width = max(1, int(detection['width_samples']))
-    search_downsample = downsample_for(dm, plan)
-    # Retain at least eight samples across broad events, aligned to the search grid.
-    k = search_downsample * max(1, width // (8 * search_downsample))
-    delay = K_DM * dm * (1 / freqs.min() ** 2 - 1 / freqs.max() ** 2)
-    # Off-pulse room on both sides, and data for trial DMs above the candidate's.
-    margin = max(10.0, 64 * width * tsamp)
-    # Blocks of k native samples on the search's own grid, so a decimated
-    # sample means what it meant to the search.
-    start = int(math.floor((tcand - delay - margin) / (tsamp * k))) * k
-    stop = int(math.ceil((tcand + delay + margin) / (tsamp * k))) * k
-    total = data.shape[0]
-    # Do not manufacture constant off-pulse noise beyond the observation.
-    start, stop = max(start, 0), min(stop, total // k * k)
-    if stop <= start:
-        raise ValueError(f'{source} holds no samples near t={tcand:.3f} s')
-    block = np.empty(((stop - start) // k, data.shape[1]), dtype=np.float32)
-    batch = max(1, 262144 // (k * data.shape[1]))
-    for out_start in range(0, len(block), batch):
-        out_stop = min(len(block), out_start + batch)
-        raw = np.asarray(data[start + out_start * k:start + out_stop * k])
-        block[out_start:out_stop] = raw.reshape(-1, k, data.shape[1]).mean(axis=1)
+    header, block, start, k, delay, margin, search_downsample = stretch(source, dm, tcand, width, plan)
+    tsamp = float(header['tsamp'])
 
     obs, sap, beam = parse_item(detection['item'])
     key = detection['key']
