@@ -138,8 +138,11 @@ def inject(data, header, bad, rng, n=10, ranges=None):
     freqs = sigproc.channel_frequencies(header)
     df = abs(float(header['foff']))
     good = np.array([c not in set(bad) for c in range(nf)])
-    _, sigma = noise(data, good)
+    centre, sigma = noise(data, good)
     good &= sigma > 0
+    # The flatfielded data are in units of the system's own power: a burst's fluence in these units, divided
+    # by this level, times the beam's system-equivalent flux density, is its fluence in Jy s.
+    level = float(np.median(centre[good]))
     sigma_sum = math.sqrt(float((sigma[good] ** 2).sum()))
     truth = []
     for i, burst in enumerate(draw(rng, nt * tsamp, freqs, n, ranges)):
@@ -155,7 +158,8 @@ def inject(data, header, bad, rng, n=10, ranges=None):
         fluence = float(amplitude * frac[:, good].sum() * tsamp / good.sum())
         truth.append(dict(burst, index=i, snr_ideal=burst['snr'], amplitude=float(amplitude),
                           peak_time=(first + k + (w - 1) / 2) * tsamp, ideal_width_s=w * tsamp,
-                          fluence_units=fluence, sigma_mean=float(sigma[good].mean()), good_channels=int(good.sum()),
+                          fluence_units=fluence, level=level, sigma_mean=float(sigma[good].mean()),
+                          good_channels=int(good.sum()),
                           tsamp=tsamp, channel_mhz=df))
     return truth
 
