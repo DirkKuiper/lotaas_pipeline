@@ -192,7 +192,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     instead of 'rejected'. Wider than fetch_max_width_seconds at those DMs,
     FETCH is not asked ('unjudged'): only the route judges. With the route's
     own min_snr below min_snr, clusters at its DMs between the two reach it
-    too, unjudged by FETCH. FETCH accepted 23% of FRB-like bursts
+    too, unjudged by FETCH, under the route's `faint` cuts as well. FETCH accepted 23% of FRB-like bursts
     injected at DM 300-2500 that the search found, and almost none wider than
     150 ms, the width most FRBs have at 135 MHz. With min_dm 100, min_own_snr 8,
     max_ratio 0.5 and max_width_seconds 0.5 this route kept 352 of the 485 such
@@ -408,6 +408,10 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     logger.info("FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
                                 dm, tcand, snr, width, highest_prob)
                 tier = dispersed_tier(route, width_seconds) if route and dm >= route['min_dm'] else None
+                if tier and snr <= limits['min_snr'] and route.get('faint'):
+                    # Let in by the route's own, lower S/N gate: its stricter cuts too.
+                    tier = {'min_own_snr': max(tier['min_own_snr'], route['faint']['min_own_snr']),
+                            'max_ratio': min(tier['max_ratio'], route['faint']['max_ratio'])}
                 ratio = None
                 if tier and own is not None and own >= tier['min_own_snr']:
                     try:
