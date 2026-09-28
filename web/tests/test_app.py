@@ -724,3 +724,26 @@ def test_the_triage_takes_back_its_own_verdict_when_no_rule_gives_it(cfg, campai
     assert taken == [{'key': keys[0], 'label': 'rfi', 'note': 'Interference: the same moment in 21 beams of all three SAPs'}]
     indexer.run_pass()
     assert [v['reviewer'] for v in verdicts(cfg) if v['key'] in keys] == ['Dirk']
+
+
+def test_a_very_bright_pulsar_is_recognised_further_away(cfg, campaign, monkeypatch, tmp_path):
+    # B0329+54 (8.5 Jy at 135 MHz by the catalogue's estimate) reached beams 5.0-5.5 degrees away
+    # in L528445: 81 pulses on its rotation were left for review. A faint pulsar as far off is not.
+    catalogue = tmp_path / 'psrcat.db'
+    catalogue.write_text(
+        'PSRJ     J0847+6125\nPSRB     B0843+61\nRAJ      08:47:08.0\nDECJ     +61:25:00\nDM       26.8\n'
+        'P0       0.7145\nS400     1500\n@----\n'
+        'PSRJ     J0847+6126\nRAJ      08:47:08.0\nDECJ     +61:26:00\nDM       40.0\nP0       1.1\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    for number in range(30, 40):
+        beam_results(cfg, number)
+    bright = [(30 + k % 10, 26.8 + 0.02 * (k % 5), 9.0 + k % 4, 2, 'candidate', None, 100.0 + 7 * k * 0.7145)
+              for k in range(20)]
+    faint = [(30 + k % 10, 40.0 + 0.02 * (k % 5), 9.0 + k % 4, 2, 'candidate', None, 50.0 + 5 * k * 1.1)
+             for k in range(20)]
+    add_detections(campaign, bright + faint)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    known = {r['key']: dict(r) for r in indexer.db.execute('SELECT * FROM sp_known')}
+    assert len(known) == 20 and all(k['name'] == 'B0843+61' for k in known.values())
+    assert 6.9 < min(k['separation_deg'] for k in known.values()) < 7.1

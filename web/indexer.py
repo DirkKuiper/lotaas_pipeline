@@ -74,6 +74,11 @@ SWEEP_MIN_SPAN_SECONDS = 600.0
 # A catalogued pulsar's pulses are recognised this far from it (derive_known), at its DM
 # within max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION of it).
 KNOWN_RADIUS_DEG = 5.0
+# A very bright one further: B0329+54 (8.5 Jy at 135 MHz by the catalogue's estimate) reached
+# beams 5.0-5.5 degrees away in L528445 on 28 September 2026, 81 pulses on its rotation left
+# for review. Its rotation must still be established and each pulse keep it.
+KNOWN_BRIGHT_MJY = 1000.0
+KNOWN_BRIGHT_RADIUS_DEG = 10.0
 KNOWN_DM_TOLERANCE = 0.5
 KNOWN_DM_FRACTION = 0.025
 # Once its rotation is established, pulses on it count within this wider DM window: off axis
@@ -172,6 +177,12 @@ def meta_set(db, name, value):
     db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', (name, json.dumps(value)))
 
 
+
+def known_radius(pulsar):
+    """How far from a catalogued pulsar its pulses are recognised (derive_known), by its brightness."""
+    from euroflash import psrcat
+    mjy, _ = psrcat.flux_at(pulsar)
+    return KNOWN_BRIGHT_RADIUS_DEG if mjy is not None and mjy >= KNOWN_BRIGHT_MJY else KNOWN_RADIUS_DEG
 
 def chance_of(k, mean):
     """P(at least k), Poisson with this mean: the chance that k other beams share a moment.
@@ -724,6 +735,7 @@ class Indexer:
         further: B0823+26 (about 600 mJy at 150 MHz) gave 242 FETCH positives in
         33 beams of L611400 up to 3.6 degrees away, and every one arrived on
         its rotation. A pulse at a catalogued pulsar's DM within KNOWN_RADIUS_DEG
+        (KNOWN_BRIGHT_RADIUS_DEG of one above KNOWN_BRIGHT_MJY, known_radius)
         is that pulsar's when the pulsar is seen in the same observation: with
         three or more such pulses narrow enough to phase they must keep its
         time, and only those on its rotation count (found by chance less than
@@ -778,7 +790,10 @@ class Indexer:
                 redetected = {e['pulsar'] for e in here if e['type'] == 'known_pulsar'
                               and e['label'] not in ('noise', 'rfi') and e['key'] not in interference}
                 beams = positions[observation]
-                for p in psrcat.cone(pulsars, *centre, spread + KNOWN_RADIUS_DEG):
+                for p in psrcat.cone(pulsars, *centre, spread + KNOWN_BRIGHT_RADIUS_DEG):
+                    radius = known_radius(p)
+                    if p['separation_deg'] > spread + radius:
+                        continue
                     tolerance = max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION * p['dm'])
                     wide = max(KNOWN_ROTATION_DM[0], KNOWN_ROTATION_DM[1] * p['dm'])
                     matched, farther = [], []
@@ -787,7 +802,7 @@ class Indexer:
                             continue
                         ra, dec, tsamp = beams[e['item']]
                         separation = psrcat.separation(ra, dec, p['ra'], p['dec'])
-                        if separation <= KNOWN_RADIUS_DEG:
+                        if separation <= radius:
                             (matched if abs(e['dm'] - p['dm']) <= tolerance else farther).append(
                                 (e, separation, (e['width'] or 1) * (tsamp or 0.007864)))
                     if not matched:
