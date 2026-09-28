@@ -176,3 +176,13 @@ def test_fetch_is_not_asked_about_what_is_wider_than_it_judges_and_tiers_set_the
     assert kind == 'dispersed' and probability is None and 10 < galactic < 300     # l 140, b 71: high latitude
     assert classify.dispersed_tier(route, 0.1)['min_own_snr'] == 5.0 and classify.dispersed_tier(route, 0.6) is None
     assert classify.dispersed_tier({'min_dm': 100, 'min_own_snr': 8, 'max_ratio': 0.5}, 2.0)['max_ratio'] == 0.5
+
+
+def test_the_route_s_own_gate_lets_fainter_clusters_reach_it_but_not_fetch(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    import pandas as pd
+    classify = classifier(tmp_path, monkeypatch)
+    limits = dict(classify.DEFAULT_LIMITS, min_snr=8.0, dispersed={'min_dm': 100.0, 'min_snr': 7.0})
+    assert classify.snr_gate(limits, 300.0) == 7.0 and classify.snr_gate(limits, 50.0) == 8.0
+    assert list(classify.snr_gate(limits, pd.Series([50.0, 300.0]))) == [8.0, 7.0]
+    assert classify.snr_gate(dict(limits, dispersed={'min_dm': 100.0}), 300.0) == 8.0

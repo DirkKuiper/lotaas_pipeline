@@ -37,6 +37,18 @@ DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
                   "min_own_snr": None, "min_own_fraction": None, "dispersed": None}
 
 
+def snr_gate(limits, dm):
+    """The search S/N a cluster must exceed: min_snr, or at the dispersed route's DMs its own min_snr when lower
+    (those clusters only the route judges). dm may be a pandas Series."""
+    route = limits.get('dispersed') or {}
+    if route.get('min_snr') is None:
+        return limits['min_snr']
+    low = min(route['min_snr'], limits['min_snr'])
+    if hasattr(dm, 'where'):
+        return (dm >= route['min_dm']).map({True: low, False: limits['min_snr']})
+    return low if dm >= route['min_dm'] else limits['min_snr']
+
+
 def dispersed_tier(route, width_seconds):
     """The dispersed route's cuts for a cluster this wide: the first of its tiers (by max_width_seconds) the
     cluster fits, or its single set of cuts; None beyond them all."""
@@ -176,7 +188,9 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     the tier's min_own_snr for its width) and that fades when dedispersed too
     little (own_data.dispersion_ratio <= max_ratio) is recorded as 'dispersed'
     instead of 'rejected'. Wider than fetch_max_width_seconds at those DMs,
-    FETCH is not asked ('unjudged'): only the route judges. FETCH accepted 23% of FRB-like bursts
+    FETCH is not asked ('unjudged'): only the route judges. With the route's
+    own min_snr below min_snr, clusters at its DMs between the two reach it
+    too, unjudged by FETCH. FETCH accepted 23% of FRB-like bursts
     injected at DM 300-2500 that the search found, and almost none wider than
     150 ms, the width most FRBs have at 135 MHz. With min_dm 100, min_own_snr 8,
     max_ratio 0.5 and max_width_seconds 0.5 this route kept 352 of the 485 such
@@ -209,7 +223,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
         candidates_df = pd.read_csv(candidate_file, sep=r"\s+")
         candidates_df.columns = candidates_df.columns.str.strip().str.lower()
         candidates_df = candidates_df[(candidates_df["dm"] >= limits["min_dm"])
-                                      & (candidates_df["s/n"] > limits["min_snr"])]
+                                      & (candidates_df["s/n"] > snr_gate(limits, candidates_df["dm"]))]
         if candidates_df.empty:
             update_beam_run(beam_run_id, outcome="no_candidates", num_candidates=0,
                            num_redetections=0, highest_snr=0)
@@ -281,7 +295,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             snr = row["s/n"]
             sample_number = int(row["sample"])
 
-            if dm < limits["min_dm"] or snr <= limits["min_snr"]:
+            if dm < limits["min_dm"] or snr <= snr_gate(limits, dm):
                 continue
 
             if snr > highest_snr:
@@ -359,8 +373,10 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             width_seconds = width * tsamp if tsamp else None
             # FETCH accepted almost none of the injected bursts wider than 150 ms: at the route's
             # DMs, past its fetch_max_width_seconds, only the route judges a cluster.
-            unjudged = bool(route and route.get('fetch_max_width_seconds') is not None and width_seconds is not None
-                            and dm >= route['min_dm'] and width_seconds > route['fetch_max_width_seconds'])
+            unjudged = bool(route and dm >= route['min_dm'] and (
+                (route.get('fetch_max_width_seconds') is not None and width_seconds is not None
+                 and width_seconds > route['fetch_max_width_seconds'])
+                or snr <= limits['min_snr']))           # below FETCH's gate, let in by the route's own
             time_size, freq_size, dm_size = 256, 256, 256
             fetch_probs = highest_prob = None
             if unjudged:
