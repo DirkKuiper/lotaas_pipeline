@@ -44,7 +44,7 @@ def initialize_database(db_path="db/processing.db"):
             candidate_dm REAL,
             snr REAL,
             width_samples INTEGER,
-            detection_type TEXT,  -- "candidate", "known_pulsar", "rejected" or "unclassified"
+            detection_type TEXT,  -- "candidate", "dispersed", "known_pulsar", "rejected", "unconfirmed" or "unclassified"
             pulsar_name TEXT,
             classification_probability REAL,
             beam_run_id INTEGER REFERENCES beam_runs(id)
@@ -56,7 +56,10 @@ def initialize_database(db_path="db/processing.db"):
         c.execute("ALTER TABLE detections ADD COLUMN beam_run_id INTEGER REFERENCES beam_runs(id)")
     # model_probabilities: each FETCH model's score as JSON, since 28 September 2026 (the
     # classifier takes the highest; model d alone passed 95% of the junk that reached review).
-    for name, kind in [("time_seconds", "REAL"), ("sample_number", "INTEGER"), ("model_probabilities", "TEXT")]:
+    # own_snr and dispersion_ratio: own_data's measures, since 28 September 2026 ('dispersed'
+    # clusters, FETCH-rejected but shown dispersed by their own data, need both for review).
+    for name, kind in [("time_seconds", "REAL"), ("sample_number", "INTEGER"), ("model_probabilities", "TEXT"),
+                       ("own_snr", "REAL"), ("dispersion_ratio", "REAL")]:
         if name not in columns:
             c.execute(f"ALTER TABLE detections ADD COLUMN {name} {kind}")
     for row_id,value in c.execute("SELECT id,classification_probability FROM detections WHERE typeof(classification_probability)='blob'").fetchall():

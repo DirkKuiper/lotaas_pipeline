@@ -83,3 +83,58 @@ def test_the_classifier_does_not_ask_fetch_about_what_its_own_data_do_not_show(t
     assert rows[30.1] == 'unconfirmed|'
     kind, probabilities = rows[30.0].split('|', 1)
     assert kind == 'rejected' and json.loads(probabilities) == {'a': 0.2, 'd': 0.4}
+
+
+def test_a_dispersed_pulse_fades_at_too_low_a_dm_and_what_is_not_dispersed_does_not(tmp_path):
+    width = 13                                     # 0.1 s, as FRBs are at 135 MHz and DM 300
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 1.0)], burst=(22, 80.0, 80.2, 15.0))
+    centre = 60.0 + (width - 1) / 2 * TSAMP
+    ratio, snr = own_data.dispersion_ratio(own_data.load(fil, 300.0, centre, width, PLAN), baseline_seconds=2.0)
+    assert snr > 15 and ratio < 0.3
+    # Noise, and one channel's burst where DM 300 puts it: nothing a dispersed pulse would do.
+    delay = float(own_data.sweep_seconds(300.0, FCH1 + np.arange(NCHANS) * FOFF)[22])
+    for t in (120.0, 80.1 - delay):
+        ratio, snr = own_data.dispersion_ratio(own_data.load(fil, 300.0, t, width, PLAN), baseline_seconds=2.0)
+        assert ratio is None or ratio > 0.7 or snr < 5
+
+
+def test_the_classifier_keeps_what_fetch_rejects_but_its_own_data_show_dispersed(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    classify = classifier(tmp_path, monkeypatch)
+    width = 13
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 1.0), (140.0, 30.0, width, 1.0)])
+
+    class Model:
+        def predict(self, inputs, batch_size=1, verbose=0):
+            return np.array([[0.8, 0.2]])
+
+    from lotaas_reprocessing import fetch_models
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: {'a': Model()})
+    # What the review plot of a kept candidate reads from FETCH's inputs.
+    planes = type('Candidate', (), {'tsamp': TSAMP, 'dmt': np.random.default_rng(0).normal(size=(256, 256)),
+                                    'dedispersed': np.random.default_rng(1).normal(size=(256, NCHANS))})()
+    monkeypatch.setattr(classify, 'fetch_inputs', lambda *args, **kwargs: (planes, np.zeros((1, 256, 256, 1)),
+                                                                          np.zeros((1, 256, 256, 1)), 1))
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    centre = (width - 1) / 2 * TSAMP
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n'
+                          f'300.0\t20.0\t{60.0 + centre}\t7630\t{width}\n30.0\t20.0\t{140.0 + centre}\t17802\t{width}\n')
+    limits = {'min_dm': 2.0, 'min_snr': 8.0, 'min_own_snr': 4.0, 'min_own_fraction': 0.5}
+    route = {'min_dm': 100.0, 'min_own_snr': 5.5, 'max_ratio': 0.7}
+    info = {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'}
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'), info,
+                                          limits=dict(limits, dispersed=route), tsamp=TSAMP, plan=PLAN,
+                                          baseline_seconds=2.0)
+    assert counts['fetch'] == 2 and counts['dispersed'] == 1
+    with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
+        rows = {round(dm): (kind, own, ratio) for dm, kind, own, ratio in db.execute(
+            'SELECT candidate_dm, detection_type, own_snr, dispersion_ratio FROM detections')}
+    assert rows[300][0] == 'dispersed' and rows[300][1] > 5.5 and rows[300][2] < 0.3
+    assert rows[30] == ('rejected', rows[30][1], None)        # below the route's DM: FETCH decides
+    assert len(list((tmp_path / 'plots').glob('DM300.0_*.png'))) == 1   # plotted for review, as FETCH positives are
+    # Without the route FETCH's verdict stands.
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots2'), info,
+                                          limits=limits, tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert counts['dispersed'] == 0

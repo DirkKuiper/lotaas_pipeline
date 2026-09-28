@@ -187,7 +187,8 @@ def candidate_key(beam_id, dm, width, snr):
 
 
 def run_candidate_keys(run_dir):
-    """{beam stem: [key]} of the FETCH-accepted single-pulse candidates in one run's ledger snapshots."""
+    """{beam stem: [key]} of the single-pulse candidates for review in one run's ledger snapshots: FETCH
+    positives, and clusters FETCH rejected that their own data show dispersed ('dispersed')."""
     keys = {}
     for snapshot in Path(run_dir).glob('*/ledger-snapshot.sqlite'):
         db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
@@ -195,7 +196,7 @@ def run_candidate_keys(run_dir):
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if 'detections' in tables:
                 for beam, dm, width, snr in db.execute("SELECT beam_id, candidate_dm, width_samples, snr "
-                                                       "FROM detections WHERE detection_type='candidate'"):
+                                                       "FROM detections WHERE detection_type IN ('candidate', 'dispersed')"):
                     keys.setdefault(Path(beam).stem, []).append(candidate_key(beam, dm, width, snr))
         finally:
             db.close()
