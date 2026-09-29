@@ -28,6 +28,9 @@ observation shows, not by looking at the candidate:
   without the zero-DM filter): an undispersed burst or step. Verdict 'rfi'.
 - a step: at its DM, a dip beside it half as deep as its height or more,
   below DM 100 (a flatfielded pulse dips a third at most). Verdict 'rfi'.
+- a dispersed event at the DM of a catalogued pulsar within 5 degrees
+  (max(1, 2%)): its pulses through the sidelobes, as the Crab's giant pulses
+  in 22 beams of L549917. Verdict 'known'.
 - the classifier's redetection of a catalogued pulsar in its own beam, at the
   pulsar's DM. Verdict 'known'.
 - a candidate the search put at S/N 7 or more whose own data show under
@@ -156,6 +159,8 @@ def settled(db):
                                   f"{r['snr_min']:.1f} beside it at its DM, where a pulse dips to a third of its "
                                   f"height at most. A level stepping down and up again (2-bit requantisation).",
                                   r['dm'], r['earlier']))
+    for key, label, note, dm, before in _at_a_nearby_pulsars_dm(db, earlier):
+        out.setdefault(key, (key, label, note, dm, before))
     catalogue = _catalogue_dms()
     for r in db.execute(f"""SELECT c.key, c.dm, c.pulsar, {earlier} AS earlier FROM candidates c
             WHERE {QUEUED} AND {OPEN} AND c.type='known_pulsar' AND c.pulsar IS NOT NULL"""):
@@ -164,6 +169,35 @@ def settled(db):
             out.setdefault(r['key'], (r['key'], 'known', f"{r['pulsar']} in its own beam, at its DM ({dm:g}): the "
                                       f"classifier's redetection of a catalogued pulsar.", r['dm'], r['earlier']))
     return list(out.values())
+
+
+NEARBY_RADIUS_DEG = 5.0
+
+
+def _at_a_nearby_pulsars_dm(db, earlier):
+    """[(key, 'known', note, dm, earlier)] of open queued candidates at the DM of a catalogued pulsar within
+    NEARBY_RADIUS_DEG of their beam, within max(1, 2%): its pulses through the station beam's sidelobes. Giant
+    pulses of the Crab (DM 56.77) reached 22 beams of L549917, 4-4.8 degrees away, as sporadic single pulses
+    that neither a fold nor a rotation sequence attributes (29 September 2026)."""
+    from euroflash import psrcat
+    pulsars = psrcat.load()
+    if not pulsars:
+        return []
+    out, cones = [], {}
+    for r in db.execute(f"""SELECT c.key, c.dm, b.ra_deg, b.dec_deg, {earlier} AS earlier FROM candidates c
+            JOIN beams b ON b.dir=c.dir WHERE {QUEUED} AND {OPEN} AND {NOT_KNOWN} AND b.ra_deg IS NOT NULL"""):
+        place = (round(r['ra_deg'], 1), round(r['dec_deg'], 1))
+        if place not in cones:
+            cones[place] = psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], NEARBY_RADIUS_DEG)
+        for pulsar in cones[place]:
+            if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= max(1.0, 0.02 * pulsar['dm']):
+                name = pulsar.get('bname') or pulsar['name']
+                name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
+                out.append((r['key'], 'known', f"At the DM of {name} ({pulsar['dm']:g}), "
+                            f"{pulsar['separation_deg']:.2f} deg from this beam: its pulses through the "
+                            f"sidelobes.", r['dm'], r['earlier']))
+                break
+    return out
 
 
 def _catalogue_dms():

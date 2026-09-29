@@ -428,8 +428,11 @@ def test_a_known_pulsar_seen_away_from_its_beam_is_recognised(cfg, campaign, mon
     page = client.get(f'/verify/{cid}').text
     assert 'these pulses keep its rotation' in page and 'a known pulsar seen away from its own beam' in page
     recorded = verdicts(cfg)
-    assert sorted(v['label'] for v in recorded) == ['known'] * 21
-    assert all(v['key'] in known and 'B0845+66 (J0850+6625), 2.0' in v['note'] for v in recorded)
+    # Those on its rotation or fold by the sidelobe rule; the rest, at the DM of a pulsar a few degrees
+    # away (half a turn out may be an interpulse, the other's are sporadic), by its DM alone.
+    assert sorted(v['label'] for v in recorded) == ['known'] * 25
+    assert sum(v['key'] in known and 'B0845+66 (J0850+6625), 2.0' in v['note'] for v in recorded) == 21
+    assert sum(v['note'].startswith('At the DM of') for v in recorded) == 4
 
 
 def test_a_burst_in_all_three_saps_at_scattered_dms_is_interference(cfg, campaign):
@@ -833,5 +836,25 @@ def test_a_catalogued_pulsars_redetection_in_its_own_beam_is_known(cfg, campaign
     assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ['known']
     with indexer.db:
         indexer.db.execute("UPDATE candidates SET dm=40.0 WHERE key=?", (key,))    # not at its DM: for a person
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == []
+
+
+def test_a_pulse_at_the_dm_of_a_pulsar_a_few_degrees_away_is_known(cfg, campaign, monkeypatch, tmp_path):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key, ra, dec = indexer.db.execute("""SELECT c.key, b.ra_deg, b.dec_deg FROM candidates c JOIN beams b
+        ON b.dir=c.dir WHERE c.kind='sp' AND c.type='candidate'""").fetchone()
+    catalogue = tmp_path / 'psrcat.db'
+    near_dec = dec + 4.0 if dec < 80 else dec - 4.0
+    catalogue.write_text(f'PSRJ     J0534+2200\nPSRB     B0531+21\nRAJ      {int(ra / 15):02d}:{int(ra % 15 * 4):02d}:00\n'
+                         f'DECJ     {"+" if near_dec >= 0 else "-"}{int(abs(near_dec)):02d}:00:00\nDM       '
+                         f'30.2\nP0       0.0337\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ['known']
+    other = tmp_path / 'other.db'                                                # another DM: for a person
+    other.write_text(catalogue.read_text().replace('30.2', '45.0'))
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(other))
     indexer.triage()
     assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == []
