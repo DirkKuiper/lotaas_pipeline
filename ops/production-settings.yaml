@@ -123,6 +123,11 @@ classification:
     min_snr: 7.0
     faint: {min_own_snr: 7.0, max_ratio: 0.5}
     fetch_max_width_seconds: 0.15
+    # A burst's on-pulse spectrum is smooth over many channels; the first night's candidates were mostly
+    # channels jumping in level for seconds (own_data.smoothness: 1 of 428 injected bursts below 0.6, 112 of
+    # 159 of the night's candidates), and events in the first and last seconds of the beam.
+    min_smoothness: 0.6
+    edge_seconds: 20.0
     tiers:
       - {max_width_seconds: 0.13, min_own_snr: 5.0, max_ratio: 0.8}
       - {max_width_seconds: 0.26, min_own_snr: 8.0, max_ratio: 0.6}
