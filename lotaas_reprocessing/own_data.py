@@ -14,7 +14,9 @@ to 1.41 times the pipeline's own local S/N this way. Of 444 pulses of B0301+19
 and B0329+54 at S/N >= 8, none read below both 4 and half their search S/N;
 of the candidates FETCH rejected, 78% did.
 """
+import functools
 import math
+import os
 import warnings
 
 import numpy as np
@@ -114,23 +116,33 @@ def rfi_mask(data, block, phase=0):
     return np.repeat(~good, block, axis=1)[:, lead:lead + nsamp].T
 
 
-def native_rfi_mask(data, start, stop, k, block=RFI_BLOCK_SAMPLES, chunk=16):
-    """The search's RFI mask over native samples start..stop of a beam's (time, channel) data, on the grid of
-    k-sample cells (a cell is masked where any of its samples is): rfi_mask at native resolution in blocks on
-    the observation's grid, as the search computed it (pipeline_gpu), `chunk` blocks at a time.
+def native_rfi_mask(source, start, stop, k, block=RFI_BLOCK_SAMPLES):
+    """The search's RFI mask over native samples start..stop of a beam, on the grid of k-sample cells (a cell
+    is masked where any of its samples is): rfi_mask at native resolution in blocks on the observation's
+    grid, as the search computed it (pipeline_gpu). Each block's mask is kept for the beam's other candidates.
 
     The same statistics over k-sample means are another test. In early-cycle beams levelled per 32-sample
     2-bit row, every pair of 16-sample means mirrors about the channel's level, so each channel's skewness
     is 0 to 3e-5 and any signal stands out: at k 16 (DM 1010-2015) the mask took the whole track of every
     FRB-like burst injected there, and the classifier called 65 of 66 'unconfirmed' (29 September 2026)."""
-    first, last = start // block * block, min(-(-stop // block) * block, data.shape[0])
-    native = np.zeros((stop - start, data.shape[1]), dtype=bool)
-    for a in range(first, last, block * chunk):
-        b = min(last, a + block * chunk)
-        lo, hi = max(a, start), min(b, stop)
-        if hi > lo:
-            native[lo - start:hi - start] = rfi_mask(np.asarray(data[a:b]), block)[lo - a:hi - a]
-    return native[:(stop - start) // k * k].reshape(-1, k, data.shape[1]).any(axis=1)
+    stat = os.stat(source)
+    identity = (str(source), stat.st_size, stat.st_mtime_ns, block)
+    nchan = sigproc.read_header(source)[0]['nchans']
+    native = np.zeros((stop - start, nchan), dtype=bool)
+    for index in range(start // block, -(-stop // block)):
+        a = index * block
+        lo, hi = max(a, start), min(a + block, stop)
+        cells = np.unpackbits(_block_mask(identity, index), axis=1, count=nchan).astype(bool)
+        native[lo - start:hi - start] = cells[lo - a:hi - a]
+    return native[:(stop - start) // k * k].reshape(-1, k, nchan).any(axis=1)
+
+
+@functools.lru_cache(maxsize=2048)
+def _block_mask(identity, index):
+    """One block's RFI mask ((time, channel), bits packed along channels) of the beam `identity` names."""
+    source, _, _, block = identity
+    data = sigproc.open_data(source)[1]
+    return np.packbits(rfi_mask(np.asarray(data[index * block:(index + 1) * block]), block), axis=1)
 
 
 def downsample_for(dm, plan):
@@ -176,8 +188,8 @@ def stretch(source, dm, tcand, width_samples, plan):
         raise ValueError(f'{source} holds no samples near t={tcand:.3f} s')
     block = _means(data, start, stop, k)
     if k >= LEVELLED_MIN_K:
-        native = _scale(np.asarray(data[start:min(stop, start + 16384)], dtype=np.float32))
-        while k >= LEVELLED_MIN_K and _scale(block) < LEVELLED_FRACTION * native / math.sqrt(k):
+        native = _scale(np.asarray(data[start:min(stop, start + 2048)], dtype=np.float32))
+        while k >= LEVELLED_MIN_K and _scale(block[:2048]) < LEVELLED_FRACTION * native / math.sqrt(k):
             k //= 4
             block = _means(data, start, stop, k)
     return header, block, start, k, delay, margin, search_downsample
@@ -389,7 +401,7 @@ def load(source, dm, tcand, width_samples, plan, bad=()):
     """The OwnData of a candidate in a flatfielded beam: the stretch the page cuts and the classifier measures."""
     header, block, start, k, _, _, _ = stretch(source, dm, tcand, width_samples, plan)
     tsamp = float(header['tsamp'])
-    mask = native_rfi_mask(sigproc.open_data(source)[1], start, start + len(block) * k, k) if k > 1 else None
+    mask = native_rfi_mask(source, start, start + len(block) * k, k) if k > 1 else None
     return OwnData(block, sigproc.channel_frequencies(header), tsamp * k, start * tsamp - float(tcand), dm,
                    round(int(width_samples) / k), start // k, bad, k, mask)
 
