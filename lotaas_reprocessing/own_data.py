@@ -114,6 +114,25 @@ def rfi_mask(data, block, phase=0):
     return np.repeat(~good, block, axis=1)[:, lead:lead + nsamp].T
 
 
+def native_rfi_mask(data, start, stop, k, block=RFI_BLOCK_SAMPLES, chunk=16):
+    """The search's RFI mask over native samples start..stop of a beam's (time, channel) data, on the grid of
+    k-sample cells (a cell is masked where any of its samples is): rfi_mask at native resolution in blocks on
+    the observation's grid, as the search computed it (pipeline_gpu), `chunk` blocks at a time.
+
+    The same statistics over k-sample means are another test. In early-cycle beams levelled per 32-sample
+    2-bit row, every pair of 16-sample means mirrors about the channel's level, so each channel's skewness
+    is 0 to 3e-5 and any signal stands out: at k 16 (DM 1010-2015) the mask took the whole track of every
+    FRB-like burst injected there, and the classifier called 65 of 66 'unconfirmed' (29 September 2026)."""
+    first, last = start // block * block, min(-(-stop // block) * block, data.shape[0])
+    native = np.zeros((stop - start, data.shape[1]), dtype=bool)
+    for a in range(first, last, block * chunk):
+        b = min(last, a + block * chunk)
+        lo, hi = max(a, start), min(b, stop)
+        if hi > lo:
+            native[lo - start:hi - start] = rfi_mask(np.asarray(data[a:b]), block)[lo - a:hi - a]
+    return native[:(stop - start) // k * k].reshape(-1, k, data.shape[1]).any(axis=1)
+
+
 def downsample_for(dm, plan):
     """The time resolution the search used at this DM, from its dedispersion plan."""
     for step in plan or []:
@@ -130,6 +149,11 @@ def stretch(source, dm, tcand, width_samples, plan):
     sample means what it meant to the search. Returns (header, block, start, k, delay,
     margin, search_downsample): block is (time, channel) float32 in file order and
     start its first native sample.
+
+    Where k-sample means hold almost no noise, k is divided by 4 until they do: early-cycle
+    beams levelled per 32-sample 2-bit row have every row's mean at its channel's level, so
+    at k 32 (the search's above DM 2015) a quarter of the channels were exactly flat and the
+    rest nearly, and an FRB-like burst injected there measured S/N -0.5 (29 September 2026).
     """
     header, data = sigproc.open_data(source)
     freqs = sigproc.channel_frequencies(header)
@@ -150,13 +174,36 @@ def stretch(source, dm, tcand, width_samples, plan):
     start, stop = max(start, 0), min(stop, total // k * k)
     if stop <= start:
         raise ValueError(f'{source} holds no samples near t={tcand:.3f} s')
+    block = _means(data, start, stop, k)
+    if k >= LEVELLED_MIN_K:
+        native = _scale(np.asarray(data[start:min(stop, start + 16384)], dtype=np.float32))
+        while k >= LEVELLED_MIN_K and _scale(block) < LEVELLED_FRACTION * native / math.sqrt(k):
+            k //= 4
+            block = _means(data, start, stop, k)
+    return header, block, start, k, delay, margin, search_downsample
+
+
+LEVELLED_MIN_K = 8          # k-sample means are checked for noise from here
+LEVELLED_FRACTION = 0.3     # of white noise's scale at k: below it, the means are levelled rows
+
+
+def _means(data, start, stop, k):
+    """Means of k native samples of (time, channel) data from start to stop (multiples of k)."""
     block = np.empty(((stop - start) // k, data.shape[1]), dtype=np.float32)
     batch = max(1, 262144 // (k * data.shape[1]))
     for out_start in range(0, len(block), batch):
         out_stop = min(len(block), out_start + batch)
         raw = np.asarray(data[start + out_start * k:start + out_stop * k])
         block[out_start:out_stop] = raw.reshape(-1, k, data.shape[1]).mean(axis=1)
-    return header, block, start, k, delay, margin, search_downsample
+    return block
+
+
+def _scale(block):
+    """The median over channels of each channel's robust scale."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        centre = np.median(block, axis=0)
+        return float(np.nanmedian(1.4826 * np.median(np.abs(block - centre), axis=0)))
 
 
 class OwnData:
@@ -165,14 +212,15 @@ class OwnData:
     data is (time, channel) in file order at tsamp; t0 the time of its first sample relative
     to the candidate (arrival at the highest frequency); width the candidate's boxcar in these
     samples; first its first sample's index on the observation's grid at this resolution
-    (k native samples each); bad the search's channel mask in file order.
+    (k native samples each); bad the search's channel mask in file order; mask the search's RFI
+    mask on this grid (native_rfi_mask), without which it is approximated on these samples.
 
     Noise is always measured over one fixed stretch around the candidate, the analysis
     window, whatever is displayed: 'guard < |t| <= analysis', where the guard keeps the
     pulse and its immediate surroundings out.
     """
 
-    def __init__(self, data, freqs, tsamp, t0, dm, width, first=0, bad=(), k=1):
+    def __init__(self, data, freqs, tsamp, t0, dm, width, first=0, bad=(), k=1, mask=None):
         self.data = np.asarray(data, dtype=np.float32)
         self.freqs = np.asarray(freqs, dtype=float)
         self.tsamp, self.t0, self.dm = float(tsamp), float(t0), float(dm)
@@ -189,8 +237,11 @@ class OwnData:
         self.flat = np.isnan(self.scale)
         self.known_bad = sorted(set(known) | set(np.flatnonzero(self.flat).tolist()))
         self.automatic_bad = persistent_channels(self.data.T)
-        block = max(8, round(RFI_BLOCK_SAMPLES / int(k)))
-        self.rfi_mask = rfi_mask(self.data, block, self.first % block)
+        if mask is not None and np.shape(mask) == self.data.shape:
+            self.rfi_mask = np.asarray(mask, dtype=bool)      # native_rfi_mask: the search's own
+        else:
+            block = max(8, round(RFI_BLOCK_SAMPLES / int(k)))
+            self.rfi_mask = rfi_mask(self.data, block, self.first % block)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
             self.normalised = (self.data - self.centre) / self.scale
@@ -338,8 +389,9 @@ def load(source, dm, tcand, width_samples, plan, bad=()):
     """The OwnData of a candidate in a flatfielded beam: the stretch the page cuts and the classifier measures."""
     header, block, start, k, _, _, _ = stretch(source, dm, tcand, width_samples, plan)
     tsamp = float(header['tsamp'])
+    mask = native_rfi_mask(sigproc.open_data(source)[1], start, start + len(block) * k, k) if k > 1 else None
     return OwnData(block, sigproc.channel_frequencies(header), tsamp * k, start * tsamp - float(tcand), dm,
-                   round(int(width_samples) / k), start // k, bad, k)
+                   round(int(width_samples) / k), start // k, bad, k, mask)
 
 
 def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None, baseline_widths=None):
