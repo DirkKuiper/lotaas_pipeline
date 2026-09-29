@@ -75,3 +75,30 @@ def test_a_sap_is_flatfielded_without_its_last_beams_and_they_join_later(tmp_pat
         expected = data / np.flipud(mean).T.astype(np.float64)
         assert np.allclose(flat, expected, rtol=1e-5)
     assert len(list(sap.glob('B*/*_ff.fil'))) == 61
+
+
+def test_gaps_and_dropped_rows_are_filled_and_left_out_of_the_mean(tmp_path):
+    """A gap in every beam (L168048's 75 s of zeros stopped its flatfield), one beam's dropped 2-bit rows (at 7% of
+    the level, the early-cycle seams) and a channel's block of zeros: flatfielded at their channel's level, and none
+    of them pulls the other beams down."""
+    sap = tmp_path/'SAP000'
+    written = beams(sap, range(13, 74), seed=3)
+    for number, data in written.items():
+        data[140:172] = 0.0                                   # the recording's gap, every beam, every channel
+        if number == 20:
+            data[32:64] *= 0.07                               # a dropped row
+            data[200:230, 5] = 0.0                            # one channel's block
+        write(sap/f'B{number:03d}'/f'downsampled_L1_SAP000_BEAM{number:03d}_32bit.fil', data)
+    done = flatfield(sap)
+    assert done.returncode == 0, done.stderr
+    assert 'Flatfield: 32 samples lost in every central beam' in done.stdout
+    dropped = read(sap/'B020'/'downsampled_L1_SAP000_BEAM020_32bit_ff.fil')
+    other = read(sap/'B013'/'downsampled_L1_SAP000_BEAM013_32bit_ff.fil')
+    for flat in (dropped, other):
+        assert np.all(np.abs(flat - 1) < 0.2), 'no dip or hole is left at the gap, the row or the block'
+        assert np.ptp(flat[140:172], axis=0).max() == 0, 'the gap holds each channel\'s level'
+    assert np.ptp(dropped[32:64], axis=0).max() == 0 and np.ptp(dropped[200:230, 5]) == 0
+    # The mean over the kept cells: the other beams' flatfielded row is their data over the other 60 beams' mean.
+    others = [written[n][32:64] for n in written if n != 20]
+    expected = written[13][32:64] / np.mean(others, axis=0)
+    assert np.allclose(other[32:64], expected, rtol=1e-5)

@@ -577,6 +577,28 @@ def test_retry_requeues_attention_saps_with_prepared_beams(tmp_path, monkeypatch
     assert campaign.state.rows('SELECT state FROM saps WHERE key=?', second)[0]['state'] == 'attention'
 
 
+def test_retry_flatfields_again_a_sap_whose_flatfield_failed(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], keep_unflattened=True)
+    real = campaign.runner.flatfield
+
+    def failing(sap, **kw):
+        raise ValueError('Flatfield contains zero/nonfinite values')
+    campaign.runner.flatfield = failing
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    key, state, detail, sap_dir = campaign.state.rows('SELECT key, state, detail, sap_dir FROM saps')[0].values()
+    assert state == 'attention' and detail.startswith('flatfield failed')
+    campaign.runner.flatfield = real
+    assert C.retry_saps(tmp_path/'campaign') == [key]
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'staging'
+    campaign.tick()
+    settle(campaign)
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'prepared'
+    assert len(list(Path(sap_dir).glob('B*/*_ff.fil'))) == len(list(Path(sap_dir).glob('B*/*_32bit.fil'))) > 60
+
+
 def test_requeue_stages_and_searches_a_searched_sap_again(tmp_path, monkeypatch):
     campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL), ('1000001', 1, FULL)], max_staging_saps=2)
     campaign.tick()
