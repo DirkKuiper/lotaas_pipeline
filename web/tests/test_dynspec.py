@@ -206,3 +206,25 @@ def test_the_rfi_mask_flags_a_channel_burst_and_spares_a_pulse():
     # Blocks follow the observation's grid: 250 samples of their first block came before this stretch.
     shifted = dynspec.rfi_mask(data, 1000, phase=250)
     assert shifted[750:1750, 9].all() and not shifted[1750:, 9].any() and not shifted[:750, 9].any()
+
+
+def test_dispersion_evidence_tells_a_pulse_from_an_undispersed_burst_and_a_dropout(tmp_path):
+    from web.tests.conftest import FCH1, FOFF, NCHANS
+    for name in ('pulse', 'burst'):
+        (tmp_path / name).mkdir()
+    pulse = snippet(tmp_path / 'pulse', dm=30.0, amplitude=1.5).dispersion_evidence()
+    assert pulse['snr_dm'] > 8 and pulse['snr_zero'] < 0.5 * pulse['snr_dm'] and pulse['expected_zero'] < 0.5
+    assert pulse['dropout'] == 0
+    # A broadband burst at the moment an event found at DM 30 would have been.
+    drift = 30.0 * float(np.mean(dynspec.sweep_seconds(1.0, FCH1 + np.arange(NCHANS) * FOFF)))
+    burst = snippet(tmp_path / 'burst', dm=30.0, amplitude=0.0, undispersed=15.0 + drift).dispersion_evidence()
+    assert burst['snr_zero'] >= 0.8 * burst['snr_dm'] and burst['expected_zero'] < 0.5
+    # The data dropping to nothing in every channel beside it.
+    path = synthetic_filterbank(tmp_path / 'gap.fil', dm=30.0)
+    header, data = sigproc.open_data(path)
+    data = np.array(data)
+    data[int(15.5 / TSAMP):int(15.5 / TSAMP) + 32] = 0.0
+    sigproc.write(path, header, data)
+    path.with_suffix('.json').write_text(json.dumps({'dm': 30.0, 't0_relative': -15.0, 'width_samples': 3,
+                                                     'downsample': 1, 'tsamp_native': TSAMP, 'bad_channels': []}))
+    assert dynspec.Snippet(path).dispersion_evidence()['dropout'] >= 30

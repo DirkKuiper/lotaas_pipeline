@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS sp_sweep (key TEXT PRIMARY KEY, events INTEGER, expec
 -- held the measure without the zero-DM filter and baseline, until 27 September 2026.
 DROP TABLE IF EXISTS sp_local;
 CREATE TABLE IF NOT EXISTS sp_local_snr (key TEXT PRIMARY KEY, local_snr REAL, measured REAL);
+-- What a candidate's snippet shows of its dispersion (dynspec.Snippet.dispersion_evidence): its S/N at its DM and
+-- at DM 0, what a real pulse would keep at DM 0, and samples where the data dropped out near it.
+CREATE TABLE IF NOT EXISTS sp_dispersion (key TEXT PRIMARY KEY, snr_dm REAL, snr_zero REAL, expected_zero REAL,
+    dropout INTEGER, measured REAL);
 -- A single pulse of a catalogued pulsar seen away from its own beam (indexer.derive_known).
 CREATE TABLE IF NOT EXISTS sp_known (key TEXT PRIMARY KEY, pulsar TEXT, name TEXT, separation_deg REAL,
     route TEXT, z REAL);

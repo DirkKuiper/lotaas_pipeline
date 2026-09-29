@@ -1110,6 +1110,28 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,?)', measured)
         return len(measured)
 
+    def measure_dispersion(self, limit=300):
+        """What each open queued candidate's snippet shows of its dispersion (Snippet.dispersion_evidence), once."""
+        rows = self.db.execute("""SELECT c.key, s.path FROM candidates c JOIN snippets s ON s.key=c.key
+            WHERE c.kind='sp' AND c.type IN ('candidate', 'dispersed', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
+            AND NOT EXISTS (SELECT 1 FROM sp_dispersion d WHERE d.key=c.key)
+            AND NOT EXISTS (SELECT 1 FROM review_state.reviews v WHERE v.key=c.key AND v.reviewer != 'auto-triage')
+            LIMIT ?""", (limit,)).fetchall()
+        if not rows:
+            return 0
+        from web.dynspec import Snippet
+        measured = []
+        for key, path in rows:
+            try:
+                e = Snippet(path).dispersion_evidence()
+            except Exception as error:
+                logger.warning('Could not measure the dispersion of %s: %s', key, error)
+                continue
+            measured.append((key, e['snr_dm'], e['snr_zero'], e['expected_zero'], e['dropout'], time.time()))
+        with self.db:
+            self.db.executemany('INSERT OR REPLACE INTO sp_dispersion VALUES (?,?,?,?,?,?)', measured)
+        return len(measured)
+
     def repair_positions(self):
         """Read again the right ascension of beams recorded outside 0-360 degrees (sexagesimal); returns how many."""
         rows = self.db.execute('SELECT dir FROM beams WHERE ra_deg < 0 OR ra_deg >= 360').fetchall()
@@ -1132,7 +1154,8 @@ class Indexer:
         for name, step in (('state', self.sync_state), ('ledger', self.sync_ledger),
                            ('results', lambda: self.scan_results(full)), ('low_dm', self.sync_low_dm),
                            ('snippets', self.sync_snippets), ('positions', self.repair_positions),
-                           ('derive', self.derive), ('local', self.measure_local), ('triage', self.triage),
+                           ('derive', self.derive), ('local', self.measure_local),
+                           ('dispersion', self.measure_dispersion), ('triage', self.triage),
                            ('counts', self.count_candidates), ('forecast', self.forecast), ('health', self.health)):
             begun = time.time()
             try:

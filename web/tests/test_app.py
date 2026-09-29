@@ -460,12 +460,13 @@ def test_a_fold_at_a_catalogued_pulsars_own_period_is_settled(cfg, campaign, mon
     monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
     beam_dir = campaign['beam_dir']
     fold(beam_dir, 19.5, 0.5306603 * (1 - 9e-5), 381.9, 'psr')          # its own period, Doppler shifted
-    fold(beam_dir, 19.4, 0.5306603 / 2, 60.0, 'second')                  # a harmonic: for a person
+    fold(beam_dir, 19.4, 0.5306603 / 2, 60.0, 'second')                  # its second harmonic
     fold(beam_dir, 55.0, 0.5306603, 40.0, 'other')                       # its period at another DM
     Indexer(cfg).run_pass()
-    recorded = verdicts(cfg)
-    assert [v['label'] for v in recorded] == ['known']
-    assert 'B0823+26 (J0826+2637) at its own period and DM, 2.51 deg' in recorded[0]['note']
+    notes = sorted(v['note'] for v in verdicts(cfg) if v['label'] == 'known')
+    assert len(notes) == 2 and len(verdicts(cfg)) == 2
+    assert 'B0823+26 (J0826+2637) at 1/2 of its period and its DM' in notes[0]
+    assert 'B0823+26 (J0826+2637) at its own period and its DM, 2.51 deg' in notes[1]
 
 
 PER_DM = 4148.808 * (1 / (119.45 * 151.04) - 1 / 151.04 ** 2)   # s of band-averaged delay per unit DM
@@ -794,3 +795,40 @@ def test_positives_only_fetch_model_d_passed_come_last_and_say_so(cfg, campaign)
     assert flags == {'BEAM040': 1, 'BEAM041': 0}
     body = client_for(cfg).get('/single-pulse?sort=snr').text.split('<tbody>')[1]
     assert body.index('B041') < body.index('B040') and body.count('only model d') == 1
+
+
+@pytest.mark.parametrize('evidence, label', [
+    ((12.0, 11.0, 0.2, 0), 'rfi'),        # as strong at DM 0, where a pulse would keep a fifth: undispersed
+    ((12.0, 3.0, 0.2, 0), None),          # a pulse: most of it gone at DM 0
+    ((12.0, 11.0, 0.8, 0), None),         # too narrow a sweep to tell: stays
+    ((12.0, 2.0, 0.2, 40), 'rfi'),        # the data drop out beside it
+])
+def test_what_a_snippet_shows_of_dispersion_settles_undispersed_events_and_dropouts(cfg, campaign, evidence, label):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion VALUES (?,?,?,?,?,?)', (key, *evidence, 0.0))
+    indexer.triage()
+    found = [v for v in verdicts(cfg) if v['key'] == key]
+    assert [v['label'] for v in found] == ([label] if label else [])
+    if label:
+        assert ('Not dispersed' if not evidence[3] else 'The data drop out') in found[0]['note']
+
+
+def test_a_catalogued_pulsars_redetection_in_its_own_beam_is_known(cfg, campaign, monkeypatch, tmp_path):
+    catalogue = tmp_path / 'psrcat.db'
+    catalogue.write_text('PSRJ     J0826+2637\nPSRB     B0823+26\nRAJ      08:26:51.4\nDECJ     +26:37:21\n'
+                         'DM       19.476\nP0       0.5306603\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute("UPDATE candidates SET type='known_pulsar', pulsar='B0823+26', dm=19.6 WHERE key=?", (key,))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ['known']
+    with indexer.db:
+        indexer.db.execute("UPDATE candidates SET dm=40.0 WHERE key=?", (key,))    # not at its DM: for a person
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == []

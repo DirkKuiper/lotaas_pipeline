@@ -15,9 +15,17 @@ import numpy as np
 
 from web.keys import parse_item
 
-VERSION = 1
+VERSION = 2
 MIN_REPEATABILITY = 5.0
 MIN_PERSISTENCE = 0.75
+# LOTAAS 2-bit rows: 512 samples of 7.864 ms. Their residual steps fold at whole numbers of rows: folds at
+# 6.00-6.03 rows (24.15-24.27 s) in L543273, L549893 and L543465, at unrelated DMs (29 September 2026).
+ROW_SECONDS = 512 * 0.00786432
+ROW_TOLERANCE = 0.003
+# A fold's profile beyond its fundamental (harmonics 2-4 of the folded profile), as chi-squared with 6 degrees of
+# freedom: below this (the 99th percentile of noise) it holds nothing but a sinusoid.
+SINUSOID_CHI2 = 16.81
+ROW_HARMONIC_CHI2 = 50.0
 
 
 def normalise_rows(values):
@@ -70,6 +78,23 @@ def assess(fold, data):
         supports.append(float(np.mean(held > 0)))
         windows.append((width, phase))
     repeatability, persistence = min(checks), min(supports)
+    # Slow variations fold into a sinusoid with nothing at the profile's harmonics; a pulse of a pulsar or a
+    # long-period transient is narrow and has them (a duty cycle under a third keeps harmonic 2 at a quarter
+    # or more of the fundamental's power). Red noise folded at 11.69 s (L543465 SAP000 B062), 2.00 s and 2.29 s
+    # passed every check above with one search harmonic.
+    profile = norm.mean(axis=0)
+    spectrum = np.abs(np.fft.rfft(profile)) ** 2 / (nbins / 2 / nrows)
+    beyond = float(spectrum[2:5].sum()) if nbins >= 10 else None
+    if beyond is not None and int(fold.get('harmonic_count') or 1) <= 1 and beyond < SINUSOID_CHI2:
+        reasons.append('Folded profile is a sinusoid: a slow variation, not a pulse')
+    # Within the fold's own period resolution (P / T: 0.7% at 24 s in an hour), and only for a profile with
+    # little beyond its fundamental, so that a narrow pulse at such a period still reaches the queue.
+    period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
+    rows = period / ROW_SECONDS
+    tolerance = max(ROW_TOLERANCE, period / float(fold.get('observation_seconds') or 3600))
+    if (rows >= 0.97 and abs(rows / round(rows) - 1) <= tolerance and beyond is not None
+            and beyond < ROW_HARMONIC_CHI2):
+        reasons.append(f'Period is {round(rows)} 2-bit rows of 4.03 s: instrumental')
     if repeatability < MIN_REPEATABILITY:
         reasons.append('Pulse window does not repeat strongly in every time split')
     if persistence < MIN_PERSISTENCE:
@@ -108,6 +133,7 @@ def assess(fold, data):
     return {'version': VERSION, 'score': max(0.0, repeatability), 'strong': not reasons,
             'repeatability': repeatability, 'time_checks': checks, 'persistence': persistence,
             'dm_trials': dm_trials, 'zero_dm_ratio': zero_ratio, 'band_support': band_support,
+            'harmonic_chi2': beyond,
             'sampling_bins': sampling_bins, 'reasons': reasons}
 
 

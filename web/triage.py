@@ -20,6 +20,14 @@ observation shows, not by looking at the candidate:
 - an undispersed burst in the candidate's own beam: a burst of events there
   at one moment at scattered DMs, none standing out (indexer.sweeps), where a
   pulse would peak at its DM and fall away. Verdict 'rfi'.
+- the data dropping out beside it: samples within its sweep where most
+  channels fall below a fifth of their level (lost 2-bit rows, recording
+  gaps; the flatfield fills them since 29 September 2026). Verdict 'rfi'.
+- a candidate as strong at DM 0 as at its own DM, where a real pulse of its
+  width would lose half its S/N or more (dynspec.Snippet.dispersion_evidence,
+  without the zero-DM filter): an undispersed burst or step. Verdict 'rfi'.
+- the classifier's redetection of a catalogued pulsar in its own beam, at the
+  pulsar's DM. Verdict 'known'.
 - a candidate the search put at S/N 7 or more whose own data show under
   LOCAL_MIN at its time, DM and width (the review page's local S/N,
   indexer.measure_local). The search fills each 7.9 s channel block its RFI
@@ -29,7 +37,7 @@ observation shows, not by looking at the candidate:
   as many such events at negative DMs as at positive ones). Verdict 'noise'.
 
 A periodic fold is settled too when it is a catalogued pulsar at its own
-period (not a harmonic: those stay for a person) and DM, within 5 degrees: B0823+26
+period, or a harmonic or multiple of it (psrcat.match), and DM, within 5 degrees: B0823+26
 was folded in 92 beams of L611400, 3.3 degrees away in its other SAP, where the
 pipeline's own catalogue match does not reach. Verdict 'known'. So is a fold
 that repeats a catalogued fold of its own beam at least five times stronger
@@ -61,6 +69,11 @@ LOCAL_FRACTION = 0.6
 # (10-11 against 20-27) when the review page's snippet, at the search's resolution, splits a
 # one-sample pulse (benchmarks/frb-injection-2026-09-28).
 LOCAL_CLEAR = 6.0
+# Not dispersed: at least this fraction of its S/N at DM 0 where a real pulse of its width would keep at most
+# UNDISPERSED_EXPECTED. Of 59 catalogued pulsars' pulses with page S/N 6 or more (DM 4.8-74) none: they keep
+# 3-76% at DM 0; it settled 334 of 1,023 open candidates (29 September 2026).
+UNDISPERSED_RATIO = 0.8
+UNDISPERSED_EXPECTED = 0.5
 ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
           'rotation': 'the pulses keep its rotation'}
 LATEST = '(SELECT {0} FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
@@ -114,7 +127,40 @@ def settled(db):
                                   f"S/N of the review page): no pulse there. A pulse reads 0.8-1.4 times its search "
                                   f"S/N there; what the search found was the rest of interference it saw through.",
                                   r['dm'], r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, d.dropout, {earlier} AS earlier FROM candidates c
+            JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND d.dropout > 0 AND {NOT_KNOWN}"""):
+        out.setdefault(r['key'], (r['key'], 'rfi', f"The data drop out beside it: {r['dropout']} samples within its "
+                                  f"sweep where most channels fall below a fifth of their level, which no signal "
+                                  f"from the sky does (lost 2-bit rows or a recording gap, flatfielded before 29 "
+                                  f"September 2026). What the search found is the edge of the gap.", r['dm'],
+                                  r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, d.snr_dm, d.snr_zero, d.expected_zero, {earlier} AS earlier
+            FROM candidates c JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND d.snr_dm > 0
+            AND d.snr_zero >= ? * d.snr_dm AND d.expected_zero <= ? AND {NOT_KNOWN}""",
+            (UNDISPERSED_RATIO, UNDISPERSED_EXPECTED)):
+        out.setdefault(r['key'], (r['key'], 'rfi', f"Not dispersed: S/N {r['snr_zero']:.1f} at DM 0 against "
+                                  f"{r['snr_dm']:.1f} at its DM, where a pulse of its width would keep "
+                                  f"{100 * r['expected_zero']:.0f}% at DM 0. An undispersed burst or step the "
+                                  f"dedispersion smeared into this DM.", r['dm'], r['earlier']))
+    catalogue = _catalogue_dms()
+    for r in db.execute(f"""SELECT c.key, c.dm, c.pulsar, {earlier} AS earlier FROM candidates c
+            WHERE {QUEUED} AND {OPEN} AND c.type='known_pulsar' AND c.pulsar IS NOT NULL"""):
+        dm = catalogue.get(r['pulsar'])
+        if dm is not None and abs(r['dm'] - dm) <= max(2.0, 0.05 * dm):
+            out.setdefault(r['key'], (r['key'], 'known', f"{r['pulsar']} in its own beam, at its DM ({dm:g}): the "
+                                      f"classifier's redetection of a catalogued pulsar.", r['dm'], r['earlier']))
     return list(out.values())
+
+
+def _catalogue_dms():
+    """{pulsar name (J and B): catalogue DM}."""
+    from euroflash import psrcat
+    out = {}
+    for p in psrcat.load() or []:
+        for name in (p.get('name'), p.get('bname')):
+            if name and p.get('dm') is not None:
+                out[name] = float(p['dm'])
+    return out
 
 
 PERIODIC_RADIUS_DEG = 5.0
@@ -135,15 +181,14 @@ def periodic_settled(db):
         place = (round(r['ra_deg'], 2), round(r['dec_deg'], 2))
         if place not in cones:
             cones[place] = psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], PERIODIC_RADIUS_DEG)
-        for pulsar in cones[place]:
-            if abs(r['dm'] - pulsar['dm']) > max(2.0, 0.05 * pulsar['dm']):
-                continue
-            if abs(r['period'] / psrcat.period_at(pulsar, r['tstart_mjd']) - 1) <= psrcat.PERIOD_TOLERANCE:
-                name = pulsar.get('bname') or pulsar['name']
-                name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
-                out.append((r['key'], 'known', f"{name} at its own period and DM, {pulsar['separation_deg']:.2f} deg "
-                            f"from this beam.", r['dm'], r['earlier']))
-                break
+        found = psrcat.match(r['period'], r['dm'], cones[place], r['tstart_mjd'], dm_tolerance=(2.0, 0.05))
+        if found:
+            pulsar, relation = found
+            name = pulsar.get('bname') or pulsar['name']
+            name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
+            at = 'its own period' if relation == '1/1' else f'{relation} of its period'
+            out.append((r['key'], 'known', f"{name} at {at} and its DM, {pulsar['separation_deg']:.2f} deg "
+                        f"from this beam.", r['dm'], r['earlier']))
     return out
 
 

@@ -382,6 +382,40 @@ class Snippet(OwnData):
                                        else None),
                 'coverage_seconds': [float(times[covered][0]), float(times[covered][-1])] if covered.any() else None}
 
+    DROP_LEVEL = 0.2           # of a channel's level: below it in most channels, the data dropped out
+    DROP_FRACTION = 0.5
+
+    def dispersion_evidence(self):
+        """{snr_dm, snr_zero, expected_zero, dropout}: the boxcar S/N at the candidate (its DM, width and time);
+        the best at DM 0 (widths 1, 2 and its own) where an undispersed event found at this DM would sit, with no
+        zero-DM filter, which would remove it; the fraction of its S/N a real pulse of this width keeps at DM 0
+        (Cordes & McLaughlin); and how many samples within its sweep, a second either side, have most channels
+        below DROP_LEVEL of their level, which no sky signal does (lost 2-bit rows, recording gaps)."""
+        data = self.masked()
+        times = self.times
+        width, tsamp = self.width, self.tsamp
+        at_dm = self.snr(self.band_series(data, self.dm), times, width)
+        near = np.abs(times) <= width * tsamp / 2 + tsamp
+        snr_dm = float(np.nanmax(at_dm[near])) if np.isfinite(at_dm[near]).any() else None
+        zero = self.band_series(data, 0.0)
+        drift = self.dm * float(np.mean(sweep_seconds(1.0, self.freqs)))
+        sweep = self.dm * self.per_dm
+        window = np.abs(times - drift) <= sweep / 2 + 2 * width * tsamp + tsamp
+        snr_zero = None
+        for trial in sorted({1, 2, width}):
+            values = self.snr(zero, times, trial)[window]
+            if np.isfinite(values).any():
+                snr_zero = max(snr_zero if snr_zero is not None else -np.inf, float(np.nanmax(values)))
+        low_ms, high_ms = self.smearing_ms()
+        width_ms = max(width * tsamp * 1e3, math.hypot(tsamp * 1e3, (low_ms + high_ms) / 2))
+        expected = float(expected_fraction(self.dm, width_ms, self.bandwidth, self.centre_ghz)[0])
+        level = np.median(self.data[::max(1, len(self.data) // 4000)], axis=0)
+        good = level > 0
+        lost = (((self.data[:, good] < self.DROP_LEVEL * level[good]) | (self.data[:, good] == 0)).mean(axis=1)
+                > self.DROP_FRACTION)
+        around = np.abs(times - drift) <= sweep / 2 + width * tsamp + 1.0
+        return {'snr_dm': snr_dm, 'snr_zero': snr_zero, 'expected_zero': expected, 'dropout': int(lost[around].sum())}
+
     def dm_response(self, points=121, mask=(), auto_mask=True):
         """Boxcar S/N near the candidate time over a fine grid around its DM and a
         coarse one from DM 0, with what a real dispersed pulse would keep."""
