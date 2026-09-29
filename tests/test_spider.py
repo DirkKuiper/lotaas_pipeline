@@ -304,3 +304,16 @@ def test_levelling_removes_the_row_steps_and_keeps_a_pulse_within_a_row():
     assert np.isclose(np.median(means), 100, atol=0.5), 'the level is kept for the flatfield'
     pulse = (data[:, 1000:1004].mean() - np.median(data)) / 5.0
     assert 0.95 < pulse < 1.01, 'a pulse loses only its share of the row mean (4/512)'
+
+
+def test_levelling_leaves_dropped_rows_out_and_they_are_filled_at_the_level():
+    F = flatfield_module()
+    data = stepped(32)
+    data[:, 320:384] = 7.0 + np.random.default_rng(2).normal(scale=0.2, size=(data.shape[0], 64))  # two rows at 7%
+    lost = F.lost_cells(data)
+    assert lost[:, 320:384].all() and lost.sum() == data.shape[0] * 64
+    F.level_rows(data, 32, lost)
+    F.fill_lost(data, lost)
+    means = data.reshape(data.shape[0], -1, 32).mean(axis=2)
+    assert np.ptp(means, axis=1).max() < 0.1, 'the dropped rows sit at the level, and did not move it'
+    assert np.isclose(np.median(means), 100, atol=0.5)

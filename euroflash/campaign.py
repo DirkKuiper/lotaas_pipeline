@@ -1222,15 +1222,21 @@ def parser():
 
 
 def retry_saps(root, keys=()):
-    """Put SAPs in attention whose unsearched beams are still prepared back in the dispatch queue."""
+    """Put SAPs in attention whose unsearched beams are still prepared back in the dispatch queue, and those
+    whose flatfield failed with every converted beam still unflattened back to be flatfielded again."""
     state = State(Path(root)/'campaign-state.sqlite')
     queued = []
     for sap in state.rows("SELECT * FROM saps WHERE state='attention' AND sap_dir IS NOT NULL"):
         if keys and sap['key'] not in keys:
             continue
-        if any(flattened(p).is_file() for f in state.rows(
-                "SELECT fil FROM files WHERE sap_key=? AND state='converted'", sap['key'])
-               for p in json.loads(f['fil'] or '[]')):
+        converted = [Path(p) for f in state.rows("SELECT fil FROM files WHERE sap_key=? AND state='converted'",
+                                                 sap['key']) for p in json.loads(f['fil'] or '[]')]
+        if (sap['detail'] or '').startswith('flatfield failed') and converted and all(p.is_file() for p in converted):
+            state.set_sap(sap['key'], state='staging', detail='flatfield again: ' + sap['detail'])
+            state.event('retry', sap['key'], sap['detail'])
+            queued.append(sap['key'])
+            continue
+        if any(flattened(p).is_file() for p in converted):
             state.set_sap(sap['key'], state='prepared', run_name=None, detail='retry requested: ' + (sap['detail'] or ''))
             state.event('retry', sap['key'], sap['detail'])
             queued.append(sap['key'])

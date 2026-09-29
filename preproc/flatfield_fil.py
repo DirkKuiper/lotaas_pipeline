@@ -8,12 +8,24 @@ added once, so each row's level is set by the requantiser (row mean + 78.75
 sigma_row) instead of the sky, and steps at every row edge (euroflash.spider).
 'auto' finds the row length from the central beams' mean, where every beam's
 steps coincide.
+
+Cells that hold no sky are left out of the central beams' mean and, once a beam
+is flatfielded (and levelled), set to their channel's level: cells exactly zero,
+and every cell of a sample where most channels read below DROP_LEVEL of their
+level (7 sigma below it in a raw beam). They are the recording's gaps (every
+beam zero for 75 s in L168048 and L169695, which stopped their flatfield, and
+blocks of single channels) and the early-cycle beams' dropped 2-bit rows (whole
+rows at 7% of the level in 0.3-2.3% of L167144 SAP002's rows, beam by beam),
+which the search saw as broadband dips and, dedispersed, as curved seams at high
+DM. Scattered low cells in single channels (RFI-damaged 2-bit rows) are kept.
 """
 import argparse
 import glob
 import json
 import os
 import re
+import warnings
+
 import numpy as np
 from lotaas_reprocessing import filterbank
 
@@ -33,8 +45,33 @@ def read_filterbank_data(filename):
         fb.close()
 
 
+DROP_LEVEL = 0.2       # of a channel's level: below it a cell holds no sky
+DROP_SAMPLE = 0.5      # of a sample's channels below DROP_LEVEL: then the whole sample holds none
+
+
+def lost_cells(data):
+    """(channel, time) mask of the cells that hold no sky (see the module's docstring)."""
+    level = np.median(data[:, ::64], axis=1, keepdims=True)
+    lost = data == 0
+    dropped = ((data < DROP_LEVEL * level) | lost).mean(axis=0) > DROP_SAMPLE
+    lost[:, dropped] = True
+    return lost
+
+
+def fill_lost(data, lost):
+    """Set the lost cells to their channel's level: the median of its kept cells (in place)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        level = np.nanmedian(np.where(lost[:, ::16], np.nan, data[:, ::16]), axis=1)
+        fallback = np.nanmedian(level)
+    level = np.where(np.isfinite(level), level, fallback if np.isfinite(fallback) else 1.0)
+    np.copyto(data, level[:, None].astype(data.dtype), where=lost)
+    return data
+
+
 def compute_flatfield(files, series=None):
-    """The central beams' mean; with `series`, each central beam's sum over channels is appended to it."""
+    """The central beams' mean over their kept cells; with `series`, each central beam's sum over channels is
+    appended to it. A cell lost in every central beam takes its channel's median."""
     central = [f for f in files if 13 <= extract_beam_id(f) <= 73]
     if not central:
         raise ValueError('No central beams found for flatfielding')
@@ -49,15 +86,37 @@ def compute_flatfield(files, series=None):
         metadata.append(fb.nspec)
         fb.close()
     mean = np.zeros((reference[0], max(metadata)), dtype=np.float64)
+    count = None                                     # beams kept per cell, once any cell is lost
     # One beam at a time, instead of retaining all 61 full beam arrays.
-    for path in central:
+    for number, path in enumerate(central):
         data, _ = read_filterbank_data(path)
         if series is not None:
             series.append(data.sum(axis=0, dtype=np.float64))
-        mean[:, :data.shape[1]] += data
-        if data.shape[1] < mean.shape[1]:
-            mean[:, data.shape[1]:] += data.mean(axis=1, keepdims=True)
-    mean /= len(central)
+        lost = lost_cells(data)
+        if lost.any():
+            if count is None:
+                count = np.full(mean.shape, number, dtype=np.uint8)
+            data[lost] = 0
+        n = data.shape[1]
+        mean[:, :n] += data
+        if count is not None:
+            count[:, :n] += ~lost
+        if n < mean.shape[1]:
+            kept = (~lost).sum(axis=1, keepdims=True)
+            mean[:, n:] += data.sum(axis=1, keepdims=True) / np.maximum(kept, 1) if lost.any() else \
+                data.mean(axis=1, keepdims=True)
+            if count is not None:
+                count[:, n:] += (kept > 0).astype(np.uint8)
+    if count is None:
+        mean /= len(central)
+    else:
+        with np.errstate(all='ignore'):
+            mean /= count
+        empty = count == 0
+        if empty.any():
+            mean[empty] = np.nan
+            fill_lost(mean, empty)
+            print(f'Flatfield: {int(empty.all(axis=0).sum())} samples lost in every central beam', flush=True)
     if not np.isfinite(mean).all() or np.any(mean == 0):
         raise ValueError('Flatfield contains zero/nonfinite values')
     return mean
@@ -96,18 +155,32 @@ def detect_row_length(series):
     return 0, excess
 
 
-def level_rows(data, row):
-    """Replace each channel's mean in every row of `row` samples by its median row mean (in place)."""
+def level_rows(data, row, lost=None):
+    """Replace each channel's mean in every row of `row` samples by its median row mean (in place); with
+    `lost`, over the kept cells only (a row with none is left for fill_lost)."""
     n = (data.shape[1] // row) * row
     if row <= 0 or n == 0:
         return data
     blocks = data[:, :n].reshape(data.shape[0], -1, row)
-    means = blocks.mean(axis=2, dtype=np.float64)
-    level = np.median(means, axis=1, keepdims=True)
-    blocks -= (means - level)[:, :, None].astype(data.dtype)
+    if lost is None or not lost.any():
+        means = blocks.mean(axis=2, dtype=np.float64)
+        level = np.median(means, axis=1, keepdims=True)
+        blocks -= (means - level)[:, :, None].astype(data.dtype)
+        if n < data.shape[1]:
+            tail = data[:, n:]
+            tail -= (tail.mean(axis=1, dtype=np.float64, keepdims=True) - level).astype(data.dtype)
+        return data
+    kept = ~lost[:, :n].reshape(blocks.shape)
+    with np.errstate(all='ignore'), warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        means = np.where(kept, blocks, 0).sum(axis=2, dtype=np.float64) / kept.sum(axis=2)
+        level = np.nanmedian(means, axis=1, keepdims=True)
+    blocks -= np.nan_to_num(means - level)[:, :, None].astype(data.dtype)
     if n < data.shape[1]:
-        tail = data[:, n:]
-        tail -= (tail.mean(axis=1, dtype=np.float64, keepdims=True) - level).astype(data.dtype)
+        tail, keep = data[:, n:], ~lost[:, n:]
+        with np.errstate(all='ignore'):
+            tail_mean = np.where(keep, tail, 0).sum(axis=1, dtype=np.float64, keepdims=True) / keep.sum(axis=1, keepdims=True)
+        tail -= np.nan_to_num(tail_mean - level).astype(data.dtype)
     return data
 
 
@@ -117,9 +190,13 @@ def apply_flatfield(files, mean, row=0):
         # Preserve the observed duration; do not fabricate padded science samples.
         if data.shape[1] > mean.shape[1]:
             raise ValueError('Beam extends beyond flatfield time grid')
+        lost = lost_cells(data)
         data /= mean[:, :data.shape[1]]
         if row:
-            level_rows(data, row)
+            level_rows(data, row, lost)
+        if lost.any():
+            fill_lost(data, lost)
+            print(f'Filled {int(lost.sum())} lost cells ({100 * lost.mean():.2f}%) in {os.path.basename(path)}', flush=True)
         output = path[:-4] + '_ff.fil'
         fb = filterbank.create_filterbank_file(output + '.partial', header, nbits=32)
         try:
