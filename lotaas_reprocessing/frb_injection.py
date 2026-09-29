@@ -9,10 +9,16 @@ resolution, the best boxcar up to MAX_WIDTH_SECONDS over the beam's good channel
 scatter. That is the burst's radiometer S/N in this beam, which a fluence becomes through the beam's system
 equivalent flux density; the truth records what that conversion needs.
 
-    python -m lotaas_reprocessing.frb_injection SOURCE DEST TRUTH_JSON SEED SETTINGS_YAML|BAD_CHANNELS_JSON [N]
+    python -m lotaas_reprocessing.frb_injection SOURCE DEST TRUTH_JSON SEED SETTINGS_YAML|BAD_CHANNELS_JSON [N [ROW]]
 
 With the pipeline's settings, the channels the search will mask are those the GPU stage masks (bad_channels
 and persistent_channels, pipeline_gpu), found before the search runs.
+
+ROW: the 2-bit row length the SAP's early-cycle beams were levelled with (preproc/flatfield_fil.py,
+row-levelling.json), 0 for none. The twin is levelled again after the bursts are added, as the flatfield
+levelled a real burst: each channel's mean over every row back to its level, so a burst loses its share of
+each row's mean. The beam's own rows are level already and do not change. Injected into levelled beams
+without it, bursts at DM 1200-3000 kept flux that rows of 32 samples (0.25 s) take from a real one.
 
 First measured on 28 September 2026 (benchmarks/frb-injection-2026-09-28): the search's own S/N of such bursts
 was a median 0.82 of this ideal one with the 8-width baseline, 0.54 with the 64-width baseline.
@@ -164,6 +170,22 @@ def inject(data, header, bad, rng, n=10, ranges=None):
     return truth
 
 
+def level_rows(data, row):
+    """Each channel's mean over every `row` samples set back to its median row mean ((time, channel), in place):
+    flatfield_fil.level_rows on data in file order."""
+    n = data.shape[0] // row * row if row > 0 else 0
+    if n == 0:
+        return data
+    blocks = data[:n].reshape(-1, row, data.shape[1])
+    means = blocks.mean(axis=1, dtype=np.float64)
+    level = np.median(means, axis=0)
+    blocks -= (means - level)[:, None, :].astype(data.dtype)
+    if n < data.shape[0]:
+        tail = data[n:]
+        tail -= (tail.mean(axis=0, dtype=np.float64) - level).astype(data.dtype)
+    return data
+
+
 def search_mask(data, settings):
     """The channels (file order) the GPU stage masks in every sample: configured, and persistently deviant."""
     from lotaas_reprocessing.single_pulse_quality import persistent_channels
@@ -178,6 +200,7 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     source, dest, truth_path, seed = Path(argv[0]), Path(argv[1]), Path(argv[2]), int(argv[3])
     n = int(argv[5]) if len(argv) > 5 else 10
+    row = int(argv[6]) if len(argv) > 6 else 0
     header, mapped = sigproc.open_data(source)
     data = np.array(mapped, dtype=np.float32)
     bad = []
@@ -187,10 +210,11 @@ def main(argv=None):
     elif len(argv) > 4:
         bad = json.loads(Path(argv[4]).read_text())
     truth = inject(data, header, bad, np.random.default_rng(seed), n)
+    level_rows(data, row)
     partial = dest.with_name(dest.name + '.partial')
     sigproc.write(partial, header, data)
     truth_path.write_text(json.dumps({'source': str(source), 'twin': dest.name, 'seed': seed, 'bad_channels': bad,
-                                      'bursts': truth}, indent=1))
+                                      'level_rows': row, 'bursts': truth}, indent=1))
     partial.replace(dest)
     print(dest.name, 'with', len(truth), 'bursts')
 

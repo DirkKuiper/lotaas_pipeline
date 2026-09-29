@@ -49,3 +49,23 @@ def test_with_the_pipeline_settings_the_search_s_channel_mask_is_used(tmp_path):
     settings.write_text('bad_channels: [2]\npersistent_channel_threshold: 4.0\n')
     frb_injection.main([str(source), str(tmp_path / 'twin.fil'), str(tmp_path / 'truth.json'), '5', str(settings), '1'])
     assert json.loads((tmp_path / 'truth.json').read_text())['bad_channels'] == [2]
+
+
+def test_a_twin_of_a_row_levelled_beam_is_levelled_again_as_the_flatfield_levelled_real_bursts(tmp_path):
+    from test_own_data import levelled_beam
+    source = levelled_beam(tmp_path / 'beam.fil', (0.0, 0.0, 0, 0.0))            # levelled rows of 32, no pulse
+    header, mapped = sigproc_data.open_data(source)
+    before = np.array(mapped, dtype=np.float32)
+    frb_injection.level_rows(again := before.copy(), 32)
+    assert np.allclose(again, before, atol=1e-4), 'a levelled beam does not change'
+    burst = before.copy()
+    burst[3200:3264, :] += 1.0                                                     # two whole rows, one part-row
+    burst[3300:3310, :] += 1.0
+    frb_injection.level_rows(burst, 32)
+    rows = burst[:19968].reshape(-1, 32, NCHANS).mean(axis=1)
+    assert np.ptp(rows, axis=0).max() < 1e-3, 'every row back at its level'
+    assert np.allclose(burst[3200:3264], before[3200:3264], atol=1e-4), 'a burst filling rows is gone, as in the real beam'
+    assert np.isclose((burst[3300:3310] - before[3300:3310]).mean(), 1 - 10 / 32, atol=1e-3), 'a shorter one keeps 22/32'
+    (tmp_path / 'bad.json').write_text('[]')
+    frb_injection.main([str(source), str(tmp_path / 'twin.fil'), str(tmp_path / 'truth.json'), '5', str(tmp_path / 'bad.json'), '0', '32'])
+    assert json.loads((tmp_path / 'truth.json').read_text())['level_rows'] == 32

@@ -85,6 +85,15 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
+def levelled_rows(origin):
+    """The 2-bit row length the beam's SAP was levelled with (flatfield_fil.py's row-levelling.json), or 0: the
+    twin is levelled again after its bursts go in, as the real beam was (frb_injection)."""
+    try:
+        return int(json.loads((Path(origin).parent.parent / 'row-levelling.json').read_text()).get('row') or 0)
+    except (OSError, ValueError):
+        return 0
+
+
 class Lane:
     def __init__(self, root=ROOT, options=None, now=time.time):
         self.root = Path(root)
@@ -219,7 +228,7 @@ class Lane:
             twin.parent.mkdir(exist_ok=True)
             node = CPU_NODES[(busy + i) % len(CPU_NODES)]
             command = self.container(snapshot, image, 'lotaas_reprocessing.frb_injection', s['link'], twin, truth,
-                                     s['seed'], self.settings(snapshot, s['source']), BURSTS)
+                                     s['seed'], self.settings(snapshot, s['source']), BURSTS, levelled_rows(s['origin']))
             Path(str(twin) + '.log.exit').unlink(missing_ok=True)
             if self.remote(node, command, Path(str(twin) + '.log')):
                 self.set('samples', s['sap'], state='making', twin=str(twin), truth=str(truth), node=node)

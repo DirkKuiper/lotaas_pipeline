@@ -46,6 +46,18 @@ def test_campaign_options_come_from_the_supervisor_s_configuration(tmp_path):
     assert o['settings'] == {'lta': Path('/c/lt5.yaml'), 'spider': Path('/c/ec.yaml')} and o['timeouts'] == ['sp_classify=1800']
 
 
+def test_a_twin_is_levelled_with_the_rows_its_sap_was_levelled_with(tmp_path):
+    ln, o = lane(tmp_path)
+    sap_dir = prepared_sap(o, 'L1_SAP000', 'L10', source='spider')
+    (sap_dir / 'row-levelling.json').write_text('{"row": 32, "edge_excess": {"32": 2.4, "512": 2.5}}')
+    prepared_sap(o, 'L2_SAP000', 'L20')
+    ln.stage()
+    ln.make()
+    rows = {Path(command[command.index('lotaas_reprocessing.frb_injection') + 1]).parent.name: command[-1]
+            for _, command, _ in ln.started}
+    assert rows == {'L1_SAP000': '32', 'L2_SAP000': '0'}
+
+
 def test_one_beam_of_each_sap_is_held_by_a_link_never_the_incoherent_one(tmp_path):
     ln, o = lane(tmp_path)
     prepared_sap(o, 'L1_SAP000', 'L10')
