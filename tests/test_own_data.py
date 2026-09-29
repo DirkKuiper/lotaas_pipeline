@@ -212,3 +212,49 @@ def test_clusters_let_in_by_the_route_s_lower_gate_meet_its_faint_cuts(tmp_path,
     dropped = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'b'), info, limits=dict(limits, dispersed=strict),
                                            tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
     assert kept['dispersed'] == 1 and kept['unjudged'] == 1 and kept['fetch'] == 0 and dropped['dispersed'] == 0
+
+
+def test_a_burst_s_spectrum_is_smooth_and_channel_bars_are_not(tmp_path):
+    import numpy as np
+    width = 13
+    burst = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 1.0)])
+    assert own_data.smoothness(own_data.load(burst, 300.0, 60.0 + (width - 1) / 2 * TSAMP, width, PLAN)) > 0.7
+    # Every 20th channel raised for 10 s from the time DM 300 lines them up: bars, not a burst.
+    path = write_filterbank(tmp_path / 'bars.fil')
+    raw = np.fromfile(path, dtype=np.uint8)
+    head = raw.size - 20000 * NCHANS * 4
+    samples = raw[head:].view(np.float32).reshape(-1, NCHANS).copy()
+    delays = own_data.sweep_seconds(300.0, FCH1 + np.arange(NCHANS) * FOFF)
+    for c in range(0, NCHANS, 20):
+        t = 90.0 + delays[c]
+        samples[int(t / TSAMP):int((t + 10) / TSAMP), c] += 1.0
+    path.write_bytes(raw[:head].tobytes() + samples.tobytes())
+    assert own_data.smoothness(own_data.load(path, 300.0, 90.0, width, PLAN)) < 0.3
+
+
+def test_the_route_keeps_a_smooth_burst_and_nothing_near_the_beam_s_edges(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    from lotaas_reprocessing import fetch_models
+    classify = classifier(tmp_path, monkeypatch)
+    width = 13
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 1.0)], nsamp=24000)
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: {})
+    planes = type('Candidate', (), {'tsamp': TSAMP, 'dmt': np.zeros((256, 256)), 'dedispersed': np.zeros((256, NCHANS))})()
+    monkeypatch.setattr(classify, 'fetch_inputs', lambda *args, **kwargs: (planes, None, None, 1))
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n'
+                          f'300.0\t20.0\t{60.0 + (width - 1) / 2 * TSAMP}\t7630\t{width}\n')
+    info = {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'}
+    limits = {'min_dm': 2.0, 'min_snr': 8.0, 'min_own_snr': 4.0, 'min_own_fraction': 0.5}
+    route = {'min_dm': 100.0, 'fetch_max_width_seconds': 0.05, 'min_smoothness': 0.6, 'edge_seconds': 20.0,
+             'tiers': [{'max_width_seconds': 0.5, 'min_own_snr': 5.0, 'max_ratio': 0.8}]}
+    kept = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'a'), info, limits=dict(limits, dispersed=route),
+                                        tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
+        smooth = db.execute("SELECT smoothness FROM detections WHERE detection_type='dispersed'").fetchone()[0]
+    edge = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'b'), info,
+                                        limits=dict(limits, dispersed=dict(route, edge_seconds=70.0)),
+                                        tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert kept['dispersed'] == 1 and smooth > 0.6 and edge['dispersed'] == 0

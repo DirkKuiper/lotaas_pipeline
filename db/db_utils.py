@@ -49,18 +49,19 @@ def update_beam_run(row_id, outcome, num_candidates=None, num_redetections=None,
     conn.commit()
     conn.close()
 
-def insert_detection(beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name=None, classification_probability=None, beam_run_id=None, time_seconds=None, sample_number=None, model_probabilities=None, own_snr=None, dispersion_ratio=None, dm_galactic=None):
+def insert_detection(beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name=None, classification_probability=None, beam_run_id=None, time_seconds=None, sample_number=None, model_probabilities=None, own_snr=None, dispersion_ratio=None, dm_galactic=None, smoothness=None):
     """
     Inserts a detection record. model_probabilities: {model: probability} of each FETCH model;
     own_snr: its S/N on its own data (own_data.measure); dispersion_ratio: own_data.dispersion_ratio;
-    dm_galactic: the Milky Way's largest DM along the beam's line of sight (NE2001, YMW16).
+    dm_galactic: the Milky Way's largest DM along the beam's line of sight (NE2001, YMW16);
+    smoothness: own_data.smoothness of what the dispersed route judged.
     """
     conn = sqlite3.connect(DB_PATH, timeout=120)
     c = conn.cursor()
     c.execute("""
         INSERT INTO detections (
-            beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name, classification_probability, beam_run_id, time_seconds, sample_number, model_probabilities, own_snr, dispersion_ratio, dm_galactic
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            beam_id, candidate_dm, snr, width_samples, detection_type, pulsar_name, classification_probability, beam_run_id, time_seconds, sample_number, model_probabilities, own_snr, dispersion_ratio, dm_galactic, smoothness
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         beam_id, float(candidate_dm), float(snr), int(width_samples), detection_type, pulsar_name,
         probability_value(classification_probability), beam_run_id,
@@ -71,6 +72,7 @@ def insert_detection(beam_id, candidate_dm, snr, width_samples, detection_type, 
         None if own_snr is None else float(own_snr),
         None if dispersion_ratio is None else float(dispersion_ratio),
         None if dm_galactic is None else float(dm_galactic),
+        None if smoothness is None else float(smoothness),
     ))
     conn.commit()
     conn.close()

@@ -8,7 +8,7 @@ from your.utils.math import normalise
 from your.candidate import crop
 from fetch.utils import get_model
 from lotaas_reprocessing.filterbank import FilterbankFile
-from lotaas_reprocessing.own_data import dispersion_ratio, load as load_own, measure as measure_own
+from lotaas_reprocessing.own_data import dispersion_ratio, load as load_own, measure as measure_own, near_edge, smoothness
 from matplotlib.gridspec import GridSpec
 import pygedm
 from astropy.coordinates import SkyCoord
@@ -188,7 +188,9 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     the tier's min_own_snr for its width) and that fades when dedispersed too
     little (own_data.dispersion_ratio <= max_ratio) is recorded as 'dispersed'
     instead of 'rejected'. Wider than fetch_max_width_seconds at those DMs,
-    FETCH is not asked ('unjudged'): only the route judges. With the route's
+    FETCH is not asked ('unjudged'): only the route judges. Its min_smoothness
+    (own_data.smoothness) keeps out a signal in scattered single channels, and
+    edge_seconds what comes near the start or end of the beam. With the route's
     own min_snr below min_snr, clusters at its DMs between the two reach it
     too, unjudged by FETCH, under the route's `faint` cuts as well. FETCH accepted 23% of FRB-like bursts
     injected at DM 300-2500 that the search found, and almost none wider than
@@ -410,15 +412,19 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     # Let in by the route's own, lower S/N gate: its stricter cuts too.
                     tier = {'min_own_snr': max(tier['min_own_snr'], route['faint']['min_own_snr']),
                             'max_ratio': min(tier['max_ratio'], route['faint']['max_ratio'])}
-                ratio = None
-                if tier and own is not None and own >= tier['min_own_snr']:
+                ratio = smooth = None
+                if (tier and own is not None and own >= tier['min_own_snr']
+                        and not (route.get('edge_seconds') and near_edge(filterbank_file, dm, tcand, route['edge_seconds']))):
                     try:
-                        ratio, _ = dispersion_ratio(load_own(filterbank_file, dm, tcand, width, plan, bad_channels),
-                                                    baseline_seconds=baseline_seconds or 2.0,
+                        stretch_data = load_own(filterbank_file, dm, tcand, width, plan, bad_channels)
+                        ratio, _ = dispersion_ratio(stretch_data, baseline_seconds=baseline_seconds or 2.0,
                                                     baseline_widths=baseline_widths or 64)
+                        if ratio is not None and ratio <= tier['max_ratio'] and route.get('min_smoothness') is not None:
+                            smooth = smoothness(stretch_data)
                     except Exception as error:
                         logger.warning("Dispersion not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)
-                dispersed = ratio is not None and ratio <= tier['max_ratio']
+                dispersed = (ratio is not None and ratio <= tier['max_ratio']
+                             and (smooth is None or smooth >= route['min_smoothness']))
                 if dispersed:
                     counts["dispersed"] += 1
                     logger.info("Dispersed at DM=%.2f t=%.3f: own S/N %.1f, ratio %.2f", dm, tcand, own, ratio)
@@ -439,6 +445,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     own_snr=own,
                     dispersion_ratio=ratio,
                     dm_galactic=dm_galactic,
+                    smoothness=smooth,
                 )
                 if not dispersed:
                     continue

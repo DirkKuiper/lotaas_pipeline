@@ -292,6 +292,48 @@ def dispersion_ratio(own, factors=DISPERSION_FACTORS, baseline_seconds=SEARCH_BA
     return max(snrs[f] for f in factors) / snrs[1.0], snrs[1.0]
 
 
+def smoothness(own, span=16):
+    """The fraction of the candidate's on-pulse spectrum left by a running median over `span` channels.
+
+    Dedispersed at its DM, each channel's excess in the boxcar over its own level around it (10 widths
+    either side, the pulse and 2 widths out), in frequency order: about 1 for a burst, whose spectrum is
+    smooth over many channels even when band-limited; small when the signal sits in scattered single
+    channels, as a channel's level jump for seconds does. On 29 September 2026, 428 injected FRB-like
+    bursts the route queued read 0.83 or more in 90% (all but one >= 0.6); the route's 159 real
+    candidates of the night before, almost all such bars, read a median 0.37 (47 >= 0.6).
+    0 when the excess sums to nothing; None when the stretch does not reach 10 widths either side.
+    """
+    data = own.masked()
+    data[(own.rfi_mask | (np.abs(data) > MAX_CELL_SIGMA)) & np.isfinite(data)] = 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        data = data - np.nanmean(data, axis=1, keepdims=True)
+        aligned = dedisperse(data, own.freqs, own.tsamp, own.dm)
+        w = own.width
+        start = int(round(-own.t0 / own.tsamp - (w - 1) / 2))
+        lo, hi = start - 10 * w, start + 11 * w
+        if lo < 0 or hi > aligned.shape[0]:
+            return None
+        # Each channel's excess over its own level around the candidate (the pulse and 2 widths either side out).
+        near = np.concatenate([aligned[lo:start - 2 * w], aligned[start + 3 * w:hi]])
+        on = np.nanmean(aligned[start:start + w], axis=0) - np.nanmedian(near, axis=0)
+        order = np.argsort(own.freqs)
+        spectrum = on[order]
+        half = span // 2
+        smooth = np.array([np.nanmedian(spectrum[max(0, i - half):i + half]) for i in range(len(spectrum))])
+        total = np.nansum(spectrum)
+        # Nothing standing above its surroundings is no burst either.
+        return float(np.nansum(smooth) / total) if total > 0 else 0.0
+
+
+def near_edge(source, dm, tcand, seconds):
+    """Whether a candidate, with its whole sweep, comes within `seconds` of the start or end of its beam: where the
+    data begin and end, levels settle and circular dedispersion wraps, and the route's junk gathered."""
+    header, data = sigproc.open_data(source)
+    duration = data.shape[0] * float(header['tsamp'])
+    return tcand < seconds or tcand + float(sweep_seconds(dm, sigproc.channel_frequencies(header)).max()) > duration - seconds
+
+
 def load(source, dm, tcand, width_samples, plan, bad=()):
     """The OwnData of a candidate in a flatfielded beam: the stretch the page cuts and the classifier measures."""
     header, block, start, k, _, _, _ = stretch(source, dm, tcand, width_samples, plan)
