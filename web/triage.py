@@ -20,6 +20,8 @@ observation shows, not by looking at the candidate:
 - an undispersed burst in the candidate's own beam: a burst of events there
   at one moment at scattered DMs, none standing out (indexer.sweeps), where a
   pulse would peak at its DM and fall away. Verdict 'rfi'.
+- a FETCH positive below S/N 8, the gate FETCH has had since 28 September
+  2026, whose own data show it under LOCAL_CLEAR. Verdict 'noise'.
 - the data dropping out beside it: samples within its sweep where most
   channels fall below a fifth of their level (lost 2-bit rows, recording
   gaps; the flatfield fills them since 29 September 2026). Verdict 'rfi'.
@@ -77,6 +79,9 @@ LOCAL_CLEAR = 6.0
 # Not dispersed: at least this fraction of its S/N at DM 0 where a real pulse of its width would keep at most
 # UNDISPERSED_EXPECTED. Of 59 catalogued pulsars' pulses with page S/N 6 or more (DM 4.8-74) none: they keep
 # 3-76% at DM 0; it settled 334 of 1,023 open candidates (29 September 2026).
+# FETCH positives found before its gate rose to S/N 8 (28 September 2026), below it, whose own data show
+# them under LOCAL_CLEAR: none of 24 such at DM 100-365 showed a pulse by eye (29 September).
+FETCH_GATE = 8.0
 UNDISPERSED_RATIO = 0.8
 # A step: a dip at its DM at least this fraction of its height, within three widths. Of 59 catalogued pulsars'
 # pulses none dipped below -0.32; of the 477 FETCH positives still open after the rules above, 326 did
@@ -137,6 +142,12 @@ def settled(db):
                                   f"S/N of the review page): no pulse there. A pulse reads 0.8-1.4 times its search "
                                   f"S/N there; what the search found was the rest of interference it saw through.",
                                   r['dm'], r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, c.snr, l.local_snr, {earlier} AS earlier FROM candidates c
+            JOIN sp_local_snr l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND c.type='candidate' AND c.snr < ?
+            AND l.local_snr IS NOT NULL AND l.local_snr < ? AND {NOT_KNOWN}""", (FETCH_GATE, LOCAL_CLEAR)):
+        out.setdefault(r['key'], (r['key'], 'noise', f"Search S/N {r['snr']:.1f}, below the S/N {FETCH_GATE:g} FETCH "
+                                  f"has been asked about since 28 September 2026, and S/N {r['local_snr']:.1f} on its "
+                                  f"own data: at this S/N FETCH's positives were noise.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, d.dropout, {earlier} AS earlier FROM candidates c
             JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND d.dropout > 0 AND {NOT_KNOWN}"""):
         out.setdefault(r['key'], (r['key'], 'rfi', f"The data drop out beside it: {r['dropout']} samples within its "

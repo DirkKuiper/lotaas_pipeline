@@ -858,3 +858,15 @@ def test_a_pulse_at_the_dm_of_a_pulsar_a_few_degrees_away_is_known(cfg, campaign
     monkeypatch.setenv('LOTAAS_PSRCAT', str(other))
     indexer.triage()
     assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == []
+
+
+@pytest.mark.parametrize('snr, local, label', [(7.5, 5.0, 'noise'), (7.5, 6.5, None), (9.0, 5.8, None)])
+def test_a_fetch_positive_below_the_gate_its_own_data_barely_show_is_noise(cfg, campaign, snr, local, label):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET snr=? WHERE key=?', (snr, key))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,0)', (key, local))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ([label] if label else [])
