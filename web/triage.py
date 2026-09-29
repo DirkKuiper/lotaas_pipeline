@@ -183,11 +183,23 @@ def settled(db):
 
 
 NEARBY_RADIUS_DEG = 5.0
+# A pulsar of NEARBY_BRIGHT_MJY or more at 135 MHz (psrcat.flux_at) reaches further, and its pulses, bright
+# over a range of trial DMs, are clustered further from its DM: B0329+54 (26.76) at DM 24.6-27.9 in L528445
+# and L528465, up to 5.3 degrees away (29 September 2026).
+NEARBY_BRIGHT_RADIUS_DEG = 10.0
+NEARBY_BRIGHT_MJY = 1000.0
+
+
+def _bright(pulsar):
+    from euroflash import psrcat
+    mjy, _ = psrcat.flux_at(pulsar)
+    return mjy is not None and mjy >= NEARBY_BRIGHT_MJY
 
 
 def _at_a_nearby_pulsars_dm(db, earlier):
     """[(key, 'known', note, dm, earlier)] of open queued candidates at the DM of a catalogued pulsar within
-    NEARBY_RADIUS_DEG of their beam, within max(1, 2%): its pulses through the station beam's sidelobes. Giant
+    NEARBY_RADIUS_DEG of their beam, within max(1, 2%), or of a bright one within NEARBY_BRIGHT_RADIUS_DEG,
+    within max(3, 10%): its pulses through the station beam's sidelobes. Giant
     pulses of the Crab (DM 56.77) reached 22 beams of L549917, 4-4.8 degrees away, as sporadic single pulses
     that neither a fold nor a rotation sequence attributes (29 September 2026)."""
     from euroflash import psrcat
@@ -199,9 +211,11 @@ def _at_a_nearby_pulsars_dm(db, earlier):
             JOIN beams b ON b.dir=c.dir WHERE {QUEUED} AND {OPEN} AND {NOT_KNOWN} AND b.ra_deg IS NOT NULL"""):
         place = (round(r['ra_deg'], 1), round(r['dec_deg'], 1))
         if place not in cones:
-            cones[place] = psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], NEARBY_RADIUS_DEG)
+            cones[place] = [p for p in psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], NEARBY_BRIGHT_RADIUS_DEG)
+                            if p['separation_deg'] <= NEARBY_RADIUS_DEG or _bright(p)]
         for pulsar in cones[place]:
-            if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= max(1.0, 0.02 * pulsar['dm']):
+            tolerance = max(3.0, 0.1 * pulsar['dm']) if _bright(pulsar) else max(1.0, 0.02 * pulsar['dm'])
+            if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= tolerance:
                 name = pulsar.get('bname') or pulsar['name']
                 name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
                 out.append((r['key'], 'known', f"At the DM of {name} ({pulsar['dm']:g}), "

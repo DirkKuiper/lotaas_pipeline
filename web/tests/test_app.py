@@ -870,3 +870,21 @@ def test_a_fetch_positive_below_the_gate_its_own_data_barely_show_is_noise(cfg, 
         indexer.db.execute('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,0)', (key, local))
     indexer.triage()
     assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ([label] if label else [])
+
+
+@pytest.mark.parametrize('flux, label', [('S400     1500\n', 'known'), ('', None)])
+def test_a_bright_pulsar_is_recognised_further_away_and_further_from_its_dm(cfg, campaign, monkeypatch, tmp_path,
+                                                                           flux, label):
+    # B0329+54 (DM 26.76, 1.5 Jy at 400 MHz) at DM 24.6-27.9, up to 5.3 degrees away.
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key, ra, dec = indexer.db.execute("""SELECT c.key, b.ra_deg, b.dec_deg FROM candidates c JOIN beams b
+        ON b.dir=c.dir WHERE c.kind='sp' AND c.type='candidate'""").fetchone()
+    near_dec = dec + 7.0 if dec < 80 else dec - 7.0
+    catalogue = tmp_path / f'bright{bool(flux)}.db'
+    catalogue.write_text(f'PSRJ     J0332+5434\nPSRB     B0329+54\nRAJ      {int(ra / 15):02d}:{int(ra % 15 * 4):02d}:00\n'
+                         f'DECJ     {"+" if near_dec >= 0 else "-"}{int(abs(near_dec)):02d}:00:00\nDM       '
+                         f'32.5\n{flux}P0       0.7145\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ([label] if label else [])
