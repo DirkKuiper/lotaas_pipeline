@@ -258,3 +258,41 @@ def test_the_route_keeps_a_smooth_burst_and_nothing_near_the_beam_s_edges(tmp_pa
                                         limits=dict(limits, dispersed=dict(route, edge_seconds=70.0)),
                                         tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
     assert kept['dispersed'] == 1 and smooth > 0.6 and edge['dispersed'] == 0
+
+
+def levelled_beam(path, pulse, row=32, level=True):
+    """Noise levelled per `row`-sample 2-bit row, as early-cycle beams are flatfielded (preproc/flatfield_fil.py
+    level_rows), then a dispersed pulse (time, dm, width, amplitude) added: an injection into a prepared beam."""
+    write_filterbank(path)
+    raw = np.fromfile(path, dtype=np.uint8)
+    head = raw.size - 20000 * NCHANS * 4
+    samples = raw[head:].view(np.float32).reshape(-1, NCHANS).copy()
+    if level:
+        n = samples.shape[0] // row * row
+        rows = samples[:n].reshape(-1, row, NCHANS)
+        rows -= rows.mean(axis=1, keepdims=True) - 10.0
+    t, dm, width, amplitude = pulse
+    freqs = FCH1 + np.arange(NCHANS) * FOFF
+    for channel, start in enumerate(np.round((t + own_data.sweep_seconds(dm, freqs)) / TSAMP).astype(int)):
+        samples[start:start + width, channel] += amplitude
+    path.write_bytes(raw[:head].tobytes() + samples.tobytes())
+    return path
+
+
+def test_a_pulse_in_row_levelled_data_is_measured_as_the_search_saw_it(tmp_path):
+    """At the search's k of 16 the means of levelled rows mirror in pairs, and the RFI mask computed on them took
+    every burst; at k 32 they hold no noise. The mask is the search's own, at native resolution, and k-sample
+    means without noise give way to finer ones."""
+    plan = [{'low_dm': 0.0, 'high_dm': 200.0, 'downsample': 16}, {'low_dm': 200.0, 'high_dm': 3000.0, 'downsample': 32}]
+    width = 32
+    for dm, k in ((100.0, 16), (400.0, 8)):
+        beam = levelled_beam(tmp_path / f'levelled-{dm:.0f}.fil', (70.0, dm, width, 0.5))
+        _, block, _, used, _, _, _ = own_data.stretch(beam, dm, 70.0, width, plan)
+        assert used == k
+        own = own_data.load(beam, dm, 70.0 + (width - 1) / 2 * TSAMP, width, plan)
+        track = [(int(round((-own.t0 + s * own.tsamp) / own.tsamp)), c)
+                 for c, s in enumerate(own_data.sweep_seconds(dm, own.freqs) / own.tsamp)]
+        assert np.mean([own.rfi_mask[i, c] for i, c in track if i < own.data.shape[0]]) < 0.2
+        assert own.local_snr(baseline_seconds=2.0, baseline_widths=8) > 10
+    white = levelled_beam(tmp_path / 'white.fil', (70.0, 400.0, width, 0.5), level=False)
+    assert own_data.stretch(white, 400.0, 70.0, width, plan)[3] == 32
