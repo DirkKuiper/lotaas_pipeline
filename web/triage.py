@@ -30,6 +30,9 @@ observation shows, not by looking at the candidate:
   without the zero-DM filter): an undispersed burst or step. Verdict 'rfi'.
 - a step: at its DM, a dip beside it half as deep as its height or more,
   below DM 100 (a flatfielded pulse dips a third at most). Verdict 'rfi'.
+- a wide event (32 samples or more) below DM 100 in an LT5_004 beam, within
+  a second and its width of a 24.16 s block boundary, where each channel's
+  level steps, and no more dispersed than a step. Verdict 'rfi'.
 - a dispersed event at the DM of a catalogued pulsar within 5 degrees
   (max(1, 2%)): its pulses through the sidelobes, as the Crab's giant pulses
   in 22 beams of L549917. Verdict 'known'.
@@ -170,6 +173,19 @@ def settled(db):
                                   f"{r['snr_min']:.1f} beside it at its DM, where a pulse dips to a third of its "
                                   f"height at most. A level stepping down and up again (2-bit requantisation).",
                                   r['dm'], r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, c.item, c.time, c.width, d.snr_dm, d.snr_zero, {earlier} AS earlier
+            FROM candidates c JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND c.dm < ?
+            AND c.width >= ? AND d.snr_dm > 0 AND d.snr_zero >= ? * d.snr_dm AND c.time IS NOT NULL AND {NOT_KNOWN}""",
+            (BLOCK_MAX_DM, BLOCK_MIN_WIDTH, UNDISPERSED_RATIO)):
+        if not _lt5(r['item']):
+            continue
+        offset = r['time'] - round(r['time'] / LT5_BLOCK_SECONDS) * LT5_BLOCK_SECONDS
+        if abs(offset) <= r['width'] * LOTAAS_TSAMP + 1.0:
+            out.setdefault(r['key'], (r['key'], 'rfi', f"At a {LT5_BLOCK_SECONDS:.2f} s block boundary ({offset:+.2f} s), "
+                                      f"where each channel's level steps in LT5_004 beams flatfielded before 29 "
+                                      f"September 2026, {r['width']} samples wide and no more dispersed than a step "
+                                      f"(S/N {r['snr_zero']:.1f} at DM 0, {r['snr_dm']:.1f} at its DM).", r['dm'],
+                                      r['earlier']))
     for key, label, note, dm, before in _at_a_nearby_pulsars_dm(db, earlier):
         out.setdefault(key, (key, label, note, dm, before))
     catalogue = _catalogue_dms()
@@ -183,10 +199,28 @@ def settled(db):
 
 
 NEARBY_RADIUS_DEG = 5.0
+# LT5_004 beams step in each channel every 3072 samples (euroflash.campaign.LT5_BLOCK); the flatfield levels
+# them since 29 September 2026. Wide events at such a boundary, no more dispersed than a step, are the step:
+# 14 wide FETCH positives at DM 6-100 reviewed that day all lay within a second of one.
+LOTAAS_TSAMP = 0.00786432
+LT5_BLOCK_SECONDS = 3072 * LOTAAS_TSAMP
+BLOCK_MAX_DM = 100.0
+BLOCK_MIN_WIDTH = 32
+
+
+def _lt5(item):
+    """LT5_004 observations are numbered from L400000 on; early-cycle ones below."""
+    try:
+        return int(item.split('_L', 1)[1].split('_', 1)[0]) >= 400000
+    except (IndexError, ValueError):
+        return False
 # A pulsar of NEARBY_BRIGHT_MJY or more at 135 MHz (psrcat.flux_at) reaches further, and its pulses, bright
 # over a range of trial DMs, are clustered further from its DM: B0329+54 (26.76) at DM 24.6-27.9 in L528445
 # and L528465, up to 5.3 degrees away (29 September 2026).
 NEARBY_BRIGHT_RADIUS_DEG = 10.0
+# In the pulsar's own beam its pulses are bright too: B1112+50 (DM 9.19) at DM 10.2-10.5 in L169690, 1.66 s
+# (its period) apart. Within this separation, max(2, 10%).
+OWN_BEAM_DEG = 0.25
 NEARBY_BRIGHT_MJY = 1000.0
 
 
@@ -214,7 +248,8 @@ def _at_a_nearby_pulsars_dm(db, earlier):
             cones[place] = [p for p in psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], NEARBY_BRIGHT_RADIUS_DEG)
                             if p['separation_deg'] <= NEARBY_RADIUS_DEG or _bright(p)]
         for pulsar in cones[place]:
-            tolerance = max(3.0, 0.1 * pulsar['dm']) if _bright(pulsar) else max(1.0, 0.02 * pulsar['dm'])
+            wide = _bright(pulsar) or pulsar['separation_deg'] <= OWN_BEAM_DEG
+            tolerance = max(3.0 if _bright(pulsar) else 2.0, 0.1 * pulsar['dm']) if wide else max(1.0, 0.02 * pulsar['dm'])
             if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= tolerance:
                 name = pulsar.get('bname') or pulsar['name']
                 name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"

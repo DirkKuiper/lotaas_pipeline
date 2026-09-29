@@ -888,3 +888,19 @@ def test_a_bright_pulsar_is_recognised_further_away_and_further_from_its_dm(cfg,
     monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
     indexer.triage()
     assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ([label] if label else [])
+
+
+@pytest.mark.parametrize('time, zero, label', [(24.1592 * 40 + 0.3, 11.0, 'rfi'),   # at a block boundary
+                                               (24.1592 * 40 + 9.0, 11.0, None),    # between two
+                                               (24.1592 * 40 + 0.3, 3.0, None)])    # dispersed: a pulse
+def test_a_wide_event_at_an_lt5_block_boundary_is_the_step(cfg, campaign, time, zero, label):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET time=?, width=91 WHERE key=?', (time, key))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                           'snr_min, measured, version) VALUES (?,12,?,0.9,0,-1,0,2)', (key, zero))
+    indexer.triage()
+    found = [v for v in verdicts(cfg) if v['key'] == key]
+    assert [v['label'] for v in found] == ([label] if label else [])
