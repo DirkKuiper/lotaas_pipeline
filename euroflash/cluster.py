@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shlex
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -359,6 +360,16 @@ def main():
         collect(destination/'ledger-snapshot.sqlite',a.ledger,node+'/'+a.run_name)
         return destination
 
+    def collect_retrying(node,excludes,attempts=10,pause=60):
+        """collect_node, again while the campaign ledger stays locked past its timeout (other runs collecting)."""
+        for attempt in range(attempts):
+            try:
+                return collect_node(node,excludes)
+            except sqlite3.OperationalError as error:
+                if 'locked' not in str(error) or attempt==attempts-1:
+                    raise
+                time.sleep(pause)
+
     def collect_live(node):
         """Import a consistent ledger while work runs; final products stay separate."""
         snapshot(node,work,a.control_dir)
@@ -450,13 +461,16 @@ def main():
                           if not todo:
                               time.sleep(15)
                   note(f'GPU node {node} exited {state["gpu"]}; {len(relayed)} beams relayed, {len(failed_relays)} failed')
-                  # The GPU node's own stages are over: record them and free it for the next batch.
-                  collect_node(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
-                  state['collected']=True
-                  (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
+                  # Tell the CPU node no more beams will come before anything that can fail: on 29 September
+                  # 2026 the collect below met a locked ledger and raised, .done never reached efc-cpu-02,
+                  # and its runner polled for six hours.
                   done=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/.done'],
                                                  capture_output=True,text=True).stdout or '{}')
                   put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
+                  # The GPU node's own stages are over: record them and free it for the next batch.
+                  collect_retrying(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                  state['collected']=True
+                  (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
                   cleanup(node)
                   state['cleaned']=True
                   while cpu_thread.is_alive():
@@ -466,7 +480,7 @@ def main():
                               collect_live(cpu)
                           except Exception as error:
                               note(f'Live ledger update deferred for {cpu}: {error}')
-                  collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                  collect_retrying(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
                   cleanup(cpu)
                   return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays
               except Exception:
