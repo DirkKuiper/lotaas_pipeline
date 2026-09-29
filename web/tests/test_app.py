@@ -904,3 +904,28 @@ def test_a_wide_event_at_an_lt5_block_boundary_is_the_step(cfg, campaign, time, 
     indexer.triage()
     found = [v for v in verdicts(cfg) if v['key'] == key]
     assert [v['label'] for v in found] == ([label] if label else [])
+
+
+def test_events_too_little_dispersed_to_tell_in_many_beams_of_an_observation_are_interference(cfg, campaign):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key, item = indexer.db.execute("SELECT key, item FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()
+    rows = [(key, item)] + [(f'candidate|{item.replace("BEAM025", f"BEAM{b:03d}")}|DM3.000|W9|SN9.000',
+                             item.replace('BEAM025', f'BEAM{b:03d}')) for b in (30, 31, 32)]
+    with indexer.db:
+        for n, (k, i) in enumerate(rows[1:]):
+            indexer.db.execute("INSERT INTO candidates(key, id, kind, type, item, dm, snr, width, time) "
+                               "VALUES (?, ?, 'sp', 'candidate', ?, 3.0, 9.0, 9, 100.0)", (k, f'x{n}', i))
+        for k, _ in rows:
+            indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                               'snr_min, measured, version) VALUES (?,9,8.5,0.8,0,-1,0,2)', (k,))
+    indexer.triage()
+    assert not [v for v in verdicts(cfg) if v['note'].startswith('No more dispersed')], 'four beams: could be a source'
+    extra = (f'candidate|{item.replace("BEAM025", "BEAM033")}|DM3.000|W9|SN9.000', item.replace('BEAM025', 'BEAM033'))
+    with indexer.db:
+        indexer.db.execute("INSERT INTO candidates(key, id, kind, type, item, dm, snr, width, time) "
+                           "VALUES (?, 'x33', 'sp', 'candidate', ?, 3.0, 9.0, 9, 100.0)", extra)
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                           'snr_min, measured, version) VALUES (?,9,8.5,0.8,0,-1,0,2)', (extra[0],))
+    indexer.triage()
+    assert len([v for v in verdicts(cfg) if v['note'].startswith('No more dispersed')]) == 5

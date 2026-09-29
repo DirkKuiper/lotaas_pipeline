@@ -33,6 +33,9 @@ observation shows, not by looking at the candidate:
 - a wide event (32 samples or more) below DM 100 in an LT5_004 beam, within
   a second and its width of a 24.16 s block boundary, where each channel's
   level steps, and no more dispersed than a step. Verdict 'rfi'.
+- an event no more dispersed than an undispersed burst where its DM is too
+  small to tell (a pulse would keep over half its S/N at DM 0), when such
+  events reach BLIND_BEAMS or more beams of the observation. Verdict 'rfi'.
 - a dispersed event at the DM of a catalogued pulsar within 5 degrees
   (max(1, 2%)): its pulses through the sidelobes, as the Crab's giant pulses
   in 22 beams of L549917. Verdict 'known'.
@@ -186,6 +189,22 @@ def settled(db):
                                       f"September 2026, {r['width']} samples wide and no more dispersed than a step "
                                       f"(S/N {r['snr_zero']:.1f} at DM 0, {r['snr_dm']:.1f} at its DM).", r['dm'],
                                       r['earlier']))
+    # Events that cannot be told from undispersed (a pulse of their width would keep over half its S/N at DM 0,
+    # and they keep 80%), counted by the beams of their observation that have one: a source is at one place.
+    blind = [dict(r) for r in db.execute(f"""SELECT c.key, c.dm, c.item, {earlier} AS earlier FROM candidates c
+            JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND d.snr_dm > 0
+            AND d.expected_zero > ? AND d.snr_zero >= ? * d.snr_dm AND {NOT_KNOWN}""",
+            (UNDISPERSED_EXPECTED, UNDISPERSED_RATIO))]
+    beams = {}
+    for r in blind:
+        observation, _, beam = r['item'].partition('_SAP')
+        beams.setdefault(observation, set()).add(beam)
+    for r in blind:
+        n = len(beams[r['item'].partition('_SAP')[0]])
+        if n >= BLIND_BEAMS:
+            out.setdefault(r['key'], (r['key'], 'rfi', f"No more dispersed than an undispersed burst, as are such "
+                                      f"events in {n} beams of this observation: a source on the sky is in one or a "
+                                      f"few neighbouring beams.", r['dm'], r['earlier']))
     for key, label, note, dm, before in _at_a_nearby_pulsars_dm(db, earlier):
         out.setdefault(key, (key, label, note, dm, before))
     catalogue = _catalogue_dms()
@@ -206,6 +225,8 @@ LOTAAS_TSAMP = 0.00786432
 LT5_BLOCK_SECONDS = 3072 * LOTAAS_TSAMP
 BLOCK_MAX_DM = 100.0
 BLOCK_MIN_WIDTH = 32
+# Beams of one observation with events no more dispersed than a burst at DM 0 (L169691: 53; 2013 2-bit steps).
+BLIND_BEAMS = 5
 
 
 def _lt5(item):
