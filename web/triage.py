@@ -26,6 +26,8 @@ observation shows, not by looking at the candidate:
 - a candidate as strong at DM 0 as at its own DM, where a real pulse of its
   width would lose half its S/N or more (dynspec.Snippet.dispersion_evidence,
   without the zero-DM filter): an undispersed burst or step. Verdict 'rfi'.
+- a step: at its DM, a dip beside it half as deep as its height or more,
+  below DM 100 (a flatfielded pulse dips a third at most). Verdict 'rfi'.
 - the classifier's redetection of a catalogued pulsar in its own beam, at the
   pulsar's DM. Verdict 'known'.
 - a candidate the search put at S/N 7 or more whose own data show under
@@ -73,6 +75,11 @@ LOCAL_CLEAR = 6.0
 # UNDISPERSED_EXPECTED. Of 59 catalogued pulsars' pulses with page S/N 6 or more (DM 4.8-74) none: they keep
 # 3-76% at DM 0; it settled 334 of 1,023 open candidates (29 September 2026).
 UNDISPERSED_RATIO = 0.8
+# A step: a dip at its DM at least this fraction of its height, within three widths. Of 59 catalogued pulsars'
+# pulses none dipped below -0.32; of the 477 FETCH positives still open after the rules above, 326 did
+# (29 September 2026). Only below BIPOLAR_MAX_DM, where no FRB is: the dispersed route judges those above.
+BIPOLAR_RATIO = -0.5
+BIPOLAR_MAX_DM = 100.0
 UNDISPERSED_EXPECTED = 0.5
 ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
           'rotation': 'the pulses keep its rotation'}
@@ -142,6 +149,13 @@ def settled(db):
                                   f"{r['snr_dm']:.1f} at its DM, where a pulse of its width would keep "
                                   f"{100 * r['expected_zero']:.0f}% at DM 0. An undispersed burst or step the "
                                   f"dedispersion smeared into this DM.", r['dm'], r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, d.snr_dm, d.snr_min, {earlier} AS earlier FROM candidates c
+            JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND c.dm < ? AND d.snr_dm > 0
+            AND d.snr_min <= ? * d.snr_dm AND {NOT_KNOWN}""", (BIPOLAR_MAX_DM, BIPOLAR_RATIO)):
+        out.setdefault(r['key'], (r['key'], 'rfi', f"A step, not a pulse: S/N {r['snr_dm']:.1f} with a dip to "
+                                  f"{r['snr_min']:.1f} beside it at its DM, where a pulse dips to a third of its "
+                                  f"height at most. A level stepping down and up again (2-bit requantisation).",
+                                  r['dm'], r['earlier']))
     catalogue = _catalogue_dms()
     for r in db.execute(f"""SELECT c.key, c.dm, c.pulsar, {earlier} AS earlier FROM candidates c
             WHERE {QUEUED} AND {OPEN} AND c.type='known_pulsar' AND c.pulsar IS NOT NULL"""):

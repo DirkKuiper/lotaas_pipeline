@@ -214,7 +214,7 @@ def test_dispersion_evidence_tells_a_pulse_from_an_undispersed_burst_and_a_dropo
         (tmp_path / name).mkdir()
     pulse = snippet(tmp_path / 'pulse', dm=30.0, amplitude=1.5).dispersion_evidence()
     assert pulse['snr_dm'] > 8 and pulse['snr_zero'] < 0.5 * pulse['snr_dm'] and pulse['expected_zero'] < 0.5
-    assert pulse['dropout'] == 0
+    assert pulse['dropout'] == 0 and pulse['snr_min'] > -0.5 * pulse['snr_dm']
     # A broadband burst at the moment an event found at DM 30 would have been.
     drift = 30.0 * float(np.mean(dynspec.sweep_seconds(1.0, FCH1 + np.arange(NCHANS) * FOFF)))
     burst = snippet(tmp_path / 'burst', dm=30.0, amplitude=0.0, undispersed=15.0 + drift).dispersion_evidence()

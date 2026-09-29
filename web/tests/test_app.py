@@ -798,22 +798,25 @@ def test_positives_only_fetch_model_d_passed_come_last_and_say_so(cfg, campaign)
 
 
 @pytest.mark.parametrize('evidence, label', [
-    ((12.0, 11.0, 0.2, 0), 'rfi'),        # as strong at DM 0, where a pulse would keep a fifth: undispersed
-    ((12.0, 3.0, 0.2, 0), None),          # a pulse: most of it gone at DM 0
-    ((12.0, 11.0, 0.8, 0), None),         # too narrow a sweep to tell: stays
-    ((12.0, 2.0, 0.2, 40), 'rfi'),        # the data drop out beside it
+    ((12.0, 11.0, 0.2, 0, -1.0), 'rfi'),        # as strong at DM 0, where a pulse would keep a fifth: undispersed
+    ((12.0, 3.0, 0.2, 0, -1.0), None),          # a pulse: most of it gone at DM 0
+    ((12.0, 11.0, 0.8, 0, -1.0), None),         # too narrow a sweep to tell: stays
+    ((12.0, 2.0, 0.2, 40, -1.0), 'rfi'),        # the data drop out beside it
+    ((12.0, 3.0, 0.2, 0, -8.0), 'rfi'),         # a dip beside it two thirds as deep: a step
 ])
 def test_what_a_snippet_shows_of_dispersion_settles_undispersed_events_and_dropouts(cfg, campaign, evidence, label):
     indexer = Indexer(cfg)
     indexer.run_pass()
     key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
     with indexer.db:
-        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion VALUES (?,?,?,?,?,?)', (key, *evidence, 0.0))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                           'snr_min, measured, version) VALUES (?,?,?,?,?,?,0,2)', (key, *evidence))
     indexer.triage()
     found = [v for v in verdicts(cfg) if v['key'] == key]
     assert [v['label'] for v in found] == ([label] if label else [])
     if label:
-        assert ('Not dispersed' if not evidence[3] else 'The data drop out') in found[0]['note']
+        why = 'The data drop out' if evidence[3] else 'A step' if evidence[4] < -6 else 'Not dispersed'
+        assert why in found[0]['note']
 
 
 def test_a_catalogued_pulsars_redetection_in_its_own_beam_is_known(cfg, campaign, monkeypatch, tmp_path):

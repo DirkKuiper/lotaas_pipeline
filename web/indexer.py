@@ -1110,13 +1110,15 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,?)', measured)
         return len(measured)
 
+    DISPERSION_VERSION = 2
+
     def measure_dispersion(self, limit=300):
         """What each open queued candidate's snippet shows of its dispersion (Snippet.dispersion_evidence), once."""
         rows = self.db.execute("""SELECT c.key, s.path FROM candidates c JOIN snippets s ON s.key=c.key
             WHERE c.kind='sp' AND c.type IN ('candidate', 'dispersed', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
-            AND NOT EXISTS (SELECT 1 FROM sp_dispersion d WHERE d.key=c.key)
+            AND NOT EXISTS (SELECT 1 FROM sp_dispersion d WHERE d.key=c.key AND COALESCE(d.version, 1) >= ?)
             AND NOT EXISTS (SELECT 1 FROM review_state.reviews v WHERE v.key=c.key AND v.reviewer != 'auto-triage')
-            LIMIT ?""", (limit,)).fetchall()
+            LIMIT ?""", (self.DISPERSION_VERSION, limit)).fetchall()
         if not rows:
             return 0
         from web.dynspec import Snippet
@@ -1127,9 +1129,11 @@ class Indexer:
             except Exception as error:
                 logger.warning('Could not measure the dispersion of %s: %s', key, error)
                 continue
-            measured.append((key, e['snr_dm'], e['snr_zero'], e['expected_zero'], e['dropout'], time.time()))
+            measured.append((key, e['snr_dm'], e['snr_zero'], e['expected_zero'], e['dropout'], time.time(),
+                             e['snr_min'], self.DISPERSION_VERSION))
         with self.db:
-            self.db.executemany('INSERT OR REPLACE INTO sp_dispersion VALUES (?,?,?,?,?,?)', measured)
+            self.db.executemany('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                                'measured, snr_min, version) VALUES (?,?,?,?,?,?,?,?)', measured)
         return len(measured)
 
     def repair_positions(self):

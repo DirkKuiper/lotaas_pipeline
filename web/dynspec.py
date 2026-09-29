@@ -389,14 +389,19 @@ class Snippet(OwnData):
         """{snr_dm, snr_zero, expected_zero, dropout}: the boxcar S/N at the candidate (its DM, width and time);
         the best at DM 0 (widths 1, 2 and its own) where an undispersed event found at this DM would sit, with no
         zero-DM filter, which would remove it; the fraction of its S/N a real pulse of this width keeps at DM 0
-        (Cordes & McLaughlin); and how many samples within its sweep, a second either side, have most channels
-        below DROP_LEVEL of their level, which no sky signal does (lost 2-bit rows, recording gaps)."""
+        (Cordes & McLaughlin); how many samples within its sweep, a second either side, have most channels
+        below DROP_LEVEL of their level, which no sky signal does (lost 2-bit rows, recording gaps); and
+        snr_min, the deepest boxcar S/N within three widths of it at its DM: a level stepping down and up
+        again dips as deep as it rises, a flatfielded pulse does not (59 catalogued pulsars' pulses: -0.32 of
+        their peak at most)."""
         data = self.masked()
         times = self.times
         width, tsamp = self.width, self.tsamp
         at_dm = self.snr(self.band_series(data, self.dm), times, width)
         near = np.abs(times) <= width * tsamp / 2 + tsamp
         snr_dm = float(np.nanmax(at_dm[near])) if np.isfinite(at_dm[near]).any() else None
+        around = np.abs(times) <= 3 * width * tsamp + 2 * tsamp
+        snr_min = float(np.nanmin(at_dm[around])) if np.isfinite(at_dm[around]).any() else None
         zero = self.band_series(data, 0.0)
         drift = self.dm * float(np.mean(sweep_seconds(1.0, self.freqs)))
         sweep = self.dm * self.per_dm
@@ -414,7 +419,8 @@ class Snippet(OwnData):
         lost = (((self.data[:, good] < self.DROP_LEVEL * level[good]) | (self.data[:, good] == 0)).mean(axis=1)
                 > self.DROP_FRACTION)
         around = np.abs(times - drift) <= sweep / 2 + width * tsamp + 1.0
-        return {'snr_dm': snr_dm, 'snr_zero': snr_zero, 'expected_zero': expected, 'dropout': int(lost[around].sum())}
+        return {'snr_dm': snr_dm, 'snr_zero': snr_zero, 'expected_zero': expected, 'dropout': int(lost[around].sum()),
+                'snr_min': snr_min}
 
     def dm_response(self, points=121, mask=(), auto_mask=True):
         """Boxcar S/N near the candidate time over a fine grid around its DM and a

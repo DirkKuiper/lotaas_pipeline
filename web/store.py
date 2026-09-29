@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS sp_local_snr (key TEXT PRIMARY KEY, local_snr REAL, m
 -- What a candidate's snippet shows of its dispersion (dynspec.Snippet.dispersion_evidence): its S/N at its DM and
 -- at DM 0, what a real pulse would keep at DM 0, and samples where the data dropped out near it.
 CREATE TABLE IF NOT EXISTS sp_dispersion (key TEXT PRIMARY KEY, snr_dm REAL, snr_zero REAL, expected_zero REAL,
-    dropout INTEGER, measured REAL);
+    dropout INTEGER, measured REAL, snr_min REAL, version INTEGER);
 -- A single pulse of a catalogued pulsar seen away from its own beam (indexer.derive_known).
 CREATE TABLE IF NOT EXISTS sp_known (key TEXT PRIMARY KEY, pulsar TEXT, name TEXT, separation_deg REAL,
     route TEXT, z REAL);
@@ -175,7 +175,9 @@ ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
          # 28 September 2026), and whether a candidate's DM is well beyond it.
          'detections': (('model_probabilities', 'TEXT'), ('dm_galactic', 'REAL')),
          'candidates': (('models', 'TEXT'), ('votes', 'INTEGER'), ('d_only', 'INTEGER'), ('dm_galactic', 'REAL'),
-                        ('extragalactic', 'INTEGER'))}
+                        ('extragalactic', 'INTEGER')),
+         # The deepest dip beside the candidate, and which measurement made the row (indexer re-measures older).
+         'sp_dispersion': (('snr_min', 'REAL'), ('version', 'INTEGER'))}
 
 
 # Reads through a memory map of the file, and a larger page cache for what the
