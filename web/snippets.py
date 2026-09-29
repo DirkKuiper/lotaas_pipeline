@@ -29,7 +29,9 @@ import time
 import yaml
 
 from web import sigproc
-from lotaas_reprocessing.own_data import downsample_for, stretch  # noqa: F401
+import numpy as np
+
+from lotaas_reprocessing.own_data import downsample_for, native_rfi_mask, stretch  # noqa: F401
 from web.keys import item_of, parse_item, short_id, sp_key
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,14 @@ def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None, sear
     snippet_header = dict(header, tstart=header['tstart'] + start * tsamp / 86400.0, tsamp=tsamp * k,
                           rawdatafile=Path(source).name)
     sigproc.write(partial, snippet_header, block)
+    # The search's RFI mask on the snippet's grid, from the native samples only the source holds: the same
+    # statistics over k-sample means took whole bursts in row-levelled early-cycle beams (own_data).
+    mask_name = None
+    if k > 1:
+        mask_name = name + '.rfimask.npy'
+        with open(out_dir / (mask_name + '.partial'), 'wb') as stream:
+            np.save(stream, np.packbits(native_rfi_mask(source, start, start + len(block) * k, k), axis=1))
+        os.replace(out_dir / (mask_name + '.partial'), out_dir / mask_name)
     stat = Path(source).stat()
     meta = {'key': key, 'id': short_id(key), 'type': detection['type'], 'item': detection['item'],
             'dm': dm, 'snr': detection.get('snr'), 'width_samples': width,
@@ -84,6 +94,7 @@ def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None, sear
             'bad_channels': sorted({int(c) for c in bad_channels}),
             'baseline_seconds': (search or {}).get('baseline_seconds'),
             'baseline_widths': (search or {}).get('baseline_widths', 64),
+            'rfi_mask': mask_name,
             'source': str(source), 'source_bytes': stat.st_size, 'source_mtime': stat.st_mtime,
             'created': time.time(), **(provenance or {})}
     path.with_suffix('.json').write_text(json.dumps(meta, indent=1))

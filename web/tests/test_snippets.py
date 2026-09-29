@@ -81,3 +81,21 @@ def test_backfill_finds_a_surviving_copy(cfg, campaign):
     assert result['backfilled'] == 1
     meta = json.loads(next(cfg.snippets.glob('*.json')).read_text())
     assert meta['how'] == 'found on disk'
+
+
+def test_a_decimated_snippet_carries_the_search_s_rfi_mask_taken_at_native_resolution(tmp_path):
+    from lotaas_reprocessing.own_data import native_rfi_mask
+    from web.dynspec import Snippet
+    source = synthetic_filterbank(tmp_path / f'{ITEM}.fil', dm=200.0, t_pulse=10.0, nsamp=12000, burst=(7, 5.0, 12.0, 40.0))
+    path = cut(source, detection(dm=200.0, time_seconds=10.0), tmp_path / 'out', PLAN)
+    meta = json.loads(path.with_suffix('.json').read_text())
+    assert meta['downsample'] == 2 and meta['rfi_mask'] == path.stem + '.rfimask.npy'
+    snippet = Snippet(path)
+    expected = native_rfi_mask(source, meta['start_sample'], meta['start_sample'] + 2 * meta['samples'], 2)
+    assert snippet.rfi_mask.shape == snippet.data.shape and np.array_equal(snippet.rfi_mask, expected)
+    assert snippet.rfi_mask[:, 7].any()                                  # the channel's burst, as the search masked it
+    # A snippet at native resolution needs none; an older one without it approximates the mask on its samples.
+    assert json.loads(cut(source, detection(), tmp_path / 'native', PLAN).with_suffix('.json').read_text())['rfi_mask'] is None
+    meta['rfi_mask'] = None
+    path.with_suffix('.json').write_text(json.dumps(meta))
+    assert Snippet(path).rfi_mask.shape == snippet.data.shape

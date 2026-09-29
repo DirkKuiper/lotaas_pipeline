@@ -198,12 +198,21 @@ class Snippet(OwnData):
         self.header, raw = sigproc.open_data(path)
         self.meta = json.loads(path.with_suffix('.json').read_text())
         k = int(self.meta.get('downsample', 1))
+        # The search's RFI mask, taken at native resolution when the snippet was cut (snippets.cut);
+        # older snippets approximate it on their own samples.
+        mask = None
+        if self.meta.get('rfi_mask'):
+            try:
+                mask = np.unpackbits(np.load(path.with_name(self.meta['rfi_mask'])), axis=1,
+                                     count=int(self.header['nchans'])).astype(bool)
+            except (OSError, ValueError):
+                mask = None
         # t0: time of sample 0 relative to the candidate (arrival at the highest frequency); the
         # sample grid is the observation's, which the search's RFI and baseline blocks follow.
         super().__init__(np.array(raw, dtype=np.float32), sigproc.channel_frequencies(self.header),
                          float(self.header['tsamp']), float(self.meta['t0_relative']), float(self.meta['dm']),
                          round(self.meta['width_samples'] / self.meta['downsample']),
-                         int(self.meta.get('start_sample', 0)) // k, self.meta.get('bad_channels', []), k)
+                         int(self.meta.get('start_sample', 0)) // k, self.meta.get('bad_channels', []), k, mask)
         # The running baseline the search removed from this beam (snippets.cut records it; older
         # snippets, and beams searched before baseline_widths was set, had 2 s doubled to 64 widths).
         self.search_baseline = (self.meta.get('baseline_seconds') or SEARCH_BASELINE_SECONDS,
