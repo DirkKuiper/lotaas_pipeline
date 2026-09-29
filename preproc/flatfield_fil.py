@@ -259,6 +259,10 @@ def main():
         print(f'Row levelling: {row or "none"} (edge-jump excess {excess})', flush=True)
     elif a.level_rows:
         row = int(a.level_rows)
+        # Recorded as 'auto' records it, for what injects into these beams later (euroflash.injections).
+        with open(record + '.partial', 'w') as f:
+            json.dump({'row': row, 'edge_excess': None}, f)
+        os.replace(record + '.partial', record)
     apply_flatfield(files, mean, row)
 
 

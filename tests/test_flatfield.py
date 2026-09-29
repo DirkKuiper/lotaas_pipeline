@@ -102,3 +102,19 @@ def test_gaps_and_dropped_rows_are_filled_and_left_out_of_the_mean(tmp_path):
     others = [written[n][32:64] for n in written if n != 20]
     expected = written[13][32:64] / np.mean(others, axis=0)
     assert np.allclose(other[32:64], expected, rtol=1e-5)
+
+
+def test_a_given_block_length_is_levelled_and_recorded_for_the_injections(tmp_path):
+    """LT5_004 beams step in each channel every 3072 samples (euroflash.campaign.LT5_BLOCK); here blocks of 64."""
+    import json
+    sap = tmp_path/'SAP000'
+    written = beams(sap, range(13, 74), seed=4)
+    stepped = written[20].copy()
+    stepped[64:128] *= 1.05                                  # one channel-wide block raised by 5%
+    write(sap/'B020'/'downsampled_L1_SAP000_BEAM020_32bit.fil', stepped)
+    done = flatfield(sap, '--level-rows', '64')
+    assert done.returncode == 0, done.stderr
+    assert json.loads((sap/'row-levelling.json').read_text()) == {'row': 64, 'edge_excess': None}
+    flat = read(sap/'B020'/'downsampled_L1_SAP000_BEAM020_32bit_ff.fil')
+    means = flat.reshape(-1, 64, 8).mean(axis=1)
+    assert np.ptp(means, axis=0).max() < 1e-4, 'every block at its channel level'

@@ -253,7 +253,7 @@ class Runner:
             arguments += ['--mean', mean]
             item += '_late_' + '-'.join(p.parent.name for p in paths)
         if level_rows:
-            # Early-cycle beams: level each 2-bit row the conversion left at the requantiser's level.
+            # Level each 2-bit row (early-cycle beams) or block of rows (LT5_004) at its channel's level.
             arguments += ['--level-rows', level_rows]
         self.step(item, 'flatfield', self.command('preproc/flatfield_fil.py', arguments),
                   [p.with_name(p.stem+'_ff.fil') for p in paths])

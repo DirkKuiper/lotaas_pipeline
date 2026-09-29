@@ -206,7 +206,7 @@ def test_lt5_keeps_first_claim_and_spider_saps_do_not_block_its_staging(tmp_path
     ready = campaign.state.rows("SELECT key FROM saps WHERE state='prepared' ORDER BY position")
     assert [r['key'] for r in ready] == ['L1000001_SAP000', 'L261129_SAP000'], 'LT5_004 is dispatched first'
     levelled = {'spider' if 'L261129' in str(sap) else 'lta': rows for sap, rows in campaign.runner.levelled}
-    assert levelled == {'spider': 'auto', 'lta': None}, 'only early-cycle beams are levelled'
+    assert levelled == {'spider': 'auto', 'lta': '3072'}, 'early-cycle beams per row found, LT5 per 24 s block'
 
 
 def test_spider_saps_are_dispatched_alone_with_their_own_settings(tmp_path, monkeypatch, fake_ssh):

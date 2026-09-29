@@ -256,6 +256,9 @@ def staging_window(schedule, default, now=None):
     return int(current[1]['max_staging_saps']), current[1].get('label')
 
 
+LT5_BLOCK = 3072         # samples of 7.864 ms: six 2-bit rows, 24.16 s
+
+
 def flattened(path):
     """The flatfielded filterbank beside a converted one."""
     path = Path(path)
@@ -712,8 +715,11 @@ class Campaign:
 
     @staticmethod
     def levelling(sap):
-        """Early-cycle SPIDER beams are also levelled per 2-bit row (preproc/flatfield_fil.py --level-rows)."""
-        return {'level_rows': 'auto'} if sap.get('source') == 'spider' else {}
+        """Early-cycle SPIDER beams are also levelled per 2-bit row (preproc/flatfield_fil.py --level-rows), and
+        LT5_004 beams per block of LT5_BLOCK samples: each channel steps at every sixth 4.03 s row, by about 6
+        sigma of a row's mean in L543309, L528473 and L549909 (29 September 2026). Those steps were the wide
+        low-DM FETCH positives and the 24.2 s folds; levelling them costs a 1 s pulse 4% of its S/N."""
+        return {'level_rows': 'auto'} if sap.get('source') == 'spider' else {'level_rows': str(LT5_BLOCK)}
 
     def stalled(self, files, outstanding, now):
         """A few beams short, with no beam of the SAP converted for --partial-after-hours."""
