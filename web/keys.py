@@ -30,6 +30,11 @@ def short_id(key):
     return hashlib.sha1(key.encode()).hexdigest()[:12]
 
 
+def long_id(key):
+    """The id of a key whose short_id another key already has (indexer.resolve_id_collisions)."""
+    return hashlib.sha1(key.encode()).hexdigest()[:16]
+
+
 def beam_label(item):
     parsed = parse_item(item)
     return f'{parsed[0]} SAP{parsed[1]:03d} B{parsed[2]:03d}' if parsed else item

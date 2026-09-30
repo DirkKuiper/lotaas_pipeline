@@ -102,6 +102,8 @@ CREATE INDEX IF NOT EXISTS candidates_item ON candidates(item, kind);
 CREATE TABLE IF NOT EXISTS candidate_counts (type TEXT, pilot INTEGER, incoherent INTEGER, coincident INTEGER,
     known INTEGER, n INTEGER);
 CREATE TABLE IF NOT EXISTS snippets (id TEXT PRIMARY KEY, key TEXT, path TEXT, meta TEXT);
+-- Keys whose short_id another key already has, and the longer id they take instead (indexer.resolve_id_collisions).
+CREATE TABLE IF NOT EXISTS id_collisions (key TEXT PRIMARY KEY, id TEXT);
 -- derive() looks up every candidate's snippet by key: 150 s a pass over 280,000 candidates without it.
 CREATE INDEX IF NOT EXISTS snippets_key ON snippets(key);
 -- A single-pulse candidate and the events at its moment in other beams of its observation:

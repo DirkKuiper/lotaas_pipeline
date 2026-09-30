@@ -972,3 +972,18 @@ def test_events_too_little_dispersed_to_tell_in_many_beams_of_an_observation_are
                            'snr_min, measured, version) VALUES (?,9,8.5,0.8,0,-1,0,2)', (extra[0],))
     indexer.triage()
     assert len([v for v in verdicts(cfg) if v['note'].startswith('No more dispersed')]) == 5
+
+
+def test_keys_sharing_a_short_id_do_not_stop_the_queue(cfg, campaign, monkeypatch):
+    # 30 September 2026: two of 12.9 million keys shared a 12-character id, and every rebuild of the candidates
+    # failed on the UNIQUE id for 14 hours. Here every key shares one.
+    import web.indexer as indexer_module
+    monkeypatch.setattr(indexer_module, 'short_id', lambda key: 'same')
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    rows = dict(indexer.db.execute('SELECT key, id FROM candidates').fetchall())
+    assert len(rows) >= 2 and len(set(rows.values())) == len(rows)
+    assert list(rows.values()).count('same') == 1 and rows[min(rows)] == 'same'
+    indexer.run_pass()                                    # the ids stay what they were
+    assert dict(indexer.db.execute('SELECT key, id FROM candidates').fetchall()) == rows
+    assert Indexer(cfg).long_ids == {k: v for k, v in rows.items() if v != 'same'}

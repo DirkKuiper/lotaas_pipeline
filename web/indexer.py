@@ -22,13 +22,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import time
 from urllib.parse import quote
 
 from web import store
-from web.keys import item_of, parse_item, short_id, sp_key
+from web.keys import item_of, long_id, parse_item, short_id, sp_key
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,8 @@ class Indexer:
                                       ('key_of', 5, key_of), ('short_id', 1, short_id),
                                       ('fetch_votes', 1, fetch_votes), ('fetch_d_only', 1, fetch_d_only)]:
             self.db.create_function(name, arity, function, deterministic=True)
+        self.long_ids = dict(self.db.execute('SELECT key, id FROM id_collisions'))
+        self.db.create_function('candidate_id', 1, lambda key: self.long_ids.get(key) or short_id(key))
 
     # -------------------------------------------------------------- state
     def sync_state(self):
@@ -543,12 +546,40 @@ class Indexer:
             self.db.executemany('INSERT INTO candidate_counts VALUES (?,?,?,?,?,?)', counts)
 
     def derive(self):
+        try:
+            self._derive()
+        except sqlite3.IntegrityError as error:
+            if 'candidates.id' not in str(error) or not self.resolve_id_collisions():
+                raise
+            self._derive()
+
+    def resolve_id_collisions(self):
+        """Give every key whose short_id another key already has a longer id (id_collisions); returns how many new.
+
+        short_id is 12 hex characters (48 bits). Among 12.9 million keys two unconfirmed detections shared one
+        (30 September 2026), and each derive, which rebuilds the candidates in one transaction, failed on the
+        UNIQUE id: no candidate found after 29 September 20:01 reached the queue for 14 hours. Of each group
+        the first key in sort order keeps its id, which its snippet carries too."""
+        rows = self.db.execute("""SELECT GROUP_CONCAT(key, char(10)) FROM (
+                SELECT short_id(key) AS id, key FROM (SELECT key FROM detections WHERE key IS NOT NULL
+                                                      UNION SELECT key FROM periodic))
+            GROUP BY id HAVING COUNT(*) > 1""").fetchall()
+        new = {key: long_id(key) for (keys,) in rows for key in sorted(keys.split(chr(10)))[1:]
+               if key not in self.long_ids}
+        if new:
+            with self.db:
+                self.db.executemany('INSERT OR REPLACE INTO id_collisions VALUES (?,?)', new.items())
+            self.long_ids.update(new)
+            logger.warning('Candidate ids: %d keys share a short id with another; they take a longer one', len(new))
+        return len(new)
+
+    def _derive(self):
         db = self.db
         with db:
             db.execute('DELETE FROM candidates')
             db.execute(f"""INSERT INTO candidates(key,id,kind,type,item,dm,snr,width,time,probability,pulsar,
                     fp16,run_name,detections,found,models,votes,d_only,dm_galactic,extragalactic)
-                SELECT d.key, short_id(d.key), 'sp', d.detection_type, d.item, d.candidate_dm, d.snr,
+                SELECT d.key, candidate_id(d.key), 'sp', d.detection_type, d.item, d.candidate_dm, d.snr,
                        d.width_samples, d.time_seconds, d.classification_probability, d.pulsar_name,
                        b.fp16, b.run_name, g.n, f.processing_timestamp, d.model_probabilities,
                        fetch_votes(d.model_probabilities), fetch_d_only(d.model_probabilities), d.dm_galactic,
@@ -560,7 +591,7 @@ class Indexer:
                 LEFT JOIN beam_runs f ON f.id=g.first""")
             db.execute("""INSERT OR REPLACE INTO candidates(key,id,kind,type,item,dm,snr,period,statistic,fp16,
                     run_name,pilot,dir,detections)
-                SELECT p.key, short_id(p.key), 'periodic',
+                SELECT p.key, candidate_id(p.key), 'periodic',
                        CASE WHEN p.rfi_like THEN 'periodic_rfi' ELSE 'periodic' END,
                        p.item, p.dm, p.statistic, p.period, p.statistic, p.fp16, b.run_name, p.pilot, p.dir, 1
                 FROM periodic p LEFT JOIN beams b ON b.dir=p.dir""")
