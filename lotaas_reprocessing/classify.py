@@ -8,7 +8,8 @@ from your.utils.math import normalise
 from your.candidate import crop
 from fetch.utils import get_model
 from lotaas_reprocessing.filterbank import FilterbankFile
-from lotaas_reprocessing.own_data import dispersion_ratio, load as load_own, measure as measure_own, near_edge, smoothness
+from lotaas_reprocessing.own_data import (RFI_BLOCK_SAMPLES, dispersion_ratio, load as load_own, measure as measure_own,
+                                         near_edge, rfi_mask as search_rfi_mask, smoothness)
 from matplotlib.gridspec import GridSpec
 import pygedm
 from astropy.coordinates import SkyCoord
@@ -34,7 +35,14 @@ VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 # Without a width cap or budget every cluster above the floors is classified.
 DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
                   "max_fetch_candidates": None, "min_local_snr": None, "min_raw_local_snr": None,
-                  "min_own_snr": None, "min_own_fraction": None, "dispersed": None}
+                  "min_own_snr": None, "min_own_fraction": None, "dispersed": None,
+                  "fetch_bowtie": None, "fetch_clean": False}
+
+# FETCH's DM-time plane spans at least DM +- this (its only span until 30 September 2026).
+FETCH_MIN_RANGE_DM = 5.0
+# No pulse reaches this in one channel and sample once channels are scaled to their noise (own_data).
+FETCH_MAX_CELL_SIGMA = 50.0
+K_DM = 4148.808
 
 
 def snr_gate(limits, dm):
@@ -107,12 +115,71 @@ def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
     return plane.reshape(dmsteps, time_size, decimate).mean(2)
 
 
+def fetch_range_dm(freqs, native_tsamp, width, bowtie, time_size=256, floor=FETCH_MIN_RANGE_DM):
+    """Half-span of the DM-time plane in which a pulse's arms travel `bowtie` of the way from the plane's centre to
+    its corners, and at least `floor`.
+
+    The plane's time pixel is half the boxcar, so its 256 pixels span 128 widths whatever the width. A fixed +-5 DM
+    shifts the band's edges by +-0.54 s over 119-151 MHz: a bowtie for a 31 ms pulse (+-35 pixels) but a vertical bar
+    for a 252 ms one (+-4 pixels), and at DM >= 1200 dispersion inside a 48.8 kHz channel alone makes 87% of bursts
+    at least 0.2 s wide. `your`'s +-DM, which FETCH was trained with, lets the arms leave the plane within a few rows
+    and did worst of all. On the 28 September FETCH benchmark (1,290 candidates), 0.5 raised the injected FRBs FETCH
+    passes from 23% to 38% (64% with fetch_clean), with pulsar pulses unchanged at 94% (99%); 1.0 passed
+    15 of 94 wide junk candidates without fetch_clean (0.5: 4) (benchmarks/fetch-models-2026-09-30).
+    """
+    if not bowtie:
+        return floor
+    f = np.asarray(freqs, dtype=float)
+    sweep_per_dm = K_DM * (f.min() ** -2 - f.max() ** -2)
+    pixel = max(1, int(width) // 2) * native_tsamp
+    return max(floor, bowtie * (time_size / 2) * pixel / sweep_per_dm)
+
+
+def clean_chunk(data, good, rfi_mask=False, baseline_pixels=None, pixel=1):
+    """The chunk as the search sees its data, roughly: each channel on its own median and noise (1.4826 MAD), cells
+    beyond FETCH_MAX_CELL_SIGMA and bad channels at 0, and the mean over good channels subtracted at each sample (the
+    search's zero-DM filter). With `rfi_mask`, the channel blocks the search's RFI mask flags (own_data.rfi_mask,
+    1000-sample blocks from the chunk's start, whose grid may be offset from the search's) are zeroed before the
+    zero-DM. With `baseline_pixels`, each channel's running median over that many `pixel`-sample means is then
+    subtracted: single channels high or low for seconds (level bars, row steps) go, a pulse a few pixels long stays.
+
+    FETCH was otherwise given the flatfielded chunk as it is: its noisiest channels set the normalised planes' scale
+    and the beam's broadband wander rivalled the burst. Measured on the 28 September benchmark with the bowtie range
+    (fetch_range_dm 0.5; benchmarks/fetch-models-2026-09-30, FETCH's a-f, any above 0.5), injected FRBs passed:
+    38% as given, 64% cleaned, 77% with the RFI mask, 96% with the mask and a 64-pixel baseline (92% of those
+    >= 0.2 s wide); pulsar pulses 94% -> 99%; of 94 wide junk candidates FETCH now sees, 0, 0, 0 and 9 passed.
+    """
+    step = max(1, len(data) // 8192)
+    centre = np.median(data[::step], axis=0)
+    scale = 1.4826 * np.median(np.abs(data[::step] - centre), axis=0)
+    scale[~good | (scale <= 0)] = 1.0
+    z = ((data - centre) / scale).astype(np.float32)
+    z[:, ~good] = 0.0
+    z[np.abs(z) > FETCH_MAX_CELL_SIGMA] = 0.0
+    if rfi_mask:
+        z[search_rfi_mask(data, RFI_BLOCK_SAMPLES)] = 0.0
+    z[:, good] -= z[:, good].mean(axis=1, keepdims=True)
+    if baseline_pixels:
+        from scipy.ndimage import median_filter
+        pixel = max(1, int(pixel))
+        n = len(z) // pixel
+        if n >= 4:
+            means = z[:n * pixel].reshape(n, pixel, z.shape[1]).mean(axis=1)
+            base = np.repeat(median_filter(means, size=(min(int(baseline_pixels), n), 1), mode='nearest'), pixel, axis=0)
+            if len(base) < len(z):
+                base = np.vstack([base, np.repeat(base[-1:], len(z) - len(base), axis=0)])
+            z = (z - base).astype(np.float32)
+            z[:, ~good] = 0.0
+    return z
+
+
 def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_size=256, freq_size=256, dm_size=256,
-                 range_dm=5.0):
+                 range_dm=FETCH_MIN_RANGE_DM, bowtie=None, clean=False):
     """The candidate and FETCH's two inputs, the frequency-time plane X and the DM-time plane Y.
 
-    Y spans DM +- range_dm (`your`, which FETCH was trained with, spans +-DM).
-    Returns (cand, X, Y, time_decimate_factor); cand keeps both planes for the plot.
+    Y spans DM +- range_dm, or wider with `bowtie` (fetch_range_dm; `your`, which FETCH was trained with, spans
+    +-DM). With `clean` (True, or clean_chunk's options {rfi_mask, baseline_pixels}) the chunk is first cleaned.
+    Returns (cand, X, Y, time_decimate_factor); cand keeps both planes, and cand.fetch_range_dm, for the plot.
     """
     cand = Candidate(
         fp=filterbank_file,
@@ -125,18 +192,24 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
         device=-1,
     )
     cand.get_chunk()
+    good = np.ones(cand.data.shape[1], dtype=bool)
     if bad_channels:
         bad = np.asarray(bad_channels, dtype=int)
         if np.any((bad < 0) | (bad >= cand.data.shape[1])):
             raise ValueError('Classifier channel mask is outside the filterbank')
         # Honour the search's file-order channel mask in both FETCH
         # planes; a noisy channel must not reappear at classification.
-        good = np.ones(cand.data.shape[1], dtype=bool)
         good[bad] = False
         if not good.any():
             raise ValueError('No usable channels for classification')
         baseline = np.median(cand.data[::max(1, len(cand.data) // 8192), good])
         cand.data[:, bad] = baseline
+    if clean:
+        options = clean if isinstance(clean, dict) else {}
+        cand.data = clean_chunk(cand.data, good, rfi_mask=bool(options.get('rfi_mask')),
+                                baseline_pixels=options.get('baseline_pixels'), pixel=max(1, width // 2))
+    range_dm = fetch_range_dm(cand.chan_freqs, cand.native_tsamp, width, bowtie, time_size, floor=range_dm)
+    cand.fetch_range_dm = range_dm
     time_decimate_factor = max(1, width // 2)  # Ensure it's at least 1
     cand.dmt = dm_time_plane(cand, time_decimate_factor, time_size, dm_size, range_dm)
     cand.dedisperse()
@@ -392,7 +465,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     fetch_models = load_models(model_names, factory=get_model)
                 # Proceed with classification of non-pulsar candidates
                 cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
-                                                                time_size, freq_size, dm_size)
+                                                                time_size, freq_size, dm_size,
+                                                                bowtie=limits['fetch_bowtie'], clean=limits['fetch_clean'])
                 fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
                                for name, model in fetch_models.items()}
                 if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
@@ -432,7 +506,9 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     logger.info("Dispersed at DM=%.2f t=%.3f: own S/N %.1f, ratio %.2f", dm, tcand, own, ratio)
                     if unjudged:                       # the review plot shows what FETCH would have seen
                         cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr,
-                                                                        bad_channels, time_size, freq_size, dm_size)
+                                                                        bad_channels, time_size, freq_size, dm_size,
+                                                                        bowtie=limits['fetch_bowtie'],
+                                                                        clean=limits['fetch_clean'])
                 insert_detection(
                     beam_id=beam_id,
                     beam_run_id=beam_run_id,
@@ -484,7 +560,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             # labelling the beginning of the cropped window as the event time.
             plot_tsamp = cand.tsamp * time_decimate_factor
             dm_time_axis = (np.arange(cand.dmt.shape[1]) - (cand.dmt.shape[1]-1)/2) * plot_tsamp
-            dm_values = np.linspace(dm - 5, dm + 5, dm_size)
+            half_range = getattr(cand, 'fetch_range_dm', FETCH_MIN_RANGE_DM)
+            dm_values = np.linspace(dm - half_range, dm + half_range, dm_size)
             # Per-channel robust normalisation for display. A handful of
             # channels carry a persistent offset or several times the typical
             # noise, and on a shared colour scale they stripe the waterfall
