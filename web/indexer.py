@@ -1110,15 +1110,19 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,?)', measured)
         return len(measured)
 
-    DISPERSION_VERSION = 2
+    DISPERSION_VERSION = 3
+    # Version 3 (30 September 2026) added the undispersed cause, which the triage uses from this DM on
+    # (triage.UNDISPERSED_CAUSAL_MIN_DM); below it version 2 measured all the triage needs.
+    CAUSE_VERSION_MIN_DM = 100.0
 
     def measure_dispersion(self, limit=300):
         """What each open queued candidate's snippet shows of its dispersion (Snippet.dispersion_evidence), once."""
         rows = self.db.execute("""SELECT c.key, s.path FROM candidates c JOIN snippets s ON s.key=c.key
             WHERE c.kind='sp' AND c.type IN ('candidate', 'dispersed', 'known_pulsar') AND COALESCE(c.pilot, 0)=0
-            AND NOT EXISTS (SELECT 1 FROM sp_dispersion d WHERE d.key=c.key AND COALESCE(d.version, 1) >= ?)
+            AND NOT EXISTS (SELECT 1 FROM sp_dispersion d WHERE d.key=c.key
+                            AND COALESCE(d.version, 1) >= CASE WHEN c.dm >= ? THEN ? ELSE 2 END)
             AND NOT EXISTS (SELECT 1 FROM review_state.reviews v WHERE v.key=c.key AND v.reviewer != 'auto-triage')
-            LIMIT ?""", (self.DISPERSION_VERSION, limit)).fetchall()
+            LIMIT ?""", (self.CAUSE_VERSION_MIN_DM, self.DISPERSION_VERSION, limit)).fetchall()
         if not rows:
             return 0
         from web.dynspec import Snippet
@@ -1130,10 +1134,12 @@ class Indexer:
                 logger.warning('Could not measure the dispersion of %s: %s', key, error)
                 continue
             measured.append((key, e['snr_dm'], e['snr_zero'], e['expected_zero'], e['dropout'], time.time(),
-                             e['snr_min'], self.DISPERSION_VERSION))
+                             e['snr_min'], self.DISPERSION_VERSION, e['zero_filtered'], e['zero_chance'],
+                             e['snr_dm_filtered'], e['kept_filtered']))
         with self.db:
             self.db.executemany('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
-                                'measured, snr_min, version) VALUES (?,?,?,?,?,?,?,?)', measured)
+                                'measured, snr_min, version, zero_filtered, zero_chance, snr_dm_filtered, '
+                                'kept_filtered) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', measured)
         return len(measured)
 
     def repair_positions(self):

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import numpy as np
 import pytest
 
@@ -820,6 +821,48 @@ def test_what_a_snippet_shows_of_dispersion_settles_undispersed_events_and_dropo
     if label:
         why = 'The data drop out' if evidence[3] else 'A step' if evidence[4] < -6 else 'Not dispersed'
         assert why in found[0]['note']
+
+
+@pytest.mark.parametrize('cause, label', [
+    ((30.0, 5.0, 12.0, 11.0), None),     # a strong DM-0 event in the sweep, but blanking it leaves the pulse
+    ((30.0, 5.0, 12.0, 3.0), 'rfi'),     # blanking that moment takes the candidate with it: undispersed
+    ((4.5, 5.0, 12.0, 3.0), None),       # a DM-0 peak noise reaches in such a window: nothing to blame
+    ((None, None, None, None), None),    # not measured yet: the old evidence does not settle it at this DM
+])
+def test_from_dm_100_only_an_undispersed_cause_settles_a_candidate(cfg, campaign, cause, label):
+    # The old evidence (as strong at DM 0 anywhere in the sweep) holds in every case: at DM 400 it no longer settles.
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET dm=400.0 WHERE key=?', (key,))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                           'snr_min, measured, version, zero_filtered, zero_chance, snr_dm_filtered, kept_filtered) '
+                           'VALUES (?,12.0,11.0,0.0,0,-1.0,0,3,?,?,?,?)', (key, *cause))
+    indexer.triage()
+    found = [v for v in verdicts(cfg) if v['key'] == key]
+    assert [v['label'] for v in found] == ([label] if label else [])
+    if label:
+        assert 'an undispersed event accounts for it' in found[0]['note']
+
+
+def test_the_old_evidence_settled_verdict_at_high_dm_is_withdrawn(cfg, campaign):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET dm=40.0 WHERE key=?', (key,))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                           'snr_min, measured, version) VALUES (?,12.0,11.0,0.0,0,-1.0,0,2)', (key,))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ['rfi']
+    with indexer.db:                     # the same evidence at DM 400, as the old rule settled it there
+        indexer.db.execute('UPDATE candidates SET dm=400.0 WHERE key=?', (key,))
+        indexer.db.execute('UPDATE sp_dispersion SET version=3, zero_filtered=30.0, zero_chance=5.0, '
+                           'snr_dm_filtered=12.0, kept_filtered=11.0 WHERE key=?', (key,))
+    indexer.triage()
+    state = sqlite3.connect(cfg.reviews_db)
+    assert state.execute('SELECT COUNT(*) FROM triage_withdrawals WHERE key=?', (key,)).fetchone()[0] == 1
 
 
 def test_a_catalogued_pulsars_redetection_in_its_own_beam_is_known(cfg, campaign, monkeypatch, tmp_path):

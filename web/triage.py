@@ -95,6 +95,19 @@ UNDISPERSED_RATIO = 0.8
 BIPOLAR_RATIO = -0.5
 BIPOLAR_MAX_DM = 100.0
 UNDISPERSED_EXPECTED = 0.5
+# Not dispersed from this DM on (30 September 2026) only when an undispersed event accounts for it. There the
+# sweep spans many seconds (91 s at DM 840), and the best DM-0 S/N anywhere within it, on data without the zero-DM
+# filter or running baseline and against noise near the candidate, was the highest of thousands of trials on red
+# noise: the test above settled 176 of 803 injected FRB-like bursts at DM 300-2500 in the levelled chain test,
+# bright ones among them (page S/N 32.9), and 9 catalogued pulsars' pulses at DM 105-524. Now the DM-0 event must
+# stand out from its window's own noise (zero_chance) and blanking it in every channel must take at least
+# UNDISPERSED_KEPT of the candidate's S/N at its DM with it (Snippet.undispersed_cause). That settled none of 661
+# injected bursts or 312 pulsars' pulses, and 4 of the 36 production candidates the old test settled at these DMs;
+# of the other 32, 9 were pulsars' pulses, 20 interference or noise seen by eye, 3 plausible
+# (benchmarks/triage-dispersion-2026-09-30). Steps, which the blanking cannot remove, make candidates only where
+# the sweep is short: below this DM the test above stands.
+UNDISPERSED_CAUSAL_MIN_DM = BIPOLAR_MAX_DM
+UNDISPERSED_KEPT = 0.5
 ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
           'rotation': 'the pulses keep its rotation'}
 LATEST = '(SELECT {0} FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
@@ -163,12 +176,22 @@ def settled(db):
                                   r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, d.snr_dm, d.snr_zero, d.expected_zero, {earlier} AS earlier
             FROM candidates c JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND d.snr_dm > 0
-            AND d.snr_zero >= ? * d.snr_dm AND d.expected_zero <= ? AND {NOT_KNOWN}""",
-            (UNDISPERSED_RATIO, UNDISPERSED_EXPECTED)):
+            AND d.snr_zero >= ? * d.snr_dm AND d.expected_zero <= ? AND c.dm < ? AND {NOT_KNOWN}""",
+            (UNDISPERSED_RATIO, UNDISPERSED_EXPECTED, UNDISPERSED_CAUSAL_MIN_DM)):
         out.setdefault(r['key'], (r['key'], 'rfi', f"Not dispersed: S/N {r['snr_zero']:.1f} at DM 0 against "
                                   f"{r['snr_dm']:.1f} at its DM, where a pulse of its width would keep "
                                   f"{100 * r['expected_zero']:.0f}% at DM 0. An undispersed burst or step the "
                                   f"dedispersion smeared into this DM.", r['dm'], r['earlier']))
+    for r in db.execute(f"""SELECT c.key, c.dm, d.zero_filtered, d.zero_chance, d.snr_dm_filtered, d.kept_filtered,
+            {earlier} AS earlier FROM candidates c JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN}
+            AND c.dm >= ? AND d.snr_dm_filtered > 0 AND d.zero_filtered >= d.zero_chance
+            AND d.kept_filtered <= ? * d.snr_dm_filtered AND d.expected_zero <= ? AND {NOT_KNOWN}""",
+            (UNDISPERSED_CAUSAL_MIN_DM, UNDISPERSED_KEPT, UNDISPERSED_EXPECTED)):
+        out.setdefault(r['key'], (r['key'], 'rfi', f"Not dispersed: an undispersed event accounts for it. At DM 0 "
+                                  f"there is S/N {r['zero_filtered']:.1f} within its sweep, where noise reaches "
+                                  f"{r['zero_chance']:.1f} once in a thousand such windows; with that moment blanked "
+                                  f"in every channel its S/N at its DM falls from {r['snr_dm_filtered']:.1f} to "
+                                  f"{r['kept_filtered']:.1f}.", r['dm'], r['earlier']))
     for r in db.execute(f"""SELECT c.key, c.dm, d.snr_dm, d.snr_min, {earlier} AS earlier FROM candidates c
             JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND c.dm < ? AND d.snr_dm > 0
             AND d.snr_min <= ? * d.snr_dm AND {NOT_KNOWN}""", (BIPOLAR_MAX_DM, BIPOLAR_RATIO)):

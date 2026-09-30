@@ -228,3 +228,20 @@ def test_dispersion_evidence_tells_a_pulse_from_an_undispersed_burst_and_a_dropo
     path.with_suffix('.json').write_text(json.dumps({'dm': 30.0, 't0_relative': -15.0, 'width_samples': 3,
                                                      'downsample': 1, 'tsamp_native': TSAMP, 'bad_channels': []}))
     assert dynspec.Snippet(path).dispersion_evidence()['dropout'] >= 30
+
+
+def test_an_unrelated_spike_in_a_high_dm_sweep_is_not_its_cause(tmp_path):
+    """At DM 120 the sweep spans 13 s: a broadband spike 6.5 s after a real pulse sits where an undispersed event
+    found at this DM would, and the old evidence calls the pulse undispersed. Blanking the spike leaves the pulse."""
+    (tmp_path / 'pulse').mkdir()
+    s = snippet(tmp_path / 'pulse', dm=120.0, amplitude=1.5, undispersed=21.5)
+    e = s.dispersion_evidence()
+    assert e['snr_zero'] >= 0.8 * e['snr_dm']                       # what settled 176 of 803 injected bursts
+    assert e['zero_filtered'] >= e['zero_chance'] > 3               # the spike is real ...
+    assert e['snr_dm_filtered'] > 8 and e['kept_filtered'] > 0.9 * e['snr_dm_filtered']   # ... but not its cause
+
+
+def test_the_chance_snr_follows_the_number_of_trials():
+    assert dynspec.chance_snr(0.5) == pytest.approx(0.0, abs=1e-6)
+    assert dynspec.chance_snr(0.0013499) == pytest.approx(3.0, abs=1e-3)
+    assert 4.6 < dynspec.chance_snr(1e-3 / 500) < dynspec.chance_snr(1e-3 / 50000) < 5.7

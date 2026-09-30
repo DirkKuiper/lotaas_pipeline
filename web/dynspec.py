@@ -23,6 +23,7 @@ from lotaas_reprocessing.single_pulse_quality import local_boxcar_snr
 from lotaas_reprocessing.own_data import (K_DM, MAX_CELL_SIGMA, RFI_BLOCK_SAMPLES,  # noqa: F401
                                           SEARCH_BASELINE_SECONDS, SEARCH_BASELINE_WIDTHS, OwnData, channel_scale,
                                           dedisperse, delays, rfi_mask, sweep_seconds)
+from lotaas_reprocessing.baseline import baseline_window, running_baseline
 
 from web import sigproc
 
@@ -61,6 +62,18 @@ def boxcar(series, width):
     start = (width - 1) // 2
     out[start:start + windows.size] = windows
     return out
+
+
+def chance_snr(probability):
+    """The Gaussian S/N noise exceeds with this one-sided probability."""
+    low, high = 0.0, 40.0
+    for _ in range(80):
+        mid = (low + high) / 2
+        if 0.5 * math.erfc(mid / math.sqrt(2)) > probability:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2
 
 
 def expected_fraction(ddm, width_ms, bandwidth_mhz, centre_ghz):
@@ -420,7 +433,76 @@ class Snippet(OwnData):
                 > self.DROP_FRACTION)
         around = np.abs(times - drift) <= sweep / 2 + width * tsamp + 1.0
         return {'snr_dm': snr_dm, 'snr_zero': snr_zero, 'expected_zero': expected, 'dropout': int(lost[around].sum()),
-                'snr_min': snr_min}
+                'snr_min': snr_min, **self.undispersed_cause()}
+
+    # Noise alone reaches the chance S/N (undispersed_cause) once in this many windows.
+    CHANCE_WINDOWS = 1000
+
+    def undispersed_cause(self):
+        """{zero_filtered, zero_chance, snr_dm_filtered, kept_filtered}: whether an undispersed event accounts for
+        the candidate. zero_filtered is the best DM-0 boxcar S/N (widths 1, 2 and its own) where such an event would
+        sit, on the series the search makes but for its zero-DM filter (RFI mask, cell clip, running baseline), in
+        units of that series' own scatter over the window; zero_chance is what noise reaches there once in
+        CHANCE_WINDOWS windows of as many trials; snr_dm_filtered is the candidate's S/N at its DM on the same series;
+        kept_filtered that S/N again with every channel at the DM-0 event's samples set to its level. An undispersed
+        event the dedispersion smeared into this DM goes with it; a dispersed pulse loses only the channels that cross
+        that moment.
+
+        dispersion_evidence's snr_zero, the best DM-0 S/N over the whole sweep on unfiltered data against noise near
+        the candidate, is thousands of trials on red noise at high DM (91 s at DM 840): measured this way, 0 of 661
+        injected FRB-like bursts and 0 of 312 catalogued pulsars' pulses had an undispersed cause, where snr_zero
+        passed the triage's test for 181 and 5 (benchmarks/triage-dispersion-2026-09-30)."""
+        data = self.masked()
+        times = self.times
+        zero = self._series(data, 0.0, zero_dm=False)
+        drift = self.dm * float(np.mean(sweep_seconds(1.0, self.freqs)))
+        window = (np.abs(times - drift) <= self.dm * self.per_dm / 2 + 2 * self.width * self.tsamp + self.tsamp) \
+            & np.isfinite(zero)
+        best, trials = None, 0.0
+        for trial in sorted({1, 2, self.width}):
+            values = np.where(window, robust_snr(boxcar(zero, trial), window), np.nan)
+            trials += int(window.sum()) / trial
+            if np.isfinite(values).any():
+                i = int(np.nanargmax(values))
+                if best is None or values[i] > best[0]:
+                    best = (float(values[i]), float(times[i]), trial)
+        out = {'zero_filtered': best[0] if best else None,
+               'zero_chance': chance_snr(1 / self.CHANCE_WINDOWS / max(trials, 1.0)),
+               'snr_dm_filtered': self._at_candidate(self._series(data, self.dm, zero_dm=False), times),
+               'kept_filtered': None}
+        if best is not None:
+            rows = np.abs(times - best[1]) <= (best[2] / 2 + self.width + 1) * self.tsamp
+            blanked = data.copy()
+            blanked[rows] = np.where(np.isfinite(blanked[rows]), 0.0, np.nan)   # masked channels stay masked
+            out['kept_filtered'] = self._at_candidate(self._series(blanked, self.dm, zero_dm=False), times)
+        return out
+
+    def _series(self, data, dm, zero_dm=True):
+        """The band series as OwnData.search_series makes it (RFI mask, cell clip, zero-DM, running baseline), from
+        the given scaled data, with or without the zero-DM filter."""
+        data = data.copy()
+        data[(self.rfi_mask | (np.abs(data) > MAX_CELL_SIGMA)) & np.isfinite(data)] = 0.0
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            if zero_dm:
+                data = data - np.nanmean(data, axis=1, keepdims=True)
+            aligned = dedisperse(data, self.freqs, self.tsamp, dm)
+            usable = max(1, int(np.isfinite(data).any(axis=0).sum()))
+            series = np.where(np.isfinite(aligned).sum(axis=1) >= usable, np.nanmean(aligned, axis=1), np.nan)
+        finite = np.isfinite(series)
+        window = baseline_window(self.width, self.tsamp, 1, *self.search_baseline)
+        if finite.sum() > 2 * window:
+            filled = np.where(finite, series, np.nanmedian(series))
+            lead = self.first % max(1, window // 2)
+            padded = np.concatenate([np.full(lead, np.nanmedian(series), dtype=np.float32), filled])
+            series = np.where(finite, filled - running_baseline(padded, window)[lead:], np.nan)
+        return series
+
+    def _at_candidate(self, series, times):
+        """The boxcar S/N at the candidate's own time and width (as snr_dm)."""
+        near = np.abs(times) <= self.width * self.tsamp / 2 + self.tsamp
+        values = self.snr(series, times, self.width)[near]
+        return float(np.nanmax(values)) if np.isfinite(values).any() else None
 
     def dm_response(self, points=121, mask=(), auto_mask=True):
         """Boxcar S/N near the candidate time over a fine grid around its DM and a
