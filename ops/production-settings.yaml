@@ -11,6 +11,14 @@ persistent_channel_threshold: 4.0
 preprocessing:
   mask_fill: local
   zero_dm: true
+  # Slow narrow-band excesses the RFI block mask leaves (1-2% of single channels' one-second means stand 5 sigma
+  # or more off their level) made second-long sums of the dedispersed series 1.5 times white noise's. Each
+  # channel's mean over cells of 0.13 to 8 s is held within 4 sigma of white noise's scatter for such a mean,
+  # before the zero-DM filter. Chain test of 2 October 2026 (benchmarks/scattered-2026-10-02): 540 instead of
+  # 465 of 803 injected scattered bursts queued, the clusters that were not injected down from 92,915 to 26,834.
+  slow_cap:
+    sigma: 4.0
+    samples: [16, 32, 64, 128, 256, 512, 1024]
 single_pulse:
   max_width_seconds: 1.0
   # A running baseline of 2 s, doubled until it spans 64 widths, under each boxcar. With the
@@ -154,6 +162,8 @@ classification:
       - {max_width_seconds: 0.13, min_own_snr: 5.0, max_ratio: 0.8}
       - {max_width_seconds: 0.26, min_own_snr: 8.0, max_ratio: 0.6}
       - {max_width_seconds: 0.5, min_own_snr: 8.0, max_ratio: 0.5}
-      - {max_width_seconds: 1.0, min_own_snr: 10.0, max_ratio: 0.4}
+      # With the slow cap the widest tier asks S/N 8 of the cluster's own data, not 10: 102 of the 146 injected
+      # bursts the route still rejected failed that cut alone (570 of 803 queued; 2 more of what was not injected).
+      - {max_width_seconds: 1.0, min_own_snr: 8.0, max_ratio: 0.4}
   # Bounds FETCH time on an RFI-rich beam; the rest are kept as 'unclassified'.
   max_fetch_candidates: 200
