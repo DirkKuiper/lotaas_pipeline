@@ -5,12 +5,13 @@
 <div class="page-head">
   <div>
     <h1>Single-pulse candidates</h1>
-    <div class="muted">Detections as the classifier recorded them: FETCH positives, known-pulsar redetections and FETCH rejects. Periodic folds have <a href="/periodic">their own list</a>.</div>
+    <div class="muted">What the classifier passed on: FETCH positives, dispersed bursts FETCH said no to, and known-pulsar redetections. Periodic folds have <a href="/periodic">their own list</a>.
+      {% if turned_down %}<span title="Kept as the other events at a candidate's moment, and each one in the campaign ledger">Not listed: {{ '{:,}'.format(turned_down.get('unconfirmed', 0)) }} events its own data did not confirm, {{ '{:,}'.format(turned_down.get('rejected', 0)) }} FETCH rejected, {{ '{:,}'.format(turned_down.get('unclassified', 0)) }} never classified.</span>{% endif %}</div>
   </div>
 </div>
 <form class="filters" method="get">
   <label>Type <select name="type">
-    {% for value, text in [('queue', 'Positives and pulsars'), ('candidate', 'FETCH positives'), ('dispersed', 'Dispersed, FETCH said no'), ('known_pulsar', 'Known pulsars'), ('unconfirmed', 'Low local significance'), ('rejected', 'FETCH rejects'), ('unclassified', 'Not sent to FETCH (width or budget)'), ('all', 'Everything')] %}
+    {% for value, text in [('queue', 'Positives and pulsars'), ('candidate', 'FETCH positives'), ('dispersed', 'Dispersed, FETCH said no'), ('known_pulsar', 'Known pulsars'), ('all', 'All of these')] %}
       <option value="{{ value }}" {{ 'selected' if params.get('type') == value }}>{{ text }}{% if types.get(value) %} ({{ types[value] }}){% endif %}</option>
     {% endfor %}</select></label>
   <label>Review <select name="review">

@@ -40,8 +40,6 @@ class Config:
     # until the snippets are cut. Costs no space until the campaign deletes its copy.
     hold: bool = True
     snippet_types: list = field(default_factory=lambda: ['candidate', 'dispersed', 'known_pulsar'])
-    # Also keep snippets of FETCH rejects scoring above this; None keeps none.
-    rejected_above: float | None = None
     exclude_beams: list = field(default_factory=lambda: [12])
     # Record the verdicts the data settle (web.triage): pulses of known pulsars seen away
     # from their beam, and undispersed bursts across many beams.

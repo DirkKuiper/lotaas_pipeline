@@ -91,6 +91,11 @@ never writes to them. Everything it owns is under its data directory
 - `web.sqlite` — an index rebuilt from those sources every minute. It records
   each state change it sees, which is how staging latency is measured. It can
   be deleted at any time.
+  Only what the classifier passed on is a candidate there (FETCH positives, dispersed bursts, known pulsars).
+  What it turned down (rejected, unconfirmed, never classified: 99% of the ledger's detections) is kept as
+  plain events per beam (`sp_events`), the other events at a candidate's moment; each one stays in the campaign
+  ledger. An index made before 2 October 2026 held them all as candidates (23 GB, 1.8 hours a pass):
+  `python -m web compact`, once and with the pages stopped, moves them and shrinks the file.
 - `reviews.sqlite` — verdicts and audited candidate removals, which nothing else can rebuild.
   Back it up.
   Its `candidate_removals` table records explicitly removed dashboard candidates
@@ -130,7 +135,6 @@ example:
 ```toml
 port = 8001
 snippet_types = ["candidate", "known_pulsar"]
-rejected_above = 0.3        # also keep FETCH rejects scoring above 0.3
 ```
 
 `python -m web index` and `python -m web snippets` run one pass by hand.

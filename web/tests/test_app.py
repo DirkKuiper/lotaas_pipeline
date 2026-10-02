@@ -38,10 +38,12 @@ def test_pages_render(cfg, campaign):
     client = client_for(cfg)
     db = indexer.db
     cid = db.execute("SELECT id FROM candidates WHERE type='candidate'").fetchone()[0]
-    reject = db.execute("SELECT id FROM candidates WHERE type='rejected'").fetchone()[0]
+    # What FETCH rejected is an event of its beam, not a candidate with a page.
+    assert db.execute("SELECT COUNT(*) FROM candidates WHERE type='rejected'").fetchone()[0] == 0
+    assert [tuple(r) for r in db.execute('SELECT type, dm FROM sp_events')] == [('rejected', 60.0)]
     for path in ['/', '/staging', '/coverage', '/sap/L1163405_SAP000', f'/beam/{ITEM}', '/single-pulse',
                  '/single-pulse?type=all&review=unreviewed', '/periodic', '/periodic?type=all&max_dm=x',
-                 f'/verify/{cid}', f'/verify/{reject}',
+                 f'/verify/{cid}',
                  f'/api/sp/{cid}/view?dm=0&nsub=16', f'/api/sp/{cid}/dm', '/api/health', f'/snippet/{cid}.fil']:
         assert client.get(path).status_code == 200, path
     assert client.get('/verify', follow_redirects=False).status_code == 303
@@ -500,7 +502,8 @@ def test_a_burst_at_scattered_dms_in_one_beam_is_interference(cfg, campaign):
     from web.keys import parse_item
     swept = {(parse_item(r['key'].split('|')[1])[2], r['key'].split('|')[2])
              for r in indexer.db.execute('SELECT key FROM sp_sweep')}
-    assert swept == {(40, f'DM{dm:.3f}') for dm in (3.0, 38.1, 62.0, 66.6, 103.7, 127.9, 147.5)}
+    # Recorded for the candidates among the seven; what the classifier turned down only counts beside them.
+    assert swept == {(40, f'DM{dm:.3f}') for dm in (38.1, 62.0, 103.7)}
     recorded = verdicts(cfg)
     assert sorted(v['key'].split('|')[2] for v in recorded) == ['DM103.700', 'DM38.100', 'DM62.000']
     assert all(v['label'] == 'rfi' and 'Undispersed burst in this beam: 7 events' in v['note'] for v in recorded)
@@ -547,34 +550,91 @@ def test_the_single_pulse_list_counts_from_the_index_pass_as_it_would_itself(cfg
     from urllib.parse import urlencode
     from web.app import COUNTED_FLAGS
     # A level step in six beams at scattered DMs (coincident), a pulse in the incoherent beam,
-    # and an event not sent to FETCH.
+    # a pilot run's pulse and an event not sent to FETCH.
     step = [(40 + i, dm, 35.0, 6, 'unconfirmed', None, 40.0 - 0.0489 * dm) for i, dm in
             enumerate((3.7, 22.4, 85.9, 139.9, 5.8))]
     add_detections(campaign, step + [(45, 22.6, 36.0, 6, 'candidate', None, 40.0 - 0.0489 * 22.6),
                                      (12, 30.0, 9.0, 2, 'candidate', None, 700.0),
+                                     (31, 44.0, 9.0, 2, 'candidate', None, 800.0),
                                      (30, 50.0, 8.0, 2, 'unclassified', None, 900.0)])
     indexer = Indexer(cfg)
     indexer.run_pass()
-    # A pulse of a pulsar seen away from its beam (indexer.derive_known), and a pilot run's event.
+    # A pulse of a pulsar seen away from its beam (indexer.known_in), and a pilot run's event.
     with indexer.db:
-        key = indexer.db.execute("SELECT key FROM candidates WHERE type='rejected'").fetchone()[0]
+        key = indexer.db.execute("SELECT key FROM candidates WHERE type='candidate' AND dm=30.0 "
+                                 "AND item NOT LIKE '%BEAM012%'").fetchone()[0]
         indexer.db.execute("INSERT INTO sp_known VALUES (?, 'J0850+6625', 'B0845+66', 2.0, 'fold', NULL)", (key,))
-        indexer.db.execute("UPDATE candidates SET pilot=1 WHERE type='unclassified'")
+        indexer.db.execute("UPDATE candidates SET pilot=1 WHERE item LIKE '%BEAM031%'")
     indexer.count_candidates()
     client = client_for(cfg)
     for flags in itertools.product(('', 'include'), repeat=len(COUNTED_FLAGS)):
         query = urlencode({name: value for name, value in zip(COUNTED_FLAGS, flags) if value})
-        for chosen in ('queue', 'all', 'candidate', 'unconfirmed', 'rejected', 'unclassified'):
+        for chosen in ('queue', 'all', 'candidate', 'dispersed', 'known_pulsar'):
             cached = client.get(f'/single-pulse?type={chosen}&{query}').context
             live = client.get(f'/single-pulse?type={chosen}&min_snr=0&{query}').context   # a filter no pass counts
             for name in ('types', 'count', 'coincident_hidden', 'known_hidden'):
                 assert cached[name] == live[name], (chosen, query, name)
-    assert client.get('/single-pulse?type=all').context['coincident_hidden'] == 6
+    # The step's five unconfirmed events hide the candidate that shares their moment, and are not listed themselves.
+    listed = client.get('/single-pulse?type=all').context
+    assert listed['coincident_hidden'] == 1
+    assert listed['turned_down'] == {'unconfirmed': 5, 'rejected': 1, 'unclassified': 1}
+    assert 'Not listed: 5 events its own data did not confirm, 1 FETCH rejected, 1 never classified' in \
+        client.get('/single-pulse').text
+    assert client.get('/single-pulse?type=unconfirmed&coincident=include').context['count'] == 0
     # The pages read the pass's counts rather than counting again.
+    live = client.get('/single-pulse?type=candidate&min_snr=0&coincident=include').context['count']
     with indexer.db:
-        indexer.db.execute("UPDATE candidate_counts SET n = n + 1000 WHERE type='unconfirmed'")
-    assert client.get('/single-pulse?type=unconfirmed&coincident=include').context['count'] == 5 + 1000
-    assert client.get('/single-pulse?type=unconfirmed&min_snr=0&coincident=include').context['count'] == 5
+        indexer.db.execute("UPDATE candidate_counts SET n = n + 1000 WHERE type='candidate' AND coincident=1")
+    assert live == 1
+    assert client.get('/single-pulse?type=candidate&coincident=include').context['count'] == live + 1000
+
+
+def test_what_the_classifier_turned_down_is_kept_as_events_and_read_once(cfg, campaign):
+    add_detections(campaign, [(40, 12.0, 7.5, 2, 'unconfirmed', None, 100.0), (40, 80.0, 7.4, 3, 'rejected', None, 200.0),
+                              (41, 33.0, 9.0, 2, 'candidate', None, 300.0)])
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    db = indexer.db
+    events = [tuple(r) for r in db.execute('SELECT i.item, e.type, e.dm, e.width, e.time FROM sp_events e '
+                                           'JOIN sp_items i ON i.id=e.item ORDER BY e.dm')]
+    assert [(e[1], e[2], e[3], e[4]) for e in events] == [('unconfirmed', 12.0, 2, 100.0), ('rejected', 60.0, 3, 15.0),
+                                                          ('rejected', 80.0, 3, 200.0)]
+    assert events[0][0].endswith('BEAM040_32bit_ff') and events[1][0] == ITEM
+    assert {r[0] for r in db.execute('SELECT DISTINCT detection_type FROM detections')} == {'candidate'}
+    assert {r[0] for r in db.execute("SELECT DISTINCT type FROM candidates WHERE kind='sp'")} == {'candidate'}
+    # Another pass reads the ledger's last rows again and leaves one of each; a new row arrives where it belongs.
+    add_detections(campaign, [(42, 5.0, 7.2, 2, 'unclassified', None, 400.0)])
+    indexer.run_pass()
+    assert db.execute('SELECT COUNT(*) FROM sp_events').fetchone()[0] == 4
+    assert db.execute('SELECT COUNT(*) FROM detections').fetchone()[0] == 2
+    assert indexer.db.execute("SELECT value FROM meta WHERE name='turned_down'").fetchone()[0] == \
+        '{"rejected": 2, "unclassified": 1, "unconfirmed": 1}'
+
+
+def test_an_older_index_is_compacted_once(cfg, campaign):
+    """An index made before sp_events held every detection as a candidate: compact moves them and derives again."""
+    add_detections(campaign, [(40, 12.0, 7.5, 2, 'unconfirmed', None, 100.0), (41, 33.0, 9.0, 2, 'candidate', None, 300.0)])
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    db = indexer.db
+    before = [tuple(r) for r in db.execute('SELECT item, id, type, dm, snr, width, time FROM sp_events ORDER BY id')]
+    with db:        # put it back as the older index had it
+        db.execute("""INSERT INTO detections(id, beam_id, item, key, candidate_dm, snr, width_samples, detection_type,
+                time_seconds) SELECT e.id, i.item || '.fil', i.item, e.type || '|' || i.item, e.dm, e.snr, e.width, e.type,
+                e.time FROM sp_events e JOIN sp_items i ON i.id=e.item""")
+        db.execute('DELETE FROM sp_events')
+        db.execute('DELETE FROM sp_items')
+        db.execute("DELETE FROM meta WHERE name='detections_through'")
+    indexer.derive()
+    assert db.execute("SELECT COUNT(*) FROM candidates WHERE type IN ('rejected', 'unconfirmed')").fetchone()[0] == 2
+    assert indexer.compact() == 2
+    after = [tuple(r) for r in db.execute('SELECT item, id, type, dm, snr, width, time FROM sp_events ORDER BY id')]
+    assert [r[1:] for r in after] == [r[1:] for r in before]
+    assert db.execute("SELECT COUNT(*) FROM candidates WHERE type IN ('rejected', 'unconfirmed')").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM detections").fetchone()[0] == 2
+    indexer.run_pass()                                    # and the next pass adds nothing twice
+    assert db.execute('SELECT COUNT(*) FROM sp_events').fetchone()[0] == 2
+    assert indexer.compact() == 0
 
 
 def test_snippets_are_linked_without_deriving_again(cfg, campaign):
@@ -979,6 +1039,7 @@ def test_keys_sharing_a_short_id_do_not_stop_the_queue(cfg, campaign, monkeypatc
     # failed on the UNIQUE id for 14 hours. Here every key shares one.
     import web.indexer as indexer_module
     monkeypatch.setattr(indexer_module, 'short_id', lambda key: 'same')
+    add_detections(campaign, [(41, 33.0, 9.0, 2, 'candidate', None, 300.0)])
     indexer = Indexer(cfg)
     indexer.run_pass()
     rows = dict(indexer.db.execute('SELECT key, id FROM candidates').fetchall())

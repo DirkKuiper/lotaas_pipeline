@@ -4,11 +4,11 @@ Three kinds of single-pulse candidate are settled by what the rest of the
 observation shows, not by looking at the candidate:
 
 - a pulse of a catalogued pulsar seen away from its own beam
-  (indexer.derive_known): at the pulsar's DM, within 5 degrees of it, with a
+  (indexer.known_in): at the pulsar's DM, within 5 degrees of it, with a
   fold at its period or the pulses themselves keeping its rotation to show the
   pulsar is there. Verdict 'known'.
 - an undispersed burst that reached many beams at once: the same moment in
-  COINCIDENT_BEAMS or more beams at scattered DMs (indexer.derive_coincidence),
+  COINCIDENT_BEAMS or more beams at scattered DMs (indexer.derive_moments),
   with a quarter or more of the events there below DM 1. Verdict 'rfi'.
 - the same moment in COINCIDENT_BEAMS or more beams of all three SAPs, which
   point about 4 degrees apart, whatever the DMs: no one position on the sky

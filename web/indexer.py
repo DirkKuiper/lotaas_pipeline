@@ -58,6 +58,8 @@ KINDS_QUEUED = ('candidate', 'dispersed', 'known_pulsar')
 HALO_DM = 50.0
 K_DM = 4148.808
 COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is interference
+# Detection types nobody reviews: kept as events (sp_events), not as candidates.
+TURNED_DOWN = ('rejected', 'unconfirmed', 'unclassified')
 # The classifier records nothing below its min_dm, so an undispersed burst leaves only
 # its DM >= 2 tail among the candidates, and in many beams at DM 2-4.5 that tail looked
 # like one pulsar at one DM: 1,459 FETCH positives of L605714 (30 August 2017, at
@@ -78,7 +80,7 @@ SWEEP_EXCESS = 5.0
 SWEEP_DM_SPAN = (20.0, 0.5)
 SWEEP_FLAT = 1.3
 SWEEP_MIN_SPAN_SECONDS = 600.0
-# A catalogued pulsar's pulses are recognised this far from it (derive_known), at its DM
+# A catalogued pulsar's pulses are recognised this far from it (known_in), at its DM
 # within max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION of it).
 KNOWN_RADIUS_DEG = 5.0
 # A very bright one further: B0329+54 (8.5 Jy at 135 MHz by the catalogue's estimate) reached
@@ -201,7 +203,7 @@ def fetch_d_only(models):
     return int(scores.get('d', 0) > 0.5 and not any(p > 0.5 for name, p in scores.items() if name != 'd'))
 
 def known_radius(pulsar):
-    """How far from a catalogued pulsar its pulses are recognised (derive_known), by its brightness."""
+    """How far from a catalogued pulsar its pulses are recognised (known_in), by its brightness."""
     from euroflash import psrcat
     mjy, _ = psrcat.flux_at(pulsar)
     return KNOWN_BRIGHT_RADIUS_DEG if mjy is not None and mjy >= KNOWN_BRIGHT_MJY else KNOWN_RADIUS_DEG
@@ -225,6 +227,97 @@ def chance_of(k, mean):
         i += 1
         term *= mean / i
     return min(1.0, total)
+
+class Moments:
+    """One observation's single-pulse events in the order of their aligned times, and what shares each one's moment.
+
+    An event is (aligned time, (sap, beam), dm, key, type, width in seconds, snr, item, time, width in samples,
+    pulsar, whether a DM was recorded). Its key is None when it is never judged itself: a cluster centre below
+    LOW_DM, or what the classifier turned down (sp_events). Those are asked about only where a judged event
+    needs them (a pulsar's pulses, Indexer.known_in), so each answer is worked out once, on demand.
+    """
+
+    def __init__(self, events):
+        # By time alone: a judged event and one that is not can tie on time, beam and DM, and a key and None do not compare.
+        self.events = sorted(events, key=lambda e: e[0])
+        self.times = [e[0] for e in self.events]
+        span = max(self.times[-1] - self.times[0], RATE_SPAN_SECONDS) if self.events else RATE_SPAN_SECONDS
+        self.rates, self.by_beam = {}, {}
+        for event in self.events:
+            self.rates[event[1]] = self.rates.get(event[1], 0) + 1 / span
+            self.by_beam.setdefault(event[1], []).append(event)
+        self.totals, self.beams, self._shared, self._swept, self._interfering = {}, {}, {}, {}, {}
+
+    def expected(self, own, tolerance):
+        """Other beams with an event within +-tolerance of any moment, by chance."""
+        if tolerance not in self.totals:
+            self.totals[tolerance] = sum(1 - math.exp(-2 * tolerance * r) for r in self.rates.values())
+        return max(0.0, self.totals[tolerance] - (1 - math.exp(-2 * tolerance * self.rates.get(own, 0.0))))
+
+    def shared(self, event):
+        """(beams, saps, dm_min, dm_max, consistent, near_zero, events, expected, chance) of the events at this
+        one's moment in other beams, its own included; None when no other beam has one."""
+        if event not in self._shared:
+            from lotaas_reprocessing.periodicity_veto import NEAR_ZERO, dm_consistent
+            t, beam, dm, width = event[0], event[1], event[2], event[5]
+            tolerance = max(COINCIDENCE_SECONDS, 1.5 * width)
+            near = self.events[bisect.bisect_left(self.times, t - tolerance):bisect.bisect_right(self.times, t + tolerance)]
+            others = [e for e in near if e[1] != beam]
+            beams = {e[1] for e in others} | {beam}
+            row = None
+            if len(beams) >= 2:
+                dms = [dm] + [e[2] for e in others]
+                chance_beams = self.expected(beam, tolerance)
+                row = (len(beams), len({b[0] for b in beams}), min(dms), max(dms),
+                       int(dm_consistent(dms, home=dm)), sum(1 for d in dms if d < NEAR_ZERO[0]), len(dms),
+                       chance_beams, chance_of(len(beams) - 1, chance_beams))
+            self._shared[event] = row
+        return self._shared[event]
+
+    def swept(self, event):
+        """(events, expected, dm_min, dm_max, peak_ratio) when the event is one of a burst of its own beam at
+        scattered DMs, none standing out (the SWEEP_* rule); None otherwise."""
+        if event not in self._swept:
+            beam = event[1]
+            if beam not in self.beams:
+                own = self.by_beam[beam]
+                times = [e[0] for e in own]
+                rate = len(own) / max(SWEEP_MIN_SPAN_SECONDS, times[-1] - times[0])
+                self.beams[beam] = (own, times, rate, max(SWEEP_MIN_EVENTS, SWEEP_EXCESS * rate * 2 * SWEEP_SECONDS))
+            own, times, rate, needed = self.beams[beam]
+            t, row = event[0], None
+            near = own[bisect.bisect_left(times, t - SWEEP_SECONDS):bisect.bisect_right(times, t + SWEEP_SECONDS)]
+            if len(near) >= needed:
+                dms = [e[2] for e in near]
+                if max(dms) - min(dms) >= max(SWEEP_DM_SPAN[0], SWEEP_DM_SPAN[1] * max(dms)) and min(dms) <= SWEEP_LOW_DM:
+                    snrs = sorted(e[6] for e in near)
+                    median = statistics.median(snrs)
+                    # Otherwise one DM stands out: a pulse and the tails of its DM curve.
+                    if median > 0 and snrs[-1] <= SWEEP_FLAT * median:
+                        row = (len(near), rate * 2 * SWEEP_SECONDS, min(dms), max(dms), snrs[-1] / median)
+            self._swept[event] = row
+        return self._swept[event]
+
+    def interfering(self, event):
+        """Whether the event is known as interference: at one moment in COINCIDENT_BEAMS or more beams at
+        scattered DMs, or in a burst of its own beam."""
+        if event not in self._interfering:
+            if event in self._shared:
+                row = self._shared[event]
+                many = row is not None and row[0] >= COINCIDENT_BEAMS and not row[4]
+            else:
+                # Asked of what is never judged itself, a pulsar's turned-down pulses: the beams are counted
+                # first, and the DMs weighed only where there are enough of them (most of shared's time).
+                from lotaas_reprocessing.periodicity_veto import dm_consistent
+                t, beam, dm = event[0], event[1], event[2]
+                tolerance = max(COINCIDENCE_SECONDS, 1.5 * event[5])
+                others = [e for e in self.events[bisect.bisect_left(self.times, t - tolerance):
+                                                 bisect.bisect_right(self.times, t + tolerance)] if e[1] != beam]
+                many = (len({e[1] for e in others}) + 1 >= COINCIDENT_BEAMS
+                        and not dm_consistent([dm] + [e[2] for e in others], home=dm))
+            self._interfering[event] = many or self.swept(event) is not None
+        return self._interfering[event]
+
 
 class Indexer:
     def __init__(self, cfg):
@@ -310,9 +403,17 @@ class Indexer:
                         run_of(output_dir),fp16_of(output_dir),error_message,code_version
                         FROM lg.beam_runs WHERE id>=?""", (low,))
                 if 'detections' in tables:
-                    # Re-import of a node ledger may update recent rows in place.
-                    low = max(0, db.execute('SELECT COALESCE(MAX(id),0) FROM detections').fetchone()[0] - 2000)
+                    # Re-import of a node ledger may update recent rows in place: the last 2,000 are read again.
+                    through = meta_get(db, 'detections_through')
+                    if through is None:       # an index made before sp_events holds them all in detections
+                        through = db.execute('SELECT COALESCE(MAX(id),0) FROM detections').fetchone()[0]
+                    low = max(0, through - 2000)
+                    recent = 'SELECT DISTINCT item_of(beam_id) FROM lg.detections WHERE id>? AND beam_id IS NOT NULL'
+                    down = ','.join('?' * len(TURNED_DOWN))
+                    db.execute(f'INSERT OR IGNORE INTO sp_items(item) {recent}', (low,))
                     db.execute('DELETE FROM detections WHERE id>?', (low,))
+                    db.execute(f'DELETE FROM sp_events WHERE id>? AND item IN (SELECT id FROM sp_items '
+                               f'WHERE item IN ({recent}))', (low, low))
                     # Each model's score, where the ledger has them (release 28 September 2026 on).
                     present = {r[1] for r in db.execute('PRAGMA lg.table_info(detections)')}
                     models = 'model_probabilities' if 'model_probabilities' in present else 'NULL'
@@ -320,8 +421,16 @@ class Indexer:
                     db.execute(f"""INSERT INTO detections SELECT id,beam_id,item_of(beam_id),
                         key_of(detection_type,item_of(beam_id),candidate_dm,width_samples,snr),
                         candidate_dm,snr,width_samples,detection_type,pulsar_name,classification_probability,
-                        beam_run_id,time_seconds,sample_number,{models},{galactic} FROM lg.detections WHERE id>?""",
-                               (low,))
+                        beam_run_id,time_seconds,sample_number,{models},{galactic} FROM lg.detections
+                        WHERE id>? AND (detection_type IS NULL OR detection_type NOT IN ({down}))""",
+                               (low, *TURNED_DOWN))
+                    # What the classifier turned down: an event of its beam, nothing more (sp_events).
+                    db.execute(f"""INSERT OR REPLACE INTO sp_events SELECT i.id, d.id, d.detection_type,
+                        d.candidate_dm, d.snr, d.width_samples, d.time_seconds
+                        FROM lg.detections d JOIN sp_items i ON i.item=item_of(d.beam_id)
+                        WHERE d.id>? AND d.detection_type IN ({down})""", (low, *TURNED_DOWN))
+                    meta_set(db, 'detections_through',
+                             max(through, db.execute('SELECT COALESCE(MAX(id),0) FROM lg.detections').fetchone()[0]))
                 if 'archive_beams' in tables:
                     last = meta_get(db, 'archive_rowid', 0)
                     db.execute('INSERT OR REPLACE INTO archive_beams SELECT uri,raw_path,item,observation,sap,beam '
@@ -541,9 +650,34 @@ class Indexer:
                 EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key), COUNT(*)
             FROM candidates c WHERE c.kind='sp' GROUP BY 1, 2, 3, 4, 5""",
             [f'%\\_BEAM{beam:03d}\\_%' for beam in INCOHERENT_BEAMS] + [COINCIDENT_BEAMS]).fetchall()
+        turned_down = dict(self.db.execute('SELECT type, COUNT(*) FROM sp_events GROUP BY type').fetchall())
         with self.db:
             self.db.execute('DELETE FROM candidate_counts')
             self.db.executemany('INSERT INTO candidate_counts VALUES (?,?,?,?,?,?)', counts)
+            # What the classifier turned down is not listed; the page says how much there is.
+            meta_set(self.db, 'turned_down', turned_down)
+
+    def compact(self):
+        """Move what the classifier turned down out of the detections of an index made before sp_events, derive
+        again and give the freed pages back to the disk; returns how many rows moved. Run with the pages stopped."""
+        db = self.db
+        down = ','.join('?' * len(TURNED_DOWN))
+        moved = db.execute(f'SELECT COUNT(*) FROM detections WHERE detection_type IN ({down})', TURNED_DOWN).fetchone()[0]
+        with db:
+            if meta_get(db, 'detections_through') is None:
+                meta_set(db, 'detections_through', db.execute('SELECT COALESCE(MAX(id),0) FROM detections').fetchone()[0])
+            db.execute(f'INSERT OR IGNORE INTO sp_items(item) SELECT DISTINCT item FROM detections '
+                       f'WHERE detection_type IN ({down}) AND item IS NOT NULL', TURNED_DOWN)
+            db.execute(f"""INSERT OR REPLACE INTO sp_events SELECT i.id, d.id, d.detection_type, d.candidate_dm, d.snr,
+                d.width_samples, d.time_seconds FROM detections d JOIN sp_items i ON i.item=d.item
+                WHERE d.detection_type IN ({down})""", TURNED_DOWN)
+            db.execute(f'DELETE FROM detections WHERE detection_type IN ({down})', TURNED_DOWN)
+        self.derive()
+        self.count_candidates()
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        db.execute('VACUUM')
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        return moved
 
     def derive(self):
         try:
@@ -611,8 +745,7 @@ class Indexer:
                     WHERE o.observation=observation_of(candidates.item) AND o.sap=sap_of(candidates.item))""")
             self.derive_saps()
             self.derive_families()
-            self.derive_coincidence()
-            self.derive_known()
+            self.derive_moments()
             self.derive_pulsars()
             self.derive_lotaas()
             from web.periodic_quality import sync
@@ -653,7 +786,7 @@ class Indexer:
             self.db.execute('DELETE FROM periodic_families')
             self.db.executemany('INSERT OR REPLACE INTO periodic_families VALUES (?,?,?,?,?,?)', rows)
 
-    def derive_coincidence(self):
+    def derive_moments(self):
         """Single-pulse events at one moment in other beams of the candidate's observation.
 
         Each row also holds how many other beams would share the moment by chance
@@ -669,105 +802,94 @@ class Indexer:
         compared at their time plus that delay: one impulse lines up across DMs,
         and a bright pulsar's pulse in neighbouring beams lines up at one DM.
 
-        The candidates hold nothing below the classifier's min_dm, so each beam's
-        cluster centres below LOW_DM (sp_low_dm) join as events that are never
+        The candidates hold nothing below the classifier's min_dm, and nothing the
+        classifier turned down. Each beam's cluster centres below LOW_DM (sp_low_dm)
+        and its turned-down events (sp_events) join as events that are never
         judged themselves. Without them the rule that a family a quarter of
         which lies below DM 1 is no pulsar (dm_consistent) could never apply.
 
         The same moment is also looked for within the event's own beam
         (sp_sweep, the SWEEP_* rule): a burst there at scattered DMs, no DM
         standing out, is an undispersed signal whatever the other beams saw.
-        """
-        from lotaas_reprocessing.periodicity_veto import NEAR_ZERO, dm_consistent
-        bands = {r['item']: (r['nu_min'], r['nu_max'], r['tsamp']) for r in self.db.execute(
-            'SELECT item, nu_min, nu_max, tsamp FROM beams WHERE nu_min > 0 AND nu_max > nu_min')}
-        by_observation = {}
 
-        def add(item, dm, time_, width, key, kind, snr):
+        Each observation that holds a candidate is taken on its own, with its
+        pulses of catalogued pulsars (known_in), which need the same events: all
+        of them at once were 14.8 million rows and 2 GB of memory.
+        """
+        db = self.db
+        bands = {r['item']: (r['nu_min'], r['nu_max'], r['tsamp']) for r in db.execute(
+            'SELECT item, nu_min, nu_max, tsamp FROM beams WHERE nu_min > 0 AND nu_max > nu_min')}
+
+        def event(item, dm, time_, width, key, kind, snr, pulsar=None):
             parsed = parse_item(item)
             if not parsed:
-                return
+                return None, None
             low, high, tsamp = bands.get(item, (119.45, 151.04, 0.007864))
-            dm = dm or 0.0
-            aligned = time_ + K_DM * dm * (1 / (low * high) - 1 / high ** 2)
-            by_observation.setdefault(parsed[0], []).append(
-                (aligned, (parsed[1], parsed[2]), dm, key, kind, (width or 1) * (tsamp or 0.007864), snr or 0.0))
+            aligned = time_ + K_DM * (dm or 0.0) * (1 / (low * high) - 1 / high ** 2)
+            return parsed[0], (aligned, (parsed[1], parsed[2]), dm or 0.0, key, kind,
+                               (width or 1) * (tsamp or 0.007864), snr or 0.0, item, time_, width, pulsar,
+                               dm is not None)
 
-        for row in self.db.execute("SELECT key, type, item, dm, time, width, snr FROM candidates "
-                                   "WHERE kind='sp' AND time IS NOT NULL"):
-            add(row['item'], row['dm'], row['time'], row['width'], row['key'], row['type'], row['snr'])
+        judged, partners = {}, {}
+        for r in db.execute("SELECT key, type, item, dm, time, width, snr, pulsar FROM candidates "
+                            "WHERE kind='sp' AND time IS NOT NULL"):
+            observation, made = event(r['item'], r['dm'], r['time'], r['width'], r['key'], r['type'], r['snr'], r['pulsar'])
+            if made:
+                judged.setdefault(observation, []).append(made)
         seen = set()
-        for row in self.db.execute('SELECT item, dm, time, width, snr FROM sp_low_dm'):
+        for r in db.execute('SELECT item, dm, time, width, snr FROM sp_low_dm'):
             # A beam searched twice holds the same centres twice.
-            event = (row['item'], round(row['dm'], 3), round(row['time'], 2))
-            if event not in seen:
-                seen.add(event)
-                add(row['item'], row['dm'], row['time'], row['width'], None, 'low_dm', row['snr'])
-        rows, sweeps = [], []
-        for events in by_observation.values():
-            events.sort()
-            times = [e[0] for e in events]
-            sweeps += self.sweeps(events)
-            span = max(times[-1] - times[0], RATE_SPAN_SECONDS)
-            rates = {}
-            for event in events:
-                rates[event[1]] = rates.get(event[1], 0) + 1 / span
-            totals = {}
-
-            def expected(own, tolerance):
-                """Other beams with an event within +-tolerance of any moment, by chance."""
-                if tolerance not in totals:
-                    totals[tolerance] = sum(1 - math.exp(-2 * tolerance * r) for r in rates.values())
-                return max(0.0, totals[tolerance] - (1 - math.exp(-2 * tolerance * rates.get(own, 0.0))))
-
-            for t, beam, dm, key, kind, width, _ in events:
-                if key is None:           # a cluster centre below LOW_DM: a partner only
-                    continue
-                tolerance = max(COINCIDENCE_SECONDS, 1.5 * width)
-                near = events[bisect.bisect_left(times, t - tolerance):bisect.bisect_right(times, t + tolerance)]
-                others = [e for e in near if e[1] != beam]
-                beams = {e[1] for e in others} | {beam}
-                if len(beams) < 2:
-                    continue
-                dms = [dm] + [e[2] for e in others]
-                chance_beams = expected(beam, tolerance)
-                rows.append((key, len(beams), len({b[0] for b in beams}), min(dms), max(dms),
-                             int(dm_consistent(dms, home=dm)), sum(1 for d in dms if d < NEAR_ZERO[0]), len(dms),
-                             chance_beams, chance_of(len(beams) - 1, chance_beams)))
-        with self.db:
-            self.db.execute('DELETE FROM sp_coincidence')
-            self.db.executemany('INSERT OR REPLACE INTO sp_coincidence(key,beams,saps,dm_min,dm_max,consistent,'
-                                'near_zero,events,expected,chance) VALUES (?,?,?,?,?,?,?,?,?,?)', rows)
-            self.db.execute('DELETE FROM sp_sweep')
-            self.db.executemany('INSERT OR REPLACE INTO sp_sweep VALUES (?,?,?,?,?,?)', sweeps)
-
-    @staticmethod
-    def sweeps(events):
-        """[(key, events, expected, dm_min, dm_max, peak_ratio)] of the SWEEP_* rule over one
-        observation's aligned events, (aligned, beam, dm, key, kind, width, snr) sorted by time."""
-        by_beam = {}
-        for event in events:
-            by_beam.setdefault(event[1], []).append(event)
-        out = []
-        for own in by_beam.values():
-            times = [e[0] for e in own]
-            rate = len(own) / max(SWEEP_MIN_SPAN_SECONDS, times[-1] - times[0])
-            needed = max(SWEEP_MIN_EVENTS, SWEEP_EXCESS * rate * 2 * SWEEP_SECONDS)
-            for t, _, _, key, _, _, _ in own:
-                if key is None:
-                    continue
-                near = own[bisect.bisect_left(times, t - SWEEP_SECONDS):bisect.bisect_right(times, t + SWEEP_SECONDS)]
-                if len(near) < needed:
-                    continue
-                dms = [e[2] for e in near]
-                if max(dms) - min(dms) < max(SWEEP_DM_SPAN[0], SWEEP_DM_SPAN[1] * max(dms)) or min(dms) > SWEEP_LOW_DM:
-                    continue
-                snrs = sorted(e[6] for e in near)
-                median = statistics.median(snrs)
-                if median <= 0 or snrs[-1] > SWEEP_FLAT * median:
-                    continue          # one DM stands out: a pulse and the tails of its DM curve
-                out.append((key, len(near), rate * 2 * SWEEP_SECONDS, min(dms), max(dms), snrs[-1] / median))
-        return out
+            mark = (r['item'], round(r['dm'], 3), round(r['time'], 2))
+            if mark not in seen and observation_of(r['item']) in judged:
+                seen.add(mark)
+                observation, made = event(r['item'], r['dm'], r['time'], r['width'], None, 'low_dm', r['snr'])
+                partners.setdefault(observation, []).append(made)
+        del seen
+        items = {}
+        for r in db.execute('SELECT id, item FROM sp_items'):
+            observation = observation_of(r['item'])
+            if observation in judged:
+                items.setdefault(observation, {})[r['id']] = r['item']
+        context = self.known_context()
+        rows, sweeps, known = [], [], {}
+        for observation, own in judged.items():
+            events = own + partners.pop(observation, [])
+            names = items.get(observation, {})
+            # Per beam: its name, (sap, beam), the band-averaged delay per unit DM and its sample time.
+            beams = {}
+            for number, name in names.items():
+                low, high, tsamp = bands.get(name, (119.45, 151.04, 0.007864))
+                beams[number] = (name, parse_item(name)[1:], K_DM * (1 / (low * high) - 1 / high ** 2), tsamp or 0.007864)
+            seen = set()
+            for start in range(0, len(names), 500):
+                ids = list(names)[start:start + 500]
+                for item, kind, dm, time_, width, snr in db.execute(
+                        f"SELECT item, type, dm, time, width, snr FROM sp_events WHERE item IN ({','.join('?' * len(ids))}) "
+                        "AND time IS NOT NULL", ids):
+                    # A beam searched twice holds the same event twice.
+                    mark = (item, kind, dm, width, snr, time_)
+                    if mark not in seen:
+                        seen.add(mark)
+                        name, beam, per_dm, tsamp = beams[item]
+                        events.append((time_ + per_dm * (dm or 0.0), beam, dm or 0.0, None, kind, (width or 1) * tsamp,
+                                       snr or 0.0, name, time_, width, None, dm is not None))
+            moments = Moments(events)
+            for e in own:
+                shared, swept = moments.shared(e), moments.swept(e)
+                if shared:
+                    rows.append((e[3],) + shared)
+                if swept:
+                    sweeps.append((e[3],) + swept)
+            if context:
+                self.known_in(observation, moments, context, known)
+        with db:
+            db.execute('DELETE FROM sp_coincidence')
+            db.executemany('INSERT OR REPLACE INTO sp_coincidence(key,beams,saps,dm_min,dm_max,consistent,'
+                           'near_zero,events,expected,chance) VALUES (?,?,?,?,?,?,?,?,?,?)', rows)
+            db.execute('DELETE FROM sp_sweep')
+            db.executemany('INSERT OR REPLACE INTO sp_sweep VALUES (?,?,?,?,?,?)', sweeps)
+            db.execute('DELETE FROM sp_known')
+            db.executemany('INSERT OR REPLACE INTO sp_known VALUES (?,?,?,?,?,?)', list(known.values()))
 
     @staticmethod
     def rotation(times, period, span):
@@ -789,7 +911,30 @@ class Indexer:
                 best = (z, trial, (math.atan2(s, c) / (2 * math.pi)) % 1)
         return best + (trials + 1,)
 
-    def derive_known(self):
+    def known_context(self):
+        """What known_in needs of the catalogue, the beams, the folds and the verdicts; None without a catalogue."""
+        from euroflash import psrcat
+        pulsars = psrcat.load()
+        if not pulsars:
+            return None
+        positions, epochs = {}, {}
+        for r in self.db.execute('SELECT item, observation, ra_deg, dec_deg, tstart_mjd, tsamp FROM beams '
+                                 'WHERE ra_deg IS NOT NULL'):
+            positions.setdefault(r['observation'], {})[r['item']] = (r['ra_deg'], r['dec_deg'], r['tsamp'])
+            epochs.setdefault(r['observation'], r['tstart_mjd'])
+        latest = '(SELECT label FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
+        labels = {r['key']: r['label'] for r in self.db.execute(
+            f"SELECT c.key, COALESCE({latest}, '') AS label FROM candidates c WHERE c.type='known_pulsar'")}
+        folds = {}
+        for r in self.db.execute('SELECT item, dm, period FROM periodic WHERE period > 0'):
+            parsed = parse_item(r['item'])
+            if parsed:
+                folds.setdefault(parsed[0], []).append(r)
+        fields = self.fields({o: {i: p[:2] for i, p in members.items()} for o, members in positions.items()})
+        return dict(psrcat=psrcat, pulsars=pulsars, positions=positions, epochs=epochs, labels=labels, folds=folds,
+                    fields=fields)
+
+    def known_in(self, observation, moments, context, rows):
         """Single pulses of a catalogued pulsar seen away from its own beam.
 
         The classifier calls a pulse a redetection only within 1 degree of a
@@ -814,110 +959,85 @@ class Indexer:
         'redetected' by bursts with no pulse at their DMs. Millisecond pulsars
         cannot be phased with 7.9 ms samples.
         """
-        from euroflash import psrcat
-        pulsars = psrcat.load()
-        rows = {}
-        if pulsars:
-            positions, epochs = {}, {}
-            for r in self.db.execute('SELECT item, observation, ra_deg, dec_deg, tstart_mjd, tsamp FROM beams '
-                                     'WHERE ra_deg IS NOT NULL'):
-                positions.setdefault(r['observation'], {})[r['item']] = (r['ra_deg'], r['dec_deg'], r['tsamp'])
-                epochs.setdefault(r['observation'], r['tstart_mjd'])
-            latest = '(SELECT label FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
-            events = {}
-            for r in self.db.execute(f"""SELECT c.key, c.type, c.item, c.dm, c.width, c.time, c.pulsar,
-                    COALESCE({latest}, '') AS label FROM candidates c
-                    WHERE c.kind='sp' AND c.time IS NOT NULL AND c.dm IS NOT NULL"""):
-                parsed = parse_item(r['item'])
-                if parsed:
-                    events.setdefault(parsed[0], []).append(dict(r))
-            folds = {}
-            for r in self.db.execute('SELECT item, dm, period FROM periodic WHERE period > 0'):
-                parsed = parse_item(r['item'])
-                if parsed:
-                    folds.setdefault(parsed[0], []).append(r)
-            # Interference at a pulsar's DM would break its rotation: during the burst at
-            # sunset in L605714, events near DM 48.7 hid B1737+13's own redetection.
-            interference = {r['key'] for r in self.db.execute(
-                'SELECT key FROM sp_coincidence WHERE beams >= ? AND NOT consistent', (COINCIDENT_BEAMS,))}
-            # A burst in the event's own beam: B1737+13's 'redetection' in L605714 was one
-            # of twelve events there at DM 0.7-97, and no pulse at its DM.
-            interference |= {r['key'] for r in self.db.execute('SELECT key FROM sp_sweep')}
-            for observation, (centre, spread) in self.fields(
-                    {o: {i: p[:2] for i, p in members.items()} for o, members in positions.items()}).items():
-                here = sorted(events.get(observation, []), key=lambda e: e['dm'])
-                if not here:
+        if observation not in context['fields']:
+            return
+        psrcat, pulsars = context['psrcat'], context['pulsars']
+        centre, spread = context['fields'][observation]
+        # Interference at a pulsar's DM would break its rotation: during the burst at sunset in L605714,
+        # events near DM 48.7 hid B1737+13's own redetection. A burst in the event's own beam too:
+        # B1737+13's 'redetection' there was one of twelve events at DM 0.7-97, and no pulse at its DM.
+        interfering = moments.interfering
+        here = sorted((e for e in moments.events if e[4] != 'low_dm' and e[11]), key=lambda e: e[2])
+        if not here:
+            return
+        dms = [e[2] for e in here]
+        redetected = {e[10] for e in here if e[4] == 'known_pulsar'
+                      and context['labels'].get(e[3], '') not in ('noise', 'rfi') and not interfering(e)}
+        beams = context['positions'][observation]
+        for p in psrcat.cone(pulsars, *centre, spread + KNOWN_BRIGHT_RADIUS_DEG):
+            radius = known_radius(p)
+            if p['separation_deg'] > spread + radius:
+                continue
+            tolerance = max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION * p['dm'])
+            wide = max(KNOWN_ROTATION_DM[0], KNOWN_ROTATION_DM[1] * p['dm'])
+            matched, farther, apart = [], [], {}
+            for e in here[bisect.bisect_left(dms, p['dm'] - wide):bisect.bisect_right(dms, p['dm'] + wide)]:
+                if e[7] not in beams:
                     continue
-                dms = [e['dm'] for e in here]
-                redetected = {e['pulsar'] for e in here if e['type'] == 'known_pulsar'
-                              and e['label'] not in ('noise', 'rfi') and e['key'] not in interference}
-                beams = positions[observation]
-                for p in psrcat.cone(pulsars, *centre, spread + KNOWN_BRIGHT_RADIUS_DEG):
-                    radius = known_radius(p)
-                    if p['separation_deg'] > spread + radius:
+                ra, dec, tsamp = beams[e[7]]
+                if e[7] not in apart:
+                    apart[e[7]] = psrcat.separation(ra, dec, p['ra'], p['dec'])
+                separation = apart[e[7]]
+                if separation <= radius:
+                    (matched if abs(e[2] - p['dm']) <= tolerance else farther).append(
+                        (e, separation, (e[9] or 1) * (tsamp or 0.007864)))
+            if not matched:
+                continue
+            routes = ['fold'] if any(psrcat.match(f['period'], f['dm'] or 0.0, [p])
+                                     for f in context['folds'].get(observation, [])) else []
+            if p['name'] in redetected:
+                routes.append('redetection')
+            period = psrcat.period_at(p, context['epochs'].get(observation))
+            z = None
+            # Pulses at its DM that are not already known as interference: a burst at
+            # the pulsar's DM can hide its rotation, and a pulse of it can also fall
+            # during a burst elsewhere, so both sets are tried.
+            clean = [m for m in matched if not interfering(m[0])]
+            # A boxcar wider than half a turn says nothing of the phase.
+            phased = [m for m in matched if m[2] < period / 2]
+            if len(phased) >= 3 and period >= KNOWN_MIN_PERIOD:
+                kept = None
+                for trying in (phased, [m for m in phased if m in clean]):
+                    if len(trying) < 3:
                         continue
-                    tolerance = max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION * p['dm'])
-                    wide = max(KNOWN_ROTATION_DM[0], KNOWN_ROTATION_DM[1] * p['dm'])
-                    matched, farther = [], []
-                    for e in here[bisect.bisect_left(dms, p['dm'] - wide):bisect.bisect_right(dms, p['dm'] + wide)]:
-                        if e['item'] not in beams:
-                            continue
-                        ra, dec, tsamp = beams[e['item']]
-                        separation = psrcat.separation(ra, dec, p['ra'], p['dec'])
-                        if separation <= radius:
-                            (matched if abs(e['dm'] - p['dm']) <= tolerance else farther).append(
-                                (e, separation, (e['width'] or 1) * (tsamp or 0.007864)))
-                    if not matched:
+                    times = [m[0][8] for m in trying]
+                    z, trial, phase, trials = self.rotation(times, period, max(times) - min(times))
+                    chance = trials * math.exp(-z)
+                    if chance <= 1e-3 or (chance <= 0.1 and routes):
+                        def on(m):
+                            offset = abs((m[0][8] / trial) % 1 - phase)
+                            return min(offset, 1 - offset) <= max(0.1, m[2] / trial)
+                        kept = [m for m in trying if on(m)]
+                        # On the rotation, a pulse whose DM the band measured less well.
+                        kept += [m for m in farther if m[2] < period / 2 and on(m) and not interfering(m[0])]
+                        routes.append('rotation')
+                        break
+                if kept is None:
+                    # They do not keep its time. With a fold at its period, the
+                    # classifier's own redetections of it still count, unless interference.
+                    kept, z = ([m for m in clean if m[0][4] == 'known_pulsar' and m[0][10] == p['name']]
+                               if 'fold' in routes else []), None
+                    if not kept:
                         continue
-                    routes = ['fold'] if any(psrcat.match(f['period'], f['dm'] or 0.0, [p])
-                                             for f in folds.get(observation, [])) else []
-                    if p['name'] in redetected:
-                        routes.append('redetection')
-                    period = psrcat.period_at(p, epochs.get(observation))
-                    z = None
-                    # Pulses at its DM that are not already known as interference: a burst at
-                    # the pulsar's DM can hide its rotation, and a pulse of it can also fall
-                    # during a burst elsewhere, so both sets are tried.
-                    clean = [m for m in matched if m[0]['key'] not in interference]
-                    # A boxcar wider than half a turn says nothing of the phase.
-                    phased = [m for m in matched if m[2] < period / 2]
-                    if len(phased) >= 3 and period >= KNOWN_MIN_PERIOD:
-                        kept = None
-                        for trying in (phased, [m for m in phased if m in clean]):
-                            if len(trying) < 3:
-                                continue
-                            times = [m[0]['time'] for m in trying]
-                            z, trial, phase, trials = self.rotation(times, period, max(times) - min(times))
-                            chance = trials * math.exp(-z)
-                            if chance <= 1e-3 or (chance <= 0.1 and routes):
-                                def on(m):
-                                    offset = abs((m[0]['time'] / trial) % 1 - phase)
-                                    return min(offset, 1 - offset) <= max(0.1, m[2] / trial)
-                                kept = [m for m in trying if on(m)]
-                                # On the rotation, a pulse whose DM the band measured less well.
-                                kept += [m for m in farther if m[2] < period / 2 and on(m)
-                                         and m[0]['key'] not in interference]
-                                routes.append('rotation')
-                                break
-                        if kept is None:
-                            # They do not keep its time. With a fold at its period, the
-                            # classifier's own redetections of it still count, unless interference.
-                            kept, z = ([m for m in clean if m[0]['type'] == 'known_pulsar'
-                                        and m[0]['pulsar'] == p['name']] if 'fold' in routes else []), None
-                            if not kept:
-                                continue
-                        matched = kept
-                    elif 'fold' not in routes:
-                        continue
-                    else:
-                        matched = clean   # too few to phase: the fold shows the pulsar, not these pulses
-                    for e, separation, _ in matched:
-                        if e['key'] not in rows or separation < rows[e['key']][3]:
-                            rows[e['key']] = (e['key'], p['name'], p.get('bname') or p['name'], separation,
-                                              '+'.join(routes), z)
-        with self.db:
-            self.db.execute('DELETE FROM sp_known')
-            self.db.executemany('INSERT OR REPLACE INTO sp_known VALUES (?,?,?,?,?,?)', list(rows.values()))
+                matched = kept
+            elif 'fold' not in routes:
+                continue
+            else:
+                matched = clean   # too few to phase: the fold shows the pulsar, not these pulses
+            for e, separation, _ in matched:
+                # What the classifier turned down helps to find the rotation; only candidates are recorded.
+                if e[3] is not None and (e[3] not in rows or separation < rows[e[3]][3]):
+                    rows[e[3]] = (e[3], p['name'], p.get('bname') or p['name'], separation, '+'.join(routes), z)
 
     def campaign_evidence(self):
         """What the campaign's own (non-pilot) search holds, for judging catalogued sources.

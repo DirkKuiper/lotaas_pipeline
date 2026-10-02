@@ -166,9 +166,6 @@ class Snippets:
         types = [t for t in self.cfg.snippet_types]
         clauses = [f"d.detection_type IN ({','.join('?' * len(types))})"]
         params = list(types)
-        if self.cfg.rejected_above is not None:
-            clauses.append("(d.detection_type='rejected' AND d.classification_probability>?)")
-            params.append(self.cfg.rejected_above)
         rows = index.execute(
             f"""SELECT d.id, d.key, d.item, d.detection_type AS type, d.candidate_dm AS dm, d.snr,
                        d.width_samples, d.time_seconds, d.sample_number,

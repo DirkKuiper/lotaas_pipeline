@@ -1,4 +1,4 @@
-"""Run the web layer: `python -m web serve|index|snippets|url` (see web/README.md)."""
+"""Run the web layer: `python -m web serve|index|snippets|compact|url` (see web/README.md)."""
 import argparse
 import json
 import logging
@@ -20,6 +20,8 @@ def main(argv=None):
     index.add_argument('--watch', action='store_true')
     snippets = sub.add_parser('snippets', help='One hold/cut/release pass')
     snippets.add_argument('--rescan', action='store_true', help='Look for source filterbanks again')
+    sub.add_parser('compact', help='Once, with the pages stopped: move what the classifier turned down out of '
+                                   'the candidates of an older index and shrink the file')
     sub.add_parser('url', help='Print the address with its access token')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -52,6 +54,9 @@ def main(argv=None):
         print(json.dumps(cutter.run_pass()), flush=True)
         indexer.sync_snippets()
         indexer.derive()
+    elif args.command == 'compact':
+        from web.indexer import Indexer
+        print(json.dumps({'moved': Indexer(cfg).compact()}), flush=True)
     elif args.command == 'url':
         from web.app import token
         print(f'http://localhost:{cfg.port}/?token={token(cfg)}')

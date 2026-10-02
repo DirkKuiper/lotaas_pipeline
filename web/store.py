@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS detections (id INTEGER PRIMARY KEY, beam_id TEXT, ite
 CREATE INDEX IF NOT EXISTS detections_key ON detections(key);
 CREATE INDEX IF NOT EXISTS detections_item ON detections(item);
 CREATE INDEX IF NOT EXISTS detections_run ON detections(beam_run_id);
+-- What the classifier turned down (FETCH's rejections, what its own data did not confirm, what was never
+-- classified): 14.7 of the ledger's 14.8 million detections on 2 October 2026. Nobody reviews them; they are
+-- the other events at a candidate's moment (indexer.derive_moments), kept by beam without a candidate's text.
+-- As candidates they made the index 23 GB and each pass, which rebuilt them all, 1.8 hours.
+CREATE TABLE IF NOT EXISTS sp_items (id INTEGER PRIMARY KEY, item TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS sp_events (item INTEGER NOT NULL, id INTEGER NOT NULL, type TEXT, dm REAL, snr REAL,
+    width INTEGER, time REAL, PRIMARY KEY (item, id)) WITHOUT ROWID;
 DROP TABLE IF EXISTS slack;
 CREATE TABLE IF NOT EXISTS archive_beams (uri TEXT, raw_path TEXT, item TEXT, observation TEXT,
     sap INTEGER, beam INTEGER, PRIMARY KEY(uri, raw_path));
@@ -116,7 +123,7 @@ CREATE TABLE IF NOT EXISTS sp_low_dm (dir TEXT, item TEXT, dm REAL, snr REAL, ti
 CREATE INDEX IF NOT EXISTS sp_low_dm_dir ON sp_low_dm(dir);
 CREATE TABLE IF NOT EXISTS sp_low_dm_read (dir TEXT PRIMARY KEY);
 -- A single-pulse event among a burst of events of its own beam at one moment at scattered DMs,
--- none standing out (indexer.derive_coincidence): an undispersed burst seen in one beam.
+-- none standing out (indexer.derive_moments): an undispersed burst seen in one beam.
 CREATE TABLE IF NOT EXISTS sp_sweep (key TEXT PRIMARY KEY, events INTEGER, expected REAL, dm_min REAL,
     dm_max REAL, peak_ratio REAL);
 -- The review page's local S/N of a queued single-pulse candidate, measured once on its snippet as the
@@ -130,7 +137,7 @@ CREATE TABLE IF NOT EXISTS sp_local_snr (key TEXT PRIMARY KEY, local_snr REAL, m
 CREATE TABLE IF NOT EXISTS sp_dispersion (key TEXT PRIMARY KEY, snr_dm REAL, snr_zero REAL, expected_zero REAL,
     dropout INTEGER, measured REAL, snr_min REAL, version INTEGER, zero_filtered REAL, zero_chance REAL,
     snr_dm_filtered REAL, kept_filtered REAL);
--- A single pulse of a catalogued pulsar seen away from its own beam (indexer.derive_known).
+-- A single pulse of a catalogued pulsar seen away from its own beam (indexer.known_in).
 CREATE TABLE IF NOT EXISTS sp_known (key TEXT PRIMARY KEY, pulsar TEXT, name TEXT, separation_deg REAL,
     route TEXT, z REAL);
 -- Every catalogued pulsar near a campaign-searched beam, what LOFAR has published of it, and what the search found.
@@ -190,6 +197,9 @@ ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
 # WAL holds (web.sqlite is about 1 GB; SQLite's default cache is 2 MB).
 MMAP_BYTES = 4 << 30
 CACHE_KIB = 64 << 10
+# The write-ahead log is cut back to this after a checkpoint: one pass that rewrote every candidate
+# left it at 15.8 GB beside a 23 GB index (2 October 2026).
+WAL_LIMIT_BYTES = 256 << 20
 
 
 def _connect(path, schema):
@@ -198,6 +208,7 @@ def _connect(path, schema):
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA journal_mode=WAL')
     db.execute('PRAGMA busy_timeout=60000')
+    db.execute(f'PRAGMA journal_size_limit={WAL_LIMIT_BYTES}')
     db.execute(f'PRAGMA mmap_size={MMAP_BYTES}')
     db.execute(f'PRAGMA cache_size=-{CACHE_KIB}')
     db.executescript(schema)

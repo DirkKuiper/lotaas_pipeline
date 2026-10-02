@@ -42,7 +42,9 @@ FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'conver
 # Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
 # what waits for a person; the other types can be listed but are not queued.
 # 'dispersed': FETCH said no, but its own data show a dispersed pulse (classify, 28 September 2026).
-KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar', 'rejected', 'unclassified', 'unconfirmed'),
+# What the classifier turned down (rejected, unconfirmed, unclassified) is not listed: the index keeps those as
+# the other events at a candidate's moment (sp_events), and the campaign ledger keeps each one.
+KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar'),
                 'queue': ('candidate', 'dispersed', 'known_pulsar'),
                 'page': '/single-pulse', 'sort': 'recent'},
          'periodic': {'types': ('periodic', 'periodic_rfi'), 'queue': ('periodic',),
@@ -63,7 +65,7 @@ COINCIDENT_BEAMS = 5
 CHANCE_MAX = 1e-6
 
 
-# How indexer.derive_known saw that a pulsar was in the observation.
+# How indexer.known_in saw that a pulsar was in the observation.
 KNOWN_ROUTES = {'fold': 'a fold at its period', 'redetection': 'the classifier redetected it',
                 'rotation': 'these pulses keep its rotation'}
 
@@ -692,7 +694,7 @@ def create_app(cfg, run_background=True):
         if kind == 'sp' and params.get('coincident') != 'include':
             clauses.append(f'NOT EXISTS (SELECT 1 FROM sp_coincidence x WHERE x.key=c.key AND {coincident_sql("x")})')
         if kind == 'sp' and params.get('known') != 'include':
-            # Pulses of a catalogued pulsar seen away from its own beam (indexer.derive_known).
+            # Pulses of a catalogued pulsar seen away from its own beam (indexer.known_in).
             clauses.append('NOT EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key)')
         if kind == 'periodic' and params.get('multibeam') != 'include':
             clauses.append(f'NOT EXISTS (SELECT 1 FROM periodic_families pf WHERE pf.key=c.key '
@@ -789,6 +791,7 @@ def create_app(cfg, run_background=True):
                 types = dict(db.execute(f'SELECT c.type, COUNT(*) FROM candidates c WHERE {every} GROUP BY c.type',
                                         every_args).fetchall())
             triage_counts = {}
+            turned_down = meta(db, 'turned_down', {}) if kind == 'sp' else {}
             hidden = known_hidden = 0
             if kind == 'sp' and params.get('coincident') != 'include':
                 hidden = total(coincident='include') - count
@@ -806,7 +809,8 @@ def create_app(cfg, run_background=True):
         query = urlencode({k: v for k, v in params.items() if k not in ('page', 'kind')})
         return page(request, template, found=found, count=count, params=params, number=number_,
                     pages=max(1, math.ceil(count / 100)), types=types, query=query, kind=kind,
-                    triage_counts=triage_counts, coincident_hidden=hidden, known_hidden=known_hidden)
+                    triage_counts=triage_counts, coincident_hidden=hidden, known_hidden=known_hidden,
+                    turned_down=turned_down)
 
     @app.get('/single-pulse', response_class=HTMLResponse)
     def single_pulse(request: Request):
