@@ -1259,11 +1259,12 @@ class Indexer:
         measured = []
         for key, path in rows:
             try:
-                snr = float(Snippet(path).view()['peak_snr'])
+                snr = Snippet(path).view()['peak_snr']
             except Exception as error:     # a snippet that cannot be read is measured again next time
                 logger.warning('Could not measure %s: %s', key, error)
                 continue
-            measured.append((key, snr if math.isfinite(snr) else None, time.time()))
+            # No S/N where the candidate's own window is masked: recorded as that, not tried again every pass.
+            measured.append((key, float(snr) if snr is not None and math.isfinite(snr) else None, time.time()))
         with self.db:
             self.db.executemany('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,?)', measured)
         return len(measured)
