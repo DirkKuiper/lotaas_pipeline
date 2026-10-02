@@ -1,15 +1,22 @@
 """What the survey's searched beams say about the FRB rate at 135 MHz, from the injection lane's completeness.
 
-    python -m euroflash.frb_rate [--lane LANE_DB] [--web WEB_DB] [--fingerprint PREFIX] [--sefd 250 400 600]
+    python -m euroflash.frb_rate [--lane LANE_DB] [--web WEB_DB] [--fingerprint PREFIX] [--sefd 440 580 890]
                                  [--alpha -1.4] [--tab-fwhm 0.40] [--station-fwhm 4.3] [--hours 1.0]
 
 Ingredients, each stated so that it can be replaced:
   completeness  C(S/N) of an injected burst reaching the review queue (euroflash.injections), a logistic in
                 log S/N fitted per class of scattering time at 135 MHz, where S/N is the burst's ideal
                 (radiometer) S/N in the beam it lands in;
-  S/N per Jy s  each injected burst's ideal S/N per unit fluence, snr_ideal / (fluence_units / level) in units
-                of the system's power, over the SEFD: bursts of the population are drawn from the injected
-                ones, so its scattering, widths, DMs and spectra are theirs;
+  S/N per Jy s  each injected burst's ideal S/N per unit fluence. Its fluence in Jy s is fluence_units /
+                sigma_mean (channel-sample sigma x seconds) times the Jy one sigma stands for, SEFD /
+                sqrt(2 x channel width x sample time). The noise carries the scale, not the data's level,
+                which holds the requantiser's offset (sigma / level is 0.025 in LT5 beams and 0.10 in the
+                early-cycle ones; radiometer noise alone would give 0.036). Bursts of the population are
+                drawn from the injected ones, so its scattering, widths, DMs and spectra are theirs;
+  SEFD          measured on 18 pulsars folded in their tied-array beams against literature fluxes at 135 MHz
+                (2 Oct 2026, benchmarks/sefd-calibration-2026-10-02): 410 Jy at the zenith under a 350 K sky,
+                times (400 K + sky) / 750 K and sin(elevation)^-1.39. Over the searched SAPs that is 440, 580
+                and 890 Jy at the 10th, 50th and 90th percentile, the defaults here;
   beams         the tied-array beams at their recorded positions (web.sqlite), Gaussian of TAB_FWHM, inside
                 a Gaussian station beam of STATION_FWHM centred on the SAP's 61-beam core: an FRB anywhere
                 in a SAP's field is seen by its best beam at that beam's relative gain;
@@ -30,12 +37,10 @@ LANE_DB = Path('/shared/results/dkuiper/lotaas/injections/lane.sqlite')
 WEB_DB = Path('/shared/results/dkuiper/lotaas/web/web.sqlite')
 SKY_DEG2 = 4 * math.pi * (180 / math.pi) ** 2
 TAU_CLASSES = (0.0, 0.05, 0.2, 0.5, 1.0, 1e9)
-# Fluences are drawn from this up (Jy ms), well below what the search sees, and rescaled to N(>1 Jy ms).
-F_MIN = 10.0
 
 
 def logistic(x, x50, sigma, top):
-    return top / (1 + np.exp(-(x - x50) / sigma))
+    return top / (1 + np.exp(np.clip(-(x - x50) / sigma, -700, 700)))
 
 
 def fit_completeness(snr, found):
@@ -89,8 +94,9 @@ def snr_per_jy_s(bursts, sefd):
     """(ideal S/N per Jy s of fluence at this SEFD, scattering time) of the bursts whose truth records fluence."""
     kappa, tau = [], []
     for b in bursts:
-        if b.get('fluence_units') and b.get('level'):
-            kappa.append(b['snr_ideal'] * b['level'] / b['fluence_units'] / sefd)
+        if b.get('fluence_units') and b.get('sigma_mean'):
+            jy_per_sigma = sefd / math.sqrt(2 * b['channel_mhz'] * 1e6 * b['tsamp'])
+            kappa.append(b['snr_ideal'] * b['sigma_mean'] / b['fluence_units'] / jy_per_sigma)
             tau.append(b['tau135'])
     return np.array(kappa), np.array(tau)
 
@@ -124,12 +130,28 @@ def gain_samples(positions, core, tab_fwhm, station_fwhm, rng, n=2000, radius=2.
     return station * tab, math.pi * radius ** 2
 
 
-def exposure(bursts, model, fields, sefd, alpha, tab_fwhm, station_fwhm, hours, draws=4000, seed=0):
+def detected_per_unit(model, alpha, taus, kappa):
+    """Per burst, the detections per unit N(>1 Jy ms) arriving at unit gain: the integral of its class's
+    completeness over the fluence distribution, integral of C(s) (-alpha) s^alpha dln s with s = kappa g F the
+    ideal S/N, which leaves (kappa g)^-alpha outside. Exact, where drawing fluences from the power law leaves
+    the sum to the few brightest draws."""
+    lns = np.linspace(0.0, math.log(1e5), 4000)
+    out = np.zeros_like(kappa)
+    for (lo, hi), (x50, sigma, top, _) in model.items():
+        c = logistic(lns / math.log(10), x50, sigma, top)
+        integral = float((c * -alpha * np.exp(alpha * lns)).sum() * (lns[1] - lns[0]))
+        sel = (taus >= lo) & (taus < hi)
+        out[sel] = integral * (kappa[sel] * 1e-3) ** -alpha            # kappa is per Jy s, fluences are in Jy ms
+    return out
+
+
+def exposure(bursts, model, fields, sefd, alpha, tab_fwhm, station_fwhm, hours, seed=0):
     """(effective exposure in sky x days, SAPs, beams): the expected detections per unit R of N(>1 Jy ms)."""
     rng = np.random.default_rng(seed)
     kappa, taus = snr_per_jy_s(bursts, sefd)
     if not len(kappa):
         raise ValueError('no injected burst records its fluence yet (the lane truth has it from 94e7a4f on)')
+    per_burst = detected_per_unit(model, alpha, taus, kappa).mean()
     total, saps, beams = 0.0, 0, 0
     for beams_of in fields.values():
         coherent = {b: v for b, v in beams_of.items() if b != 12}
@@ -138,13 +160,7 @@ def exposure(bursts, model, fields, sefd, alpha, tab_fwhm, station_fwhm, hours, 
         positions = np.array(list(coherent.values()))
         core = np.array([v for b, v in coherent.items() if b >= 13] or list(coherent.values())).mean(axis=0)
         gains, area = gain_samples(positions, core, tab_fwhm, station_fwhm, rng)
-        # Fluences from N(>F) ~ F^alpha above F_MIN: the detected fraction of what arrives in the field,
-        # times the fraction of N(>1 Jy ms) above F_MIN.
-        f = F_MIN * rng.random(draws) ** (1 / alpha)                     # Jy ms, Pareto of index -alpha
-        i = rng.integers(len(kappa), size=draws)
-        g = gains[rng.integers(len(gains), size=draws)]
-        detected = completeness(model, taus[i], kappa[i] * g * f * 1e-3).mean()
-        total += F_MIN ** alpha * area / SKY_DEG2 * hours / 24.0 * detected
+        total += area / SKY_DEG2 * hours / 24.0 * per_burst * float((gains ** -alpha).mean())
         saps += 1
         beams += len(coherent)
     return total, saps, beams
@@ -155,7 +171,8 @@ def main(argv=None):
     p.add_argument('--lane', type=Path, default=LANE_DB)
     p.add_argument('--web', type=Path, default=WEB_DB)
     p.add_argument('--fingerprint', help='code fingerprint prefix of the searches (and injections) to count')
-    p.add_argument('--sefd', type=float, nargs='+', default=[250.0, 400.0, 600.0], help='Jy, per beam')
+    p.add_argument('--sefd', type=float, nargs='+', default=[440.0, 580.0, 890.0],
+                   help='Jy at a beam centre: the searched fields at their 10th, 50th and 90th percentile')
     p.add_argument('--alpha', type=float, default=-1.4)
     p.add_argument('--tab-fwhm', type=float, default=0.40, help='degrees at 135 MHz')
     p.add_argument('--station-fwhm', type=float, default=4.3, help='degrees at 135 MHz')

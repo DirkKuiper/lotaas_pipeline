@@ -7,6 +7,9 @@ import numpy as np
 
 from euroflash import frb_rate
 
+# One sigma of a 48.8 kHz channel in a 7.864 ms sample stands for SEFD / 27.7 Jy.
+UNITS = {'sigma_mean': 0.025, 'tsamp': 0.007864, 'channel_mhz': 0.048828125}
+
 
 def test_the_completeness_fit_finds_the_threshold():
     rng = np.random.default_rng(1)
@@ -22,7 +25,7 @@ def fake_lane(path, n=400, seed=2):
         db.execute('CREATE TABLE bursts (twin TEXT, idx INTEGER, fingerprint TEXT, queued INTEGER, record TEXT)')
         for i in range(n):
             snr = float(np.exp(rng.uniform(math.log(6), math.log(60))))
-            record = {'tau135': 0.01, 'snr_ideal': snr, 'fluence_units': snr * 1e-3, 'level': 1.0}
+            record = dict(UNITS, tau135=0.01, snr_ideal=snr, fluence_units=snr * 2.5e-5, level=1.0)
             db.execute('INSERT INTO bursts VALUES (?,?,?,?,?)', ('t', i, 'abc', int(snr > 12), json.dumps(record)))
 
 
@@ -62,9 +65,24 @@ def test_a_survey_can_be_projected_from_injected_bursts_and_one_sap_s_layout(tmp
     bursts = []
     for _ in range(300):
         snr = float(np.exp(rng.uniform(math.log(6), math.log(60))))
-        bursts.append({'tau135': 0.01, 'snr_ideal': snr, 'fluence_units': snr * 1e-3, 'level': 1.0, 'queued': int(snr > 12)})
+        bursts.append(dict(UNITS, tau135=0.01, snr_ideal=snr, fluence_units=snr * 2.5e-5, level=1.0, queued=int(snr > 12)))
     (tmp_path / 'bursts.json').write_text(json.dumps(bursts))
     frb_rate.main(['--web', str(tmp_path / 'web.sqlite'), '--bursts', str(tmp_path / 'bursts.json'),
                    '--project-saps', '100', '--sefd', '400'])
     out = capsys.readouterr().out
     assert '100 SAPs (7300 beams)' in out and 'R(>100 Jy ms) <' in out
+
+
+def test_fluence_is_scaled_by_the_noise_not_by_the_level():
+    burst = dict(UNITS, tau135=0.01, snr_ideal=10.0, fluence_units=2.5e-4)
+    kappa, _ = frb_rate.snr_per_jy_s([dict(burst, level=1.0), dict(burst, level=4.0)], 554.0)
+    # 2.5e-4 / 0.025 = 0.01 sigma s; one sigma is 554 / 27.7 = 20 Jy: 0.2 Jy s, so S/N 10 is 50 per Jy s.
+    assert np.allclose(kappa, 50.0, rtol=2e-3)
+
+
+def test_the_exposure_is_the_integral_over_the_fluence_distribution(tmp_path):
+    """A step completeness at S/N 12 detects every burst above 12 / (kappa g): N(>F) there, per unit N(>1 Jy ms)."""
+    model = {(0.0, 0.05): (math.log10(12.0), 1e-4, 1.0, 100)}
+    kappa = np.array([50.0, 100.0])                                   # S/N per Jy s
+    got = frb_rate.detected_per_unit(model, -1.4, np.array([0.01, 0.01]), kappa)
+    assert np.allclose(got, (12.0 / (kappa * 1e-3)) ** -1.4, rtol=0.01)
