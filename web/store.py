@@ -56,11 +56,18 @@ CREATE INDEX IF NOT EXISTS detections_run ON detections(beam_run_id);
 CREATE TABLE IF NOT EXISTS sp_items (id INTEGER PRIMARY KEY, item TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS sp_events (item INTEGER NOT NULL, id INTEGER NOT NULL, type TEXT, dm REAL, snr REAL,
     width INTEGER, time REAL, PRIMARY KEY (item, id)) WITHOUT ROWID;
+-- Beams searched and archives wholly searched, filled each pass (forecast.materialize) for the forecast and the pages.
+CREATE TABLE IF NOT EXISTS searched_items (item TEXT PRIMARY KEY, finished REAL);
+CREATE TABLE IF NOT EXISTS searched_uris (uri TEXT PRIMARY KEY, finished REAL);
 DROP TABLE IF EXISTS slack;
 CREATE TABLE IF NOT EXISTS archive_beams (uri TEXT, raw_path TEXT, item TEXT, observation TEXT,
     sap INTEGER, beam INTEGER, PRIMARY KEY(uri, raw_path));
 CREATE TABLE IF NOT EXISTS archive_receipts (uri TEXT PRIMARY KEY, item TEXT, bytes INTEGER);
 CREATE INDEX IF NOT EXISTS receipts_item ON archive_receipts(item);
+-- The forecast asks of each searched beam whether its archive is in the campaign: without these every beam
+-- read all 75,000 archive rows (125 s for each of three windows, 2 October 2026).
+CREATE INDEX IF NOT EXISTS archive_beams_item ON archive_beams(item);
+CREATE INDEX IF NOT EXISTS archive_beams_uri ON archive_beams(uri);
 CREATE TABLE IF NOT EXISTS catalogue_files (uri TEXT PRIMARY KEY, project TEXT, observation TEXT,
     kind TEXT, name TEXT, bytes INTEGER, sap INTEGER, beam INTEGER, part INTEGER, encoding TEXT);
 CREATE INDEX IF NOT EXISTS catalogue_scope ON catalogue_files(kind, project, beam);

@@ -114,13 +114,25 @@ def catalogue(db, root):
 
 # The ledger has multiple attempts and may have several fingerprints for one
 # beam. Count its first successful production completion once, excluding pilots.
-SEARCH = """SELECT a.item, MIN(a.finished) AS finished FROM attempts a
-    JOIN runs r ON r.fingerprint=a.fingerprint
-    WHERE a.stage='classify' AND a.status='success' AND r.pilot=0
-    AND a.finished IS NOT NULL GROUP BY a.item"""
-SEARCHED_URIS = f"""SELECT ab.uri, MIN(s.finished) AS finished
-    FROM archive_beams ab LEFT JOIN ({SEARCH}) s ON s.item=ab.item GROUP BY ab.uri
-    HAVING COUNT(s.item)=COUNT(*)"""
+# Beams searched (a successful classify of a campaign run) and archives every beam of which was: kept as tables
+# (searched_items, searched_uris; materialize) and read through these. As subqueries, joined to the files or the
+# catalogue's 400,000 archives, each was worked out again for every row: 940 s of a pass on 2 October 2026.
+SEARCH = 'SELECT item, finished FROM searched_items'
+SEARCHED_URIS = 'SELECT uri, finished FROM searched_uris'
+
+
+def materialize(db):
+    """Fill searched_items and searched_uris from the attempts the index holds now."""
+    with db:
+        db.execute('DELETE FROM searched_items')
+        db.execute("""INSERT INTO searched_items SELECT a.item, MIN(a.finished) AS finished FROM attempts a
+            JOIN runs r ON r.fingerprint=a.fingerprint
+            WHERE a.stage='classify' AND a.status='success' AND r.pilot=0
+            AND a.finished IS NOT NULL AND a.item IS NOT NULL GROUP BY a.item""")
+        db.execute('DELETE FROM searched_uris')
+        db.execute("""INSERT INTO searched_uris SELECT ab.uri, MIN(s.finished) AS finished
+            FROM archive_beams ab LEFT JOIN searched_items s ON s.item=ab.item WHERE ab.uri IS NOT NULL GROUP BY ab.uri
+            HAVING COUNT(s.item)=COUNT(*)""")
 
 
 def excluded_sql(cfg, column):
@@ -210,6 +222,7 @@ def projection(scope, rate):
 
 def update(db, cfg, now=None):
     now = time.time() if now is None else now
+    materialize(db)
     source = catalogue(db, cfg.observation_catalogue)
     # Throughput charts count everything searched; paces are per source, since SPIDER
     # beams need no tape and would flatter the LTA projections.
