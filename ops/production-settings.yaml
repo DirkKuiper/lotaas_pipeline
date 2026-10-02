@@ -118,23 +118,20 @@ classification:
   # and stricter ones below S/N 8. Through the whole chain, 558 of 803 FRB-like bursts injected into a
   # real SAP reached the queue (29% before 28 September), with 5 real clusters of the SAP
   # (benchmarks/frb-injection-2026-09-28).
-  # FETCH's DM-time plane spans DM +- enough for a pulse's arms to travel half-way to the plane's corners (at least
-  # +-5 DM, its only span before 30 September 2026, when a burst wider than ~0.1 s made a vertical bar), and its
-  # planes are built from the chunk scaled per channel, with the search's RFI mask and a zero-DM filter. Per
-  # candidate on the 28 September benchmark FETCH then passed 405-610 of 636 injected FRBs instead of 147, pulsar
-  # pulses 439-441 of 444 instead of 417. Through the whole chain on the 73 injected beams of L542179 SAP000,
-  # levelled, with FETCH also judging bursts up to 1 s wide at DM >= 100: FETCH recognised 632 of 803 bursts instead
-  # of 221, 478 reached the open queue instead of 473 (the 'dispersed' route caught most before), real clusters left
-  # open 16 instead of 12 (15 within 5 s of a burst), sp_classify 181 s a beam instead of 145
-  # (benchmarks/fetch-models-2026-09-30, fetch-bowtie-2026-09-30, configuration LH).
-  fetch_bowtie: 0.5
-  fetch_clean: {rfi_mask: true}
+  # fetch_bowtie (a DM-time span that follows the pulse width) and fetch_clean (the chunk scaled per channel, with the
+  # search's RFI mask and a zero-DM filter) stay off, and FETCH is not asked about bursts wider than 0.15 s at
+  # DM >= 100. With fetch_bowtie 0.5, fetch_clean {rfi_mask} and FETCH on every width (release 7981e0a, 30 September
+  # to 2 October 2026) FETCH passed 3.33 candidates a beam where it had passed 0.44, 13.8% of those it judged
+  # instead of 0.6%. Of its 49,111 positives in 14,906 beams, 40,099 were wider than 0.15 s (33,269 of them below
+  # DM 100): given a clean input and a bowtie it takes wide broadband interference for pulses, and 46 candidates a
+  # SAP were left open where there had been about none. The one-SAP chain test (fetch-bowtie-2026-09-30) had shown
+  # 16 real clusters open against 12; through the whole chain the change was worth 14 of 803 injected bursts (654
+  # against 640 open with the fixed triage), since the 'dispersed' route below judges wide bursts on their own data.
   dispersed:
     min_dm: 100.0
     min_snr: 7.0
     faint: {min_own_snr: 7.0, max_ratio: 0.5}
-    # FETCH is asked about every width since 30 September 2026 (0.15 s before: it rejected nearly all wider bursts).
-    fetch_max_width_seconds: 1.0
+    fetch_max_width_seconds: 0.15
     # A burst's on-pulse spectrum is smooth over many channels; the first night's candidates were mostly
     # channels jumping in level for seconds (own_data.smoothness: 1 of 428 injected bursts below 0.6, 112 of
     # 159 of the night's candidates), and events in the first and last seconds of the beam.

@@ -126,6 +126,10 @@ def fetch_range_dm(freqs, native_tsamp, width, bowtie, time_size=256, floor=FETC
     and did worst of all. On the 28 September FETCH benchmark (1,290 candidates), 0.5 raised the injected FRBs FETCH
     passes from 23% to 38% (64% with fetch_clean), with pulsar pulses unchanged at 94% (99%); 1.0 passed
     15 of 94 wide junk candidates without fetch_clean (0.5: 4) (benchmarks/fetch-models-2026-09-30).
+
+    Off in production since 2 October 2026: with 0.5, fetch_clean and FETCH on every width, FETCH passed 13.8% of
+    what it judged in 14,906 beams instead of 0.6%, four in five of them wide broadband interference
+    (ops/production-settings.yaml). That benchmark's junk, 94 candidates of three SAPs, was far too few to show it.
     """
     if not bowtie:
         return floor
