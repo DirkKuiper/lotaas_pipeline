@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from web.indexer import Indexer, fp16_of, run_of, sexagesimal
 from web.keys import sp_key
 from web.tests.conftest import ITEM
@@ -60,3 +62,17 @@ def test_slack_columns_are_dropped_and_verdicts_kept(cfg):
     reviews = store.reviews(cfg)
     assert 'slack_ts' not in {row[1] for row in reviews.execute('PRAGMA table_info(reviews)')}
     assert [tuple(r) for r in reviews.execute('SELECT key, label FROM reviews')] == [('k', 'noise')]
+
+
+def test_results_of_benchmarks_and_the_injection_lane_are_pilot_runs(cfg, campaign):
+    import shutil
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    row = indexer.db.execute('SELECT dir, pilot FROM beams').fetchone()
+    assert not row['pilot']
+    node = Path(row['dir']).parents[2]                         # .../<run>/<node>/processed/<item>/<fp16>
+    copy = cfg.result_roots[0] / 'benchmarks' / 'trial' / node.name
+    shutil.copytree(node, copy)
+    indexer.run_pass(full=True)
+    flags = {('/benchmarks/' in r['dir']): r['pilot'] for r in indexer.db.execute('SELECT dir, pilot FROM beams')}
+    assert flags == {True: 1, False: row['pilot']}

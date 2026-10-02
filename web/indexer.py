@@ -38,6 +38,9 @@ PLOT = re.compile(r'^DM(?P<dm>[-\d.]+)_Width(?P<width>\d+)_SNR(?P<snr>[-\d.]+)\.
 POINTING = re.compile(r'(P\d+[A-Z]?)')
 PRUNE = {'downloads', 'extracted', 'prepared', 'dispatch', 'data', 'logs', 'staging', 'catalogue',
          'held', 'snippets', 'containers', 'trials', '__pycache__', 'input', 'source'}
+# Results under these directories are trials, whatever their run.json says: 1,069 beams of benchmarks, the
+# injection lane and old pilots counted as the campaign's on 2 October 2026.
+PILOT_DIRS = ('benchmarks', 'injections', 'pilots', 'spider-pilot')
 STALE_SECONDS = 2 * 86400
 FAMILY_TOLERANCE = 5e-4  # relative period difference within one periodic family
 # Single-pulse coincidence: events within this many seconds (or 1.5 widths), once
@@ -497,8 +500,11 @@ class Indexer:
             indexed += self.index_processed(processed)
             with db:
                 db.execute('INSERT OR REPLACE INTO result_dirs VALUES (?,?,?)', (str(processed), mtime, now))
-        if full:
-            with db:
+        with db:
+            # Beams indexed before PILOT_DIRS.
+            db.execute('UPDATE beams SET pilot=1 WHERE COALESCE(pilot, 0)=0 AND ('
+                       + ' OR '.join('dir LIKE ?' for _ in PILOT_DIRS) + ')', [f'%/{name}/%' for name in PILOT_DIRS])
+            if full:
                 meta_set(db, 'results_full_scan', now)
         return indexed
 
@@ -514,6 +520,7 @@ class Indexer:
     def index_processed(self, processed):
         node_dir = processed.parent
         run_name, fingerprint, pilot = self.run_identity(node_dir)
+        pilot = pilot or any(part in PILOT_DIRS for part in node_dir.parts)
         count = 0
         for item_dir in os.scandir(processed):
             if not item_dir.is_dir():
