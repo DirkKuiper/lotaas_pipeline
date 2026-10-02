@@ -36,7 +36,7 @@ VETO_RADIUS_DEG = float(os.environ.get("LOTAAS_ATNF_VETO_RADIUS_DEG", "1.0"))
 DEFAULT_LIMITS = {"min_dm": 2.0, "min_snr": 7.0, "max_width_seconds": None,
                   "max_fetch_candidates": None, "min_local_snr": None, "min_raw_local_snr": None,
                   "min_own_snr": None, "min_own_fraction": None, "dispersed": None,
-                  "fetch_bowtie": None, "fetch_clean": False}
+                  "fetch_bowtie": None, "fetch_clean": False, "fetch_high_dm": None}
 
 # FETCH's DM-time plane spans at least DM +- this (its only span until 30 September 2026).
 FETCH_MIN_RANGE_DM = 5.0
@@ -66,6 +66,33 @@ def dispersed_tier(route, width_seconds):
         if width_seconds is None or width_seconds <= tier['max_width_seconds']:
             return tier
     return None
+
+
+def high_dm_accepts(high, fetch_probs, measure):
+    """Whether FETCH's verdict stands at the DMs of `fetch_high_dm`: at least min_votes of its models above 0.5,
+    and on the candidate's own data (measure() gives its dispersion ratio and smoothness, called only once the votes
+    are there) a pulse that fades when dedispersed too little and a spectrum smooth across the band.
+    Returns (accepted, ratio, smoothness).
+
+    On its bowtie and cleaned input (fetch_bowtie, fetch_clean) FETCH recognised 632 of 634 injected FRB-like bursts
+    in the levelled chain test where it had recognised 345, but with one model enough it passed 13.8% of all it
+    judged in production (30 September to 2 October 2026, 14,906 beams), 40,099 of its 49,111 positives wider than
+    0.15 s and most below DM 100, where a wide broadband burst cannot be told from DM 0. From DM 100, with five of
+    six models, smoothness 0.6, the beam's edges left out and ratio 0.8: 608 of the 634 by FETCH and 626 with the
+    dispersed route behind it (613 by the route alone), and 0.24 a SAP of those positives still open, 0.48 with the
+    route's (13.7 with one model; benchmarks/fetch-flood-2026-10-02). A narrow-band patch at 145 MHz that five
+    models passed at DM 1213 (L522694 SAP002 B033) is what the smoothness is for.
+    """
+    if sum(p > 0.5 for p in fetch_probs.values()) < high.get('min_votes', 1):
+        return False, None, None
+    try:
+        ratio, smooth = measure()
+    except Exception as error:
+        logger.warning("FETCH's verdict not checked on its own data: %s", error)
+        return False, None, None
+    accepted = (ratio is not None and ratio <= high.get('max_ratio', 1.0)
+                and smooth is not None and smooth >= high.get('min_smoothness', 0.0))
+    return accepted, ratio, smooth
 
 
 def dm_time_plane(cand, decimate, time_size=256, dmsteps=256, range_dm=5.0):
@@ -283,7 +310,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     if limits['min_local_snr'] is not None and evidence is None:
         raise ValueError('Local S/N screening requires single_pulse_evidence.json')
     counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0, "dispersed": 0,
-              "unjudged": 0}
+              "unjudged": 0, "fetch_unsupported": 0}
     own_check = limits['min_own_snr'] is not None and limits['min_own_fraction'] is not None and bool(plan)
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
@@ -454,12 +481,19 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             width_seconds = width * tsamp if tsamp else None
             # FETCH accepted almost none of the injected bursts wider than 150 ms: at the route's
             # DMs, past its fetch_max_width_seconds, only the route judges a cluster.
+            # From fetch_high_dm's DM on FETCH is asked about every width, on its bowtie and cleaned input, and its
+            # verdict needs more than one model and the candidate's own data behind it (high_dm_accepts).
+            high = limits['fetch_high_dm'] if limits['fetch_high_dm'] and dm >= limits['fetch_high_dm']['min_dm'] else None
             unjudged = bool(route and dm >= route['min_dm'] and (
-                (route.get('fetch_max_width_seconds') is not None and width_seconds is not None
+                (not high and route.get('fetch_max_width_seconds') is not None and width_seconds is not None
                  and width_seconds > route['fetch_max_width_seconds'])
                 or snr <= limits['min_snr']))           # below FETCH's gate, let in by the route's own
             time_size, freq_size, dm_size = 256, 256, 256
             fetch_probs = highest_prob = None
+            accepted = False
+            high_ratio = high_smooth = None
+            fetch_bowtie = high.get('bowtie') if high else limits['fetch_bowtie']
+            fetch_clean = high.get('clean', False) if high else limits['fetch_clean']
             if unjudged:
                 counts["unjudged"] += 1
             else:
@@ -470,14 +504,27 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 # Proceed with classification of non-pulsar candidates
                 cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
                                                                 time_size, freq_size, dm_size,
-                                                                bowtie=limits['fetch_bowtie'], clean=limits['fetch_clean'])
+                                                                bowtie=fetch_bowtie, clean=fetch_clean)
                 fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
                                for name, model in fetch_models.items()}
                 if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
                     raise ValueError(f"Invalid FETCH probabilities at DM={dm}, time={tcand}")
                 highest_prob = max(fetch_probs.values())
+                accepted = highest_prob > 0.5
+                if accepted and high:
+                    if high.get('edge_seconds') and near_edge(filterbank_file, dm, tcand, high['edge_seconds']):
+                        accepted = False
+                    else:
+                        def measure():
+                            data = load_own(filterbank_file, dm, tcand, width, plan, bad_channels)
+                            ratio, _ = dispersion_ratio(data, baseline_seconds=baseline_seconds or 2.0,
+                                                        baseline_widths=baseline_widths or 64)
+                            return ratio, smoothness(data)
+                        accepted, high_ratio, high_smooth = high_dm_accepts(high, fetch_probs, measure)
+                    if not accepted:
+                        counts["fetch_unsupported"] += 1
 
-            if unjudged or highest_prob <= 0.5:
+            if unjudged or not accepted:
                 # Record the rejection. A bare `continue` left no plot, no row
                 # and no log line, so a candidate the classifier discarded was
                 # indistinguishable in the outputs from one never found. An
@@ -485,8 +532,8 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 # three fainter ones from the same beam scored above 0.97, and
                 # nothing recorded that it had been considered at all.
                 if not unjudged:
-                    logger.info("FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f)",
-                                dm, tcand, snr, width, highest_prob)
+                    logger.info("FETCH rejected DM=%.2f t=%.3f S/N=%.2f width=%d (max p=%.3f, %d models above 0.5)",
+                                dm, tcand, snr, width, highest_prob, sum(p > 0.5 for p in fetch_probs.values()))
                 tier = dispersed_tier(route, width_seconds) if route and dm >= route['min_dm'] else None
                 if tier and snr <= limits['min_snr'] and route.get('faint'):
                     # Let in by the route's own, lower S/N gate: its stricter cuts too.
@@ -511,8 +558,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     if unjudged:                       # the review plot shows what FETCH would have seen
                         cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr,
                                                                         bad_channels, time_size, freq_size, dm_size,
-                                                                        bowtie=limits['fetch_bowtie'],
-                                                                        clean=limits['fetch_clean'])
+                                                                        bowtie=fetch_bowtie, clean=fetch_clean)
                 insert_detection(
                     beam_id=beam_id,
                     beam_run_id=beam_run_id,
@@ -544,7 +590,9 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     classification_probability=highest_prob,
                     model_probabilities=fetch_probs,
                     own_snr=own,
+                    dispersion_ratio=high_ratio,
                     dm_galactic=dm_galactic,
+                    smoothness=high_smooth,
                 )
 
             fil = FilterbankFile(filterbank_file, "read")

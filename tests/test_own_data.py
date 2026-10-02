@@ -4,6 +4,7 @@ import sqlite3
 import struct
 
 import numpy as np
+import pytest
 
 from lotaas_reprocessing import own_data
 
@@ -296,3 +297,93 @@ def test_a_pulse_in_row_levelled_data_is_measured_as_the_search_saw_it(tmp_path)
         assert own.local_snr(baseline_seconds=2.0, baseline_widths=8) > 10
     white = levelled_beam(tmp_path / 'white.fil', (70.0, 400.0, width, 0.5), level=False)
     assert own_data.stretch(white, 400.0, 70.0, width, plan)[3] == 32
+
+
+@pytest.mark.parametrize('votes, pulse, expected', [
+    (5, True, 'candidate'),      # five models and its own data: FETCH's verdict stands
+    (4, True, 'dispersed'),      # too few models: the route judges it, and its own data show it dispersed
+    (6, False, 'rejected'),      # six models on noise that does not fade at a lower DM: nothing stands
+])
+def test_from_its_dm_on_fetch_needs_its_votes_and_the_candidates_own_data(tmp_path, monkeypatch, votes, pulse, expected):
+    from test_tiers import classifier
+    classify = classifier(tmp_path, monkeypatch)
+    width = 13
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 300.0, width, 1.0)])
+    asked = []
+
+    class Model:
+        def __init__(self, p):
+            self.p = p
+
+        def predict(self, inputs, batch_size=1, verbose=0):
+            return np.array([[1 - self.p, self.p]])
+
+    from lotaas_reprocessing import fetch_models
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: {
+        name: Model(0.9 if i < votes else 0.1) for i, name in enumerate('abcdef')})
+    planes = type('Candidate', (), {'tsamp': TSAMP, 'dmt': np.random.default_rng(0).normal(size=(256, 256)),
+                                    'dedispersed': np.random.default_rng(1).normal(size=(256, NCHANS))})()
+
+    def inputs(*args, **kwargs):
+        asked.append(kwargs)
+        return planes, np.zeros((1, 256, 256, 1)), np.zeros((1, 256, 256, 1)), 1
+    monkeypatch.setattr(classify, 'fetch_inputs', inputs)
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    time = (60.0 if pulse else 120.0) + (width - 1) / 2 * TSAMP
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text(f'DM\tS/N\tTime\tSample\tFilter_Width\n300.0\t20.0\t{time}\t7630\t{width}\n')
+    # Without the check before FETCH, the noise reaches FETCH's own check on the candidate's data.
+    limits = {'min_dm': 2.0, 'min_snr': 8.0, **({'min_own_snr': 4.0, 'min_own_fraction': 0.5} if pulse else {}),
+              'dispersed': {'min_dm': 100.0, 'min_own_snr': 8.0, 'max_ratio': 0.5, 'max_width_seconds': 0.5,
+                            'fetch_max_width_seconds': 0.05},
+              'fetch_high_dm': {'min_dm': 100.0, 'bowtie': 0.5, 'clean': {'rfi_mask': True}, 'min_votes': 5,
+                                'max_ratio': 0.8, 'min_smoothness': 0.6, 'edge_seconds': 20.0}}
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'),
+                                          {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'},
+                                          limits=limits, tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    # Asked although wider than the route's fetch_max_width_seconds, and on the bowtie and cleaned input.
+    assert counts['fetch'] == 1 and counts['unjudged'] == 0
+    assert asked[0]['bowtie'] == 0.5 and asked[0]['clean'] == {'rfi_mask': True}
+    with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
+        kind, ratio, smooth = db.execute('SELECT detection_type, dispersion_ratio, smoothness FROM detections').fetchone()
+    assert kind == expected
+    if expected == 'candidate':
+        assert ratio < 0.5 and smooth > 0.6            # what stood behind FETCH is recorded with it
+
+
+def test_below_its_dm_fetch_is_asked_as_before(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    classify = classifier(tmp_path, monkeypatch)
+    width = 13
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 30.0, width, 1.0)])
+    asked = []
+
+    class Model:
+        def __init__(self, p):
+            self.p = p
+
+        def predict(self, inputs, batch_size=1, verbose=0):
+            return np.array([[1 - self.p, self.p]])
+
+    from lotaas_reprocessing import fetch_models
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: {'a': Model(0.9), 'b': Model(0.1)})
+    planes = type('Candidate', (), {'tsamp': TSAMP, 'dmt': np.random.default_rng(0).normal(size=(256, 256)),
+                                    'dedispersed': np.random.default_rng(1).normal(size=(256, NCHANS))})()
+
+    def inputs(*args, **kwargs):
+        asked.append(kwargs)
+        return planes, np.zeros((1, 256, 256, 1)), np.zeros((1, 256, 256, 1)), 1
+    monkeypatch.setattr(classify, 'fetch_inputs', inputs)
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text(f'DM\tS/N\tTime\tSample\tFilter_Width\n30.0\t20.0\t{60.0 + 6 * TSAMP}\t7630\t{width}\n')
+    limits = {'min_dm': 2.0, 'min_snr': 8.0,
+              'fetch_high_dm': {'min_dm': 100.0, 'bowtie': 0.5, 'clean': {'rfi_mask': True}, 'min_votes': 5}}
+    classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'),
+                                 {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'},
+                                 limits=limits, tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert asked[0]['bowtie'] is None and asked[0]['clean'] is False     # the input of before 30 September
+    with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
+        assert db.execute('SELECT detection_type FROM detections').fetchone()[0] == 'candidate'   # one model is enough

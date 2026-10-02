@@ -197,7 +197,7 @@ def test_wide_clusters_and_those_past_the_budget_are_recorded_not_classified(tmp
     counts = classify.classify_candidates('beam.fil', candidates, str(tmp_path/'plots'), info,
                                           limits=limits, tsamp=0.007864319719374176)
     assert counts == {'fetch': 0, 'known_pulsar': 0, 'unclassified': 3, 'unconfirmed': 0, 'own_data': 0, 'dispersed': 0,
-                      'unjudged': 0}
+                      'unjudged': 0, 'fetch_unsupported': 0}
     with sqlite3.connect(tmp_path/'classifier.sqlite') as db:
         assert db.execute("SELECT COUNT(*) FROM detections WHERE detection_type='unclassified'").fetchone()[0] == 3
     # The DM 3 cluster does reach FETCH once the budget allows it.
