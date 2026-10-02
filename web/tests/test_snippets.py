@@ -99,3 +99,17 @@ def test_a_decimated_snippet_carries_the_search_s_rfi_mask_taken_at_native_resol
     meta['rfi_mask'] = None
     path.with_suffix('.json').write_text(json.dumps(meta))
     assert Snippet(path).rfi_mask.shape == snippet.data.shape
+
+
+def test_a_snippet_records_the_search_s_slow_cap_and_the_page_measures_with_it(tmp_path):
+    from web import dynspec
+    source = synthetic_filterbank(tmp_path / f'{ITEM}.fil')
+    cap = {'sigma': 4.0, 'samples': [16, 32, 64, 128]}
+    capped = cut(source, detection(), tmp_path / 'capped', PLAN, preprocessing={'mask_fill': 'local', 'slow_cap': cap})
+    plain = cut(source, detection(), tmp_path / 'plain', PLAN, preprocessing={'mask_fill': 'local'})
+    assert json.loads(capped.with_suffix('.json').read_text())['slow_cap'] == cap
+    assert json.loads(plain.with_suffix('.json').read_text())['slow_cap'] is None
+    assert dynspec.Snippet(capped).slow_cap == cap and dynspec.Snippet(plain).slow_cap is None
+    # Nothing in this beam reaches the cap: the pulse reads the same either way.
+    a, b = dynspec.Snippet(capped).local_snr(), dynspec.Snippet(plain).local_snr()
+    assert a > 5 and abs(a - b) < 0.05 * b

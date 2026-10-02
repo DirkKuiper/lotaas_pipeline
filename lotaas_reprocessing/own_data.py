@@ -23,6 +23,7 @@ import numpy as np
 
 from lotaas_reprocessing import sigproc_data as sigproc
 from lotaas_reprocessing.baseline import baseline_window, running_baseline
+from lotaas_reprocessing.preprocess import cap_slow
 from lotaas_reprocessing.single_pulse_quality import local_boxcar_snr, persistent_channels
 
 K_DM = 4148.808
@@ -225,19 +226,21 @@ class OwnData:
     to the candidate (arrival at the highest frequency); width the candidate's boxcar in these
     samples; first its first sample's index on the observation's grid at this resolution
     (k native samples each); bad the search's channel mask in file order; mask the search's RFI
-    mask on this grid (native_rfi_mask), without which it is approximated on these samples.
+    mask on this grid (native_rfi_mask), without which it is approximated on these samples;
+    slow_cap the search's cap on slow per-channel excesses (settings preprocessing.slow_cap).
 
     Noise is always measured over one fixed stretch around the candidate, the analysis
     window, whatever is displayed: 'guard < |t| <= analysis', where the guard keeps the
     pulse and its immediate surroundings out.
     """
 
-    def __init__(self, data, freqs, tsamp, t0, dm, width, first=0, bad=(), k=1, mask=None):
+    def __init__(self, data, freqs, tsamp, t0, dm, width, first=0, bad=(), k=1, mask=None, slow_cap=None):
         self.data = np.asarray(data, dtype=np.float32)
         self.freqs = np.asarray(freqs, dtype=float)
         self.tsamp, self.t0, self.dm = float(tsamp), float(t0), float(dm)
         self.width = max(1, int(width))
         self.first = int(first)
+        self.k, self.slow_cap = int(k), slow_cap
         self.guard = max(2 * self.width * self.tsamp, 3 * self.tsamp)
         self.analysis = max(64 * self.width * self.tsamp, 10.0)
         # Measure each channel on the same local off-pulse interval after accounting for
@@ -282,6 +285,9 @@ class OwnData:
         filter halved an injected pulse's S/N beside it (27 September 2026)."""
         data = self.masked(extra, auto_mask)
         data[(self.rfi_mask | (np.abs(data) > MAX_CELL_SIGMA)) & np.isfinite(data)] = 0.0
+        if self.slow_cap:
+            # In units of each channel's scatter per sample here; cells on the observation's grid.
+            data = cap_slow(np.ascontiguousarray(data.T), self.slow_cap, np.ones(data.shape[1]), self.first, self.k).T
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
             data = data - np.nanmean(data, axis=1, keepdims=True)
@@ -397,17 +403,18 @@ def near_edge(source, dm, tcand, seconds):
     return tcand < seconds or tcand + float(sweep_seconds(dm, sigproc.channel_frequencies(header)).max()) > duration - seconds
 
 
-def load(source, dm, tcand, width_samples, plan, bad=()):
+def load(source, dm, tcand, width_samples, plan, bad=(), slow_cap=None):
     """The OwnData of a candidate in a flatfielded beam: the stretch the page cuts and the classifier measures."""
     header, block, start, k, _, _, _ = stretch(source, dm, tcand, width_samples, plan)
     tsamp = float(header['tsamp'])
     mask = native_rfi_mask(source, start, start + len(block) * k, k) if k > 1 else None
     return OwnData(block, sigproc.channel_frequencies(header), tsamp * k, start * tsamp - float(tcand), dm,
-                   round(int(width_samples) / k), start // k, bad, k, mask)
+                   round(int(width_samples) / k), start // k, bad, k, mask, slow_cap)
 
 
-def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None, baseline_widths=None):
+def measure(source, dm, tcand, width_samples, plan, bad=(), baseline_seconds=None, baseline_widths=None,
+            slow_cap=None):
     """A candidate's local S/N on its own data in a flatfielded beam, measured as the search measures it."""
-    return load(source, dm, tcand, width_samples, plan, bad).local_snr(
+    return load(source, dm, tcand, width_samples, plan, bad, slow_cap).local_snr(
         baseline_seconds=baseline_seconds or SEARCH_BASELINE_SECONDS,
         baseline_widths=baseline_widths or SEARCH_BASELINE_WIDTHS)

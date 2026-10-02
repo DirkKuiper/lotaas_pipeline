@@ -225,7 +225,8 @@ class Snippet(OwnData):
         super().__init__(np.array(raw, dtype=np.float32), sigproc.channel_frequencies(self.header),
                          float(self.header['tsamp']), float(self.meta['t0_relative']), float(self.meta['dm']),
                          round(self.meta['width_samples'] / self.meta['downsample']),
-                         int(self.meta.get('start_sample', 0)) // k, self.meta.get('bad_channels', []), k, mask)
+                         int(self.meta.get('start_sample', 0)) // k, self.meta.get('bad_channels', []), k, mask,
+                         self.meta.get('slow_cap'))
         # The running baseline the search removed from this beam (snippets.cut records it; older
         # snippets, and beams searched before baseline_widths was set, had 2 s doubled to 64 widths).
         self.search_baseline = (self.meta.get('baseline_seconds') or SEARCH_BASELINE_SECONDS,

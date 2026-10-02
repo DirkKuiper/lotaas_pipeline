@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from lotaas_reprocessing.dedispersion import iter_dedispersed
-from lotaas_reprocessing.preprocess import fill_masked, local_levels, searchable, zero_dm
+from lotaas_reprocessing.preprocess import cap_cells, cap_slow, fill_masked, local_levels, searchable, zero_dm
 
 
 def drifting(nchan=16, nsamp=20000, seed=3):
@@ -94,3 +94,38 @@ def test_after_the_zero_dm_filter_the_dm_zero_trial_holds_only_rounding_and_is_n
     assert at_zero < 1e-3 * dispersed, 'the DM 0 trial should be zero but for rounding'
     assert not searchable(0.0, {'zero_dm': True})
     assert searchable(0.0, {}) and searchable(0.0, None) and searchable(0.5, {'zero_dm': True})
+
+
+def test_the_slow_cap_takes_a_channel_s_long_excess_and_leaves_noise_and_the_other_channels():
+    rng = np.random.default_rng(5)
+    data = rng.standard_normal((8, 4096)).astype(np.float32)
+    data[3, 1024:1088] += 1.0                               # 64 samples at 1 sigma: 8 sigma for a 64-sample mean
+    before = data.copy()
+    cap_cells(data, 64, 4.0, np.ones(8))
+    cell = data[3, 1024:1088].mean() - np.median(data[3].reshape(-1, 64).mean(axis=1))
+    assert abs(cell - 4.0 / 8) < 1e-3                       # held at 4 sigma of such a mean
+    assert np.array_equal(np.delete(data, 3, axis=0), np.delete(before, 3, axis=0))
+    assert np.array_equal(data[3, :1024], before[3, :1024]) and np.array_equal(data[3, 1088:], before[3, 1088:])
+    # Cells lie on the observation's grid: the same samples are a cell for a stretch starting anywhere.
+    part = before[:, 1000:].copy()
+    cap_cells(part, 64, 4.0, np.ones(8), first=1000)
+    assert np.allclose(part[3, 24:88], data[3, 1024:1088], atol=0.05)
+
+
+def test_the_slow_cap_leaves_a_dispersed_burst_and_holds_a_very_bright_one_far_above_any_threshold():
+    rng = np.random.default_rng(6)
+    nchan, cell = 64, 128
+
+    def summed(snr):
+        """The S/N of a 128-sample burst in every channel, summed over the band, after the cap."""
+        data = rng.standard_normal((nchan, 8192)).astype(np.float32)
+        data[:, 2048:2048 + cell] += snr / np.sqrt(nchan * cell)
+        cap_slow(data, {'sigma': 4.0, 'samples': [32, 64, 128, 256]})
+        series = data.sum(axis=0)
+        return (series[2048:2048 + cell].sum() - np.median(series) * cell) / np.sqrt(nchan * cell)
+    assert abs(summed(12.0) - 12.0) < 1.5                   # 1.5 sigma per channel cell: untouched
+    assert summed(300.0) > 4.0 * np.sqrt(nchan) - 2         # 37 sigma per cell: held at 4, S/N 32 here (100 in 647 channels)
+    untouched = rng.standard_normal((4, 1000)).astype(np.float32)
+    assert cap_slow(untouched.copy(), None).tobytes() == untouched.tobytes()
+    # Data already averaged over 32 native samples: cells shorter than one of its samples are skipped.
+    assert cap_slow(untouched.copy(), {'sigma': 4.0, 'samples': [8]}, samples_per_cell=32).tobytes() == untouched.tobytes()

@@ -51,11 +51,13 @@ def default_plan(settings):
         return [], []
 
 
-def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None, search=None):
+def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None, search=None, preprocessing=None):
     """Cut one detection's snippet from a flatfielded filterbank; returns its path.
 
     search: the beam's single_pulse settings (metadata.json); the page removes the running
     baseline the search removed. Beams searched without baseline_widths used 64.
+    preprocessing: the beam's preprocessing settings; the page caps slow per-channel excesses
+    as the search did (slow_cap), and not at all in beams searched without it.
     """
     # The stretch the classifier's own-data check measures (own_data.stretch).
     dm = float(detection['dm'])
@@ -94,6 +96,7 @@ def cut(source, detection, out_dir, plan, bad_channels=(), provenance=None, sear
             'bad_channels': sorted({int(c) for c in bad_channels}),
             'baseline_seconds': (search or {}).get('baseline_seconds'),
             'baseline_widths': (search or {}).get('baseline_widths', 64),
+            'slow_cap': (preprocessing or {}).get('slow_cap'),
             'rfi_mask': mask_name,
             'source': str(source), 'source_bytes': stat.st_size, 'source_mtime': stat.st_mtime,
             'created': time.time(), **(provenance or {})}
@@ -201,7 +204,7 @@ class Snippets:
             try:
                 cut(source, detection, self.cfg.snippets, plan, bad,
                     {'how': how, 'run_name': detection['run_name'], 'fp16': detection['fp16'],
-                     'detection_id': detection['id']}, meta.get('single_pulse'))
+                     'detection_id': detection['id']}, meta.get('single_pulse'), meta.get('preprocessing'))
                 made += 1
                 existing.add(short_id(detection['key']))
             except Exception as error:
