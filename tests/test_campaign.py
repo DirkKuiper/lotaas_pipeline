@@ -613,7 +613,32 @@ def test_requeue_stages_and_searches_a_searched_sap_again(tmp_path, monkeypatch)
         db.execute("UPDATE files SET state='searched', failures=2 WHERE sap_key=?", (first,))
         db.execute("UPDATE files SET state='kept' WHERE sap_key=? AND beam=13", (first,))
         db.execute("UPDATE files SET state='excluded' WHERE sap_key=? AND beam=12", (first,))
+    # The kept beam's filterbanks go with the requeue; one a requeue before 2 October left behind is found later.
+    kept = [tmp_path/'kept_32bit.fil', tmp_path/'kept_32bit_ff.fil']
+    left = [tmp_path/'left_32bit_ff.fil']
+    for path in kept + left:
+        path.write_bytes(b'x' * 10)
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET fil=? WHERE sap_key=? AND beam=13", (json.dumps([str(kept[0])]), first))
+        db.execute("UPDATE files SET fil=? WHERE sap_key=? AND beam=14", (json.dumps([str(tmp_path/'left_32bit.fil')]), first))
     assert C.requeue_saps(tmp_path/'campaign', [first, second, 'nope'], 'veto deleted pulsars') == [first]
+    assert not any(path.exists() for path in kept) and left[0].exists()
+    found = C.release_requeued(tmp_path/'campaign')         # counted only: this fixture's searched beams are still there too
+    assert found['saps'] == 1 and found['files'] >= 1 and not found['removed'] and left[0].exists()
+    assert C.release_requeued(tmp_path/'campaign', apply=True)['files'] == found['files'] and not left[0].exists()
+    assert C.release_requeued(tmp_path/'campaign', apply=True)['files'] == 0
+    # A SAP being staged again is left alone: it may already hold new conversions.
+    left[0].write_bytes(b'x' * 10)
+    campaign.state.set_sap(first, state='staging')
+    assert C.release_requeued(tmp_path/'campaign', apply=True)['files'] == 0 and left[0].exists()
+    campaign.state.set_sap(first, state='pending', detail='requeued: veto deleted pulsars')
+    # Nor is a beam a reviewer wants kept.
+    reviews = tmp_path/'reviews.sqlite'
+    with sqlite3.connect(reviews) as db:
+        db.execute('CREATE TABLE reviews (key TEXT, label TEXT, created REAL)')
+        db.execute("INSERT INTO reviews VALUES ('candidate|left_32bit_ff|DM30.000|W3|SN9.000', 'unsure', 1.0)")
+    assert C.release_requeued(tmp_path/'campaign', apply=True, reviews=reviews) == {
+        'saps': 0, 'files': 0, 'bytes': 0, 'held': 1, 'removed': True} and left[0].exists()
     sap = campaign.state.rows('SELECT * FROM saps WHERE key=?', first)[0]
     assert sap['state'] == 'pending' and sap['run_name'] is None and sap['detail'] == 'requeued: veto deleted pulsars'
     files = campaign.state.rows('SELECT beam, state, failures, request_id FROM files WHERE sap_key=?', first)

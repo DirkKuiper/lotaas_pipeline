@@ -1224,7 +1224,40 @@ def parser():
     requeue.add_argument('--root', type=Path, required=True)
     requeue.add_argument('--reason', required=True, help='Recorded with each SAP')
     requeue.add_argument('keys', nargs='+', help='SAP keys')
+    left = sub.add_parser('release-requeued', help='Remove filterbanks left behind by SAPs requeued and still pending')
+    left.add_argument('--root', type=Path, required=True)
+    left.add_argument('--apply', action='store_true', help='Delete them; without it, only count them')
     return p
+
+
+def release_requeued(root, apply=False, reviews=None):
+    """Remove the filterbanks requeued SAPs left behind; returns {'saps', 'files', 'bytes', 'held', 'removed'}.
+
+    Until 2 October 2026 a requeue set a SAP's kept beams back to pending and left their filterbanks: 6,242
+    flatfielded beams of 386 SAPs requeued on 29 September, 7.4 TB, which nothing tracked as kept any more
+    and no verdict would release. Each is staged and converted again with its SAP. Only SAPs still pending
+    are touched: one being staged may already hold new conversions. A beam with a candidate a reviewer
+    called astrophysical or unsure stays ('held'), as release_kept leaves it.
+    """
+    from euroflash.findings import latest_verdicts
+    root = Path(root)
+    state = State(root/'campaign-state.sqlite')
+    wanted = {key.split('|')[1] for key, label in latest_verdicts(reviews or root.parent/'web'/'reviews.sqlite').items()
+              if label in ('astro', 'unsure') and key.count('|') >= 1}
+    saps, files, size, held = set(), 0, 0, 0
+    for f in state.rows("""SELECT f.sap_key, f.fil FROM files f JOIN saps s ON s.key=f.sap_key
+            WHERE f.state='pending' AND s.state='pending' AND f.fil IS NOT NULL AND s.detail LIKE 'requeued:%'"""):
+        for path in json.loads(f['fil'] or '[]'):
+            for path in (Path(path), flattened(path)):
+                if path.is_file() and (path.stem in wanted or flattened(path).stem in wanted):
+                    held += 1
+                elif path.is_file():
+                    saps.add(f['sap_key'])
+                    files += 1
+                    size += path.stat().st_size
+                    if apply:
+                        path.unlink()
+    return {'saps': len(saps), 'files': files, 'bytes': size, 'held': held, 'removed': bool(apply)}
 
 
 def retry_saps(root, keys=()):
@@ -1256,8 +1289,10 @@ def requeue_saps(root, keys, reason):
     fingerprint ec416ee2 (23-24 September) had their strongest periodic peaks
     removed by a multi-beam veto that deleted bright pulsars, J0323+3944 among
     them, and were never folded. Beams the campaign kept are staged again
-    too: flatfielding needs every central beam of the SAP. Only SAPs that
-    finished (searched or attention) are taken; returns their keys.
+    too: flatfielding needs every central beam of the SAP. Their kept
+    filterbanks go with the requeue, since nothing would release them
+    afterwards (release_requeued). Only SAPs that finished (searched or
+    attention) are taken; returns their keys.
     """
     state = State(Path(root)/'campaign-state.sqlite')
     queued = []
@@ -1265,6 +1300,10 @@ def requeue_saps(root, keys, reason):
         found = state.rows("SELECT state FROM saps WHERE key=?", key)
         if not found or found[0]['state'] not in ('searched', 'attention'):
             continue
+        for f in state.rows("SELECT fil FROM files WHERE sap_key=? AND state='kept'", key):
+            for path in json.loads(f['fil'] or '[]'):
+                Path(path).unlink(missing_ok=True)
+                flattened(path).unlink(missing_ok=True)
         with state.db() as db:
             db.execute("UPDATE files SET state='pending',request_id=NULL,failures=0,locality=NULL,checked=NULL,"
                        "detail=?,updated=? WHERE sap_key=? AND state<>'excluded'",
@@ -1345,6 +1384,9 @@ def main(argv=None):
         return
     if a.command == 'rekeep':
         print(json.dumps(rekeep(a.root, a.reviews, a.apply), indent=2))
+        return
+    if a.command == 'release-requeued':
+        print(json.dumps(release_requeued(a.root, a.apply)))
         return
     a.root.mkdir(parents=True, exist_ok=True)
     with (a.root/'.campaign.lock').open('w') as lock:
