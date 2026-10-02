@@ -273,7 +273,7 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
 
 def classify_candidates(filterbank_file, candidate_file, output_dir, observation_info=None,
                         limits=None, tsamp=None, evidence=None, bad_channels=(), plan=None,
-                        baseline_seconds=None, baseline_widths=None):
+                        baseline_seconds=None, baseline_widths=None, slow_cap=None):
     """Classify one beam's clusters; returns how many went to FETCH and why others did not.
 
     A cluster wider than `max_width_seconds` (needs `tsamp`, the native sample
@@ -457,7 +457,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             if own_check:
                 try:
                     own = measure_own(filterbank_file, dm, tcand, width, plan, bad_channels, baseline_seconds,
-                                      baseline_widths)
+                                      baseline_widths, slow_cap)
                 except Exception as error:
                     # Unmeasurable (a stretch past the beam's end, say): FETCH decides, as before.
                     logger.warning("Own-data S/N not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)
@@ -516,7 +516,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                         accepted = False
                     else:
                         def measure():
-                            data = load_own(filterbank_file, dm, tcand, width, plan, bad_channels)
+                            data = load_own(filterbank_file, dm, tcand, width, plan, bad_channels, slow_cap)
                             ratio, _ = dispersion_ratio(data, baseline_seconds=baseline_seconds or 2.0,
                                                         baseline_widths=baseline_widths or 64)
                             return ratio, smoothness(data)
@@ -543,7 +543,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                 if (tier and own is not None and own >= tier['min_own_snr']
                         and not (route.get('edge_seconds') and near_edge(filterbank_file, dm, tcand, route['edge_seconds']))):
                     try:
-                        stretch_data = load_own(filterbank_file, dm, tcand, width, plan, bad_channels)
+                        stretch_data = load_own(filterbank_file, dm, tcand, width, plan, bad_channels, slow_cap)
                         ratio, _ = dispersion_ratio(stretch_data, baseline_seconds=baseline_seconds or 2.0,
                                                     baseline_widths=baseline_widths or 64)
                         if ratio is not None and ratio <= tier['max_ratio'] and route.get('min_smoothness') is not None:

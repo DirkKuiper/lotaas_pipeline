@@ -78,6 +78,67 @@ def zero_dm(data):
     return data
 
 
+SLOW_CAP_SAMPLES = (16, 32, 64, 128, 256, 512, 1024)      # 0.13 to 8 s of 7.864 ms samples
+
+
+def cap_cells(data, cell, limit, sigma=None, first=0):
+    """Hold each channel's mean over cells of `cell` samples within `limit` sigma, in place; returns data.
+
+    data is (channel, time); sigma each channel's scatter per sample (its robust scale when not given); cells
+    lie on the observation's grid, `first` being the index there of the first sample. A cell's mean that
+    stands further from the channel's median cell mean than limit x sigma / sqrt(cell), what white noise
+    would scatter it by, is brought back to that bound: the excess is taken off every sample of the cell.
+    """
+    nchan, nsamp = data.shape
+    cell = int(cell)
+    lead = (-int(first)) % cell
+    cells = (nsamp - lead) // cell
+    if cell < 1 or cells < 2:
+        return data
+    if sigma is None:
+        sample = data[:, ::max(1, nsamp // 20000)]
+        sigma = 1.4826 * np.nanmedian(np.abs(sample - np.nanmedian(sample, axis=1, keepdims=True)), axis=1)
+    view = data[:, lead:lead + cells * cell].reshape(nchan, cells, cell)
+    mean = view.mean(axis=2)                                       # a wholly masked (NaN) channel stays as it is
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        deviation = mean - np.nanmedian(mean, axis=1, keepdims=True)
+    bound = (limit * np.asarray(sigma, dtype=float) / np.sqrt(cell))[:, None]
+    with np.errstate(invalid='ignore'):
+        excess = np.where(np.abs(deviation) > bound, deviation - np.sign(deviation) * bound, 0.0)
+    view -= excess[:, :, None].astype(data.dtype)
+    return data
+
+
+def cap_slow(data, cap, sigma=None, first=0, samples_per_cell=1):
+    """The slow cap of the search (settings preprocessing.slow_cap: {sigma, samples}) on (channel, time) data,
+    in place; returns data. `samples_per_cell`: native samples in each of data's samples, for data already
+    averaged in time (cells shorter than one of them are skipped).
+
+    Measured on 2 October 2026 in 40 levelled LT5 beams (benchmarks/scattered-2026-10-02): after the RFI block
+    mask, one to two percent of the one-second means of single channels stand 5 sigma or more from their
+    channel's level, in nearly every channel and for up to 40 s. They carry most of the scatter of
+    second-long sums of the dedispersed series, which is 1.5 times white noise's at 1 s under the 8-width
+    baseline and 2.7 times at 4 s, so a scattered burst is found at half its ideal S/N. A dispersed burst is
+    far from the cap: S/N s in w seconds over N channels puts s / sqrt(N) sigma in a w-second cell, 0.5 at
+    S/N 12, and reaches 4 sigma only at S/N 100, where the cap leaves it S/N 100.
+    """
+    if not cap:
+        return data
+    limit = float(cap.get('sigma', 4.0))
+    if sigma is None:
+        nsamp = data.shape[1]
+        sample = data[:, ::max(1, nsamp // 20000)]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            sigma = 1.4826 * np.nanmedian(np.abs(sample - np.nanmedian(sample, axis=1, keepdims=True)), axis=1)
+    for samples in cap.get('samples') or SLOW_CAP_SAMPLES:
+        cell = int(round(int(samples) / samples_per_cell))
+        if cell >= 1:
+            cap_cells(data, cell, limit, sigma, first)
+    return data
+
+
 def searchable(dm, preprocessing=None):
     """Whether a DM trial still carries signal after this preprocessing.
 

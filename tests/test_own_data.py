@@ -387,3 +387,21 @@ def test_below_its_dm_fetch_is_asked_as_before(tmp_path, monkeypatch):
     assert asked[0]['bowtie'] is None and asked[0]['clean'] is False     # the input of before 30 September
     with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
         assert db.execute('SELECT detection_type FROM detections').fetchone()[0] == 'candidate'   # one model is enough
+
+
+def test_with_the_search_s_slow_cap_a_wide_pulse_is_measured_against_the_noise_the_search_had(tmp_path):
+    """Two-second excesses in single channels all around a wide pulse: the search capped them, so its own data must."""
+    fil = write_filterbank(tmp_path / 'beam.fil', [(80.0, 30.0, 16, 0.32)], nsamp=40000)
+    data = np.memmap(fil, dtype=np.float32, mode='r+', offset=fil.stat().st_size - 40000 * NCHANS * 4, shape=(40000, NCHANS))
+    rng = np.random.default_rng(8)
+    freqs = FCH1 + np.arange(NCHANS) * FOFF
+    arrival = 80.0 + own_data.sweep_seconds(30.0, freqs)
+    for channel in range(NCHANS):                            # 0.8 sigma for 2 s every 6 s: 12 sigma for a 2 s mean
+        for start in np.arange(int(rng.integers(750)), 40000 - 250, 750):
+            if abs(start * TSAMP - arrival[channel]) > 3:
+                data[start:start + 250, channel] += 0.8
+    data.flush()
+    centre = 80.0 + 7.5 * TSAMP
+    plain = own_data.measure(fil, 30.0, centre, 16, PLAN, (), 2.0, 8)
+    capped = own_data.measure(fil, 30.0, centre, 16, PLAN, (), 2.0, 8, {'sigma': 4.0, 'samples': [32, 64, 128, 256]})
+    assert capped > 1.08 * plain and capped > 7

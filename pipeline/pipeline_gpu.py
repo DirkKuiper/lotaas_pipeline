@@ -132,7 +132,7 @@ if __name__ == "__main__":
     # Masked cells filled (lotaas_reprocessing.preprocess): at the channel's own local level with
     # preprocessing.mask_fill 'local'; by default at the global mean, which leaves 7.9 s steps in
     # the dedispersed series.
-    from lotaas_reprocessing.preprocess import fill_masked, zero_dm
+    from lotaas_reprocessing.preprocess import cap_slow, fill_masked, zero_dm
     preprocessing = settings.get("preprocessing") or {}
     fill_mode = preprocessing.get("mask_fill", "global")
     print(f"Filling masked data ({fill_mode})...")
@@ -161,6 +161,12 @@ if __name__ == "__main__":
         detrended_data[freq_idx, :] = masked_data[freq_idx, :] - p(t)
 
     masked_data = detrended_data
+
+    if preprocessing.get("slow_cap"):
+        # Narrow-band interference lasting a fraction of a second to tens of seconds that the block mask
+        # leaves: each channel's mean over cells of 0.13 to 8 s is held within a few sigma of white noise's.
+        print("Capping slow per-channel excesses...")
+        cap_slow(masked_data, preprocessing["slow_cap"])
 
     if preprocessing.get("zero_dm"):
         # Broadband interference and a tied-array beam's slow broadband wander arrive at every
