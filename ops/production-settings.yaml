@@ -150,9 +150,14 @@ classification:
     edge_seconds: 20.0
   dispersed:
     min_dm: 100.0
-    min_snr: 7.0
-    faint: {min_own_snr: 7.0, max_ratio: 0.5}
+    # From 3 October 2026 the route takes nothing FETCH's S/N gate (8) does not: below it, of 199 production
+    # candidates 192 were interference or noise, 4 were left unsure and 3 were known pulsars; it kept 13 of 930
+    # injected LT5 bursts and 6 of 680 early-cycle ones, all at the noise floor.
+    min_snr: 8.0
     fetch_max_width_seconds: 0.15
+    # When FETCH was asked, one of its six models must see a pulse: none did for 535 LT5 route candidates, all
+    # interference or noise, while 52 of the 54 injected bursts the route kept on releases 3796107/dd93aec had a vote.
+    min_votes: 1
     # A burst's on-pulse spectrum is smooth over many channels; the first night's candidates were mostly
     # channels jumping in level for seconds (own_data.smoothness: 1 of 428 injected bursts below 0.6, 112 of
     # 159 of the night's candidates), and events in the first and last seconds of the beam.

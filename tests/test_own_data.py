@@ -135,6 +135,11 @@ def test_the_classifier_keeps_what_fetch_rejects_but_its_own_data_show_dispersed
     assert rows[300][0] == 'dispersed' and rows[300][1] > 8 and rows[300][2] < 0.3
     assert rows[30] == ('rejected', rows[30][1], None)        # below the route's DM: FETCH decides
     assert len(list((tmp_path / 'plots').glob('DM300.0_*.png'))) == 1   # plotted for review, as FETCH positives are
+    # With min_votes, FETCH must have seen something: none of its models did here.
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots4'), info,
+                                          limits=dict(limits, dispersed=dict(route, min_votes=1)),
+                                          tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert counts['fetch'] == 2 and counts['dispersed'] == 0
     # Wider than the route judges: FETCH's verdict stands.
     counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots3'), info,
                                           limits=dict(limits, dispersed=dict(route, max_width_seconds=0.05)),
@@ -299,12 +304,15 @@ def test_a_pulse_in_row_levelled_data_is_measured_as_the_search_saw_it(tmp_path)
     assert own_data.stretch(white, 400.0, 70.0, width, plan)[3] == 32
 
 
-@pytest.mark.parametrize('votes, pulse, expected', [
-    (5, True, 'candidate'),      # five models and its own data: FETCH's verdict stands
-    (4, True, 'dispersed'),      # too few models: the route judges it, and its own data show it dispersed
-    (6, False, 'rejected'),      # six models on noise that does not fade at a lower DM: nothing stands
+@pytest.mark.parametrize('votes, pulse, expected, route_votes', [
+    (5, True, 'candidate', None),  # five models and its own data: FETCH's verdict stands
+    (4, True, 'dispersed', None),  # too few models: the route judges it, and its own data show it dispersed
+    (6, False, 'rejected', None),  # six models on noise that does not fade at a lower DM: nothing stands
+    (1, True, 'dispersed', 1),     # the route's min_votes: one model saw it
+    (0, True, 'rejected', 1),      # none did
 ])
-def test_from_its_dm_on_fetch_needs_its_votes_and_the_candidates_own_data(tmp_path, monkeypatch, votes, pulse, expected):
+def test_from_its_dm_on_fetch_needs_its_votes_and_the_candidates_own_data(tmp_path, monkeypatch, votes, pulse, expected,
+                                                                          route_votes):
     from test_tiers import classifier
     classify = classifier(tmp_path, monkeypatch)
     width = 13
@@ -336,7 +344,7 @@ def test_from_its_dm_on_fetch_needs_its_votes_and_the_candidates_own_data(tmp_pa
     # Without the check before FETCH, the noise reaches FETCH's own check on the candidate's data.
     limits = {'min_dm': 2.0, 'min_snr': 8.0, **({'min_own_snr': 4.0, 'min_own_fraction': 0.5} if pulse else {}),
               'dispersed': {'min_dm': 100.0, 'min_own_snr': 8.0, 'max_ratio': 0.5, 'max_width_seconds': 0.5,
-                            'fetch_max_width_seconds': 0.05},
+                            'fetch_max_width_seconds': 0.05, **({'min_votes': route_votes} if route_votes else {})},
               'fetch_high_dm': {'min_dm': 100.0, 'bowtie': 0.5, 'clean': {'rfi_mask': True}, 'min_votes': 5,
                                 'max_ratio': 0.8, 'min_smoothness': 0.6, 'edge_seconds': 20.0}}
     counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'),
