@@ -268,11 +268,13 @@ def compute(web_db, lane_db, epochs, haslam, campaign_db=None, tab_fwhm=0.40, st
     result = {'time': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'), 'saps': len(fields),
               'beams': int(sum(f['tied_beams'] for f in fields)),
               'hours': round(sum(f['hours'] for f in fields), 1),
-              'by_source': {}, 'by_epoch': {}, 'sefd_jy': {}, 'limits': [], 'expected': [], 'references': [],
+              'by_source': {}, 'by_epoch': {}, 'by_epoch_source': {}, 'sefd_jy': {}, 'limits': [], 'expected': [], 'references': [],
               'campaign_saps': {}}
     for f in fields:
         result['by_source'][f['source']] = result['by_source'].get(f['source'], 0) + 1
         result['by_epoch'][f['epoch']] = result['by_epoch'].get(f['epoch'], 0) + 1
+        key = f"{f['epoch']}/{f['source']}"
+        result['by_epoch_source'][key] = result['by_epoch_source'].get(key, 0) + 1
     planned = campaign_saps(campaign_db) if campaign_db else {}
     result['campaign_saps'] = planned
     ks = np.array([f['k'] for f in fields]) if fields else np.array([K_ZENITH_COLD])

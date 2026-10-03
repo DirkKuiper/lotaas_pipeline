@@ -129,6 +129,7 @@ def test_the_limit_tightens_with_time_on_sky_and_projects_to_the_whole_campaign(
     fake_survey(tmp_path)
     one, _ = frb_limits.compute(tmp_path / 'web.sqlite', tmp_path / 'lane.sqlite', e, None, tmp_path / 'campaign.sqlite')
     assert one['saps'] == 1 and one['hours'] == 1.0 and one['campaign_saps'] == {'lta': 10}
+    assert one['by_epoch_source'] == {'one/lta': 1}
     (tmp_path / 'more').mkdir()
     fake_survey(tmp_path / 'more', hours_each=2.0)
     two, _ = frb_limits.compute(tmp_path / 'more' / 'web.sqlite', tmp_path / 'more' / 'lane.sqlite', e, None,
