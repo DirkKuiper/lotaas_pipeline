@@ -79,7 +79,7 @@
       <thead><tr><th>Epoch / source</th><th class="num">SAPs</th><th>Injected bursts that stand for it</th><th class="num">Bursts</th><th class="num">Queued</th></tr></thead>
       <tbody>
       {% for key, c in latest.completeness_from.items() %}
-        <tr><td>{{ key }}</td><td class="num">{{ latest.by_epoch.get(key.split('/')[0], '') }}</td><td>{{ c['from'] }}</td><td class="num">{{ c.bursts }}</td>
+        <tr><td>{{ key }}</td><td class="num">{{ (latest.by_epoch_source or {}).get(key, '') }}</td><td>{{ c['from'] }}</td><td class="num">{{ c.bursts }}</td>
           <td class="num">{{ '%.0f'|format(100 * c.queued) if c.queued is defined else '–' }}%</td></tr>
       {% endfor %}
       </tbody>
