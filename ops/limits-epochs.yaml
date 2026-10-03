@@ -1,0 +1,38 @@
+# Epochs of the FRB search for euroflash.frb_limits. A SAP belongs to the epoch in which its run was made; the
+# chance that a burst in it reaches the review queue is measured on the injection lane's bursts of the releases
+# listed for its source (lta: LT5_004 and the other LTA projects, spider: early-cycle beams from SPIDER). A new epoch
+# starts whenever search or classification changes what reaches the queue. Until a source has MIN_LANE_BURSTS of its
+# own, `stand_in` names the epoch whose bursts stand for it, with the new rules replayed on their records.
+# Quote the release shas: YAML reads an all-digit sha as a number.
+ec: &ec ['1dd3ce1', '878f41b', '7981e0a', '3796107', '0468b12', 'dd93aec', 'b043fdc']   # early-cycle settings unchanged
+epochs:
+  - name: frb-config
+    from: '2026-09-28T16:06:36Z'
+    lane: {lta: ['df9068e', '1dd3ce1'], spider: ['df9068e', '1dd3ce1']}
+    note: dispersed route from S/N 7 at DM >= 100; LT5_004 beams not yet levelled per 24 s block
+  - name: levelled
+    from: '2026-09-29T13:27:20Z'
+    lane: {lta: ['878f41b'], spider: *ec}
+    note: LT5_004 beams levelled per 24.16 s block
+  - name: fetch-flood
+    from: '2026-09-30T09:29:59Z'
+    lane: {lta: ['3796107'], spider: *ec}
+    note: >-
+      FETCH on a bowtie of cleaned input at every width (LT5). Its positives were judged again on 2 October by
+      fetch_high_dm's rules (reviewer classifier-rejudge), so the lane's bursts of 3796107 stand for it.
+  - name: fetch-rollback
+    from: '2026-10-02T06:27:52Z'
+    lane: {lta: ['878f41b'], spider: *ec}
+  - name: fetch-high-dm
+    from: '2026-10-02T07:08:17Z'
+    lane: {lta: ['3796107'], spider: *ec}
+    note: FETCH from DM 100 needs five of six models and the candidate's own data (LT5)
+  - name: slow-cap
+    from: '2026-10-02T17:35:51Z'
+    lane: {lta: ['0468b12', 'dd93aec', 'b043fdc'], spider: *ec}
+    note: slow per-channel excesses capped before the zero-DM filter, widest dispersed tier at own S/N 8 (LT5)
+  - name: route-votes
+    from: '2026-10-03T09:07:05Z'
+    lane: {lta: ['f790cbf'], spider: ['f790cbf']}
+    stand_in: {epoch: slow-cap, min_search_snr: 8.0, min_votes: {lta: 1}}
+    note: dispersed route from S/N 8 only, and for LT5 at least one FETCH vote when FETCH was asked
