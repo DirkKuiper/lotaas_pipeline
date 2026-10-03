@@ -998,3 +998,19 @@ def test_lost_late_beams_are_staged_again_and_their_sap_is_finished(tmp_path, mo
     settle(campaign)
     assert [p.parent.name for p in campaign.unsearched(sap['key'])] == ['B038', 'B058']
     assert campaign.runner.flatfielded[-1][3] == str(sap_dir/C.MEAN), 'flatfielded with the saved flatfield'
+
+
+def test_an_inventory_loaded_later_queues_behind_every_lta_sap_already_known(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000005', 0, FULL), ('1000005', 1, FULL)])
+    later = tmp_path/'later.txt'            # another project: keys that sort before the first inventory's
+    later.write_text('\n'.join(surl('1000001', sap, beam) for sap in (0, 1) for beam in FULL) + '\n')
+    campaign.state.load(C.parse_inventory(later), C.missing_central_beams, (12,))
+    order = [r['key'] for r in campaign.state.rows("SELECT key FROM saps WHERE source='lta' ORDER BY position")]
+    assert order == ['L1000005_SAP000', 'L1000005_SAP001', 'L1000001_SAP000', 'L1000001_SAP001']
+    # Loaded again at the next start, nothing moves.
+    campaign.state.load(C.parse_inventory(tmp_path/'inventory.txt'), C.missing_central_beams, (12,))
+    campaign.state.load(C.parse_inventory(later), C.missing_central_beams, (12,))
+    assert [r['key'] for r in campaign.state.rows("SELECT key FROM saps WHERE source='lta' ORDER BY position")] == order
+    options = C.parser().parse_args(['run', '--root', str(tmp_path / 'c'), '--inventory', 'a.txt', 'b.txt',
+                                     '--ledger', str(tmp_path / 'ledger.sqlite')])
+    assert [str(p) for p in options.inventory] == ['a.txt', 'b.txt']

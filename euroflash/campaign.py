@@ -135,10 +135,12 @@ class State:
     def load(self, rows, missing_central, exclude_beams=(), allowed_missing=0, source='lta'):
         """Queue the inventory. A SAP whose archive lacks more than allowed_missing
         central beams is 'incomplete' and never staged; one that lacks fewer is
-        searched without them. SPIDER SAPs queue behind every LTA SAP."""
+        searched without them. SPIDER SAPs queue behind every LTA SAP, and the SAPs of an LTA inventory
+        loaded later (another project, --inventory A B) behind every LTA SAP already queued."""
         now = time.time()
-        first = SPIDER_POSITION if source == 'spider' else 0
         with self.db() as db:
+            first = SPIDER_POSITION if source == 'spider' else db.execute(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM saps WHERE source='lta'").fetchone()[0]
             saps = {}
             for row in rows:
                 saps.setdefault(sap_key(row['archive_obs'], row['sap']), []).append(row)
@@ -1141,7 +1143,8 @@ def parser():
     sub = p.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run', help='Run (or resume) the campaign loop')
     run.add_argument('--root', type=Path, required=True, help='Campaign directory: state, transient data, prepared beams')
-    run.add_argument('--inventory', type=Path, help='SRM URLs, one per line')
+    run.add_argument('--inventory', type=Path, nargs='+',
+                     help='SRM URLs, one per line; several files queue in the order given')
     run.add_argument('--spider-inventory', type=Path,
                      help='ssh:// URLs of beam tars on SPIDER, one per line (python3 -m euroflash.spider inventory)')
     run.add_argument('--spider-saps', type=int, default=2,
@@ -1397,8 +1400,8 @@ def main(argv=None):
         if not (a.inventory or a.spider_inventory):
             p.error('give --inventory, --spider-inventory or both')
         campaign = Campaign(a)
-        if a.inventory:
-            campaign.state.load(parse_inventory(a.inventory), missing_central_beams, tuple(a.exclude_beams),
+        for inventory in a.inventory or []:
+            campaign.state.load(parse_inventory(inventory), missing_central_beams, tuple(a.exclude_beams),
                                 a.max_missing_central)
         if a.spider_inventory:
             campaign.state.load(parse_inventory(a.spider_inventory), missing_central_beams, tuple(a.exclude_beams),
