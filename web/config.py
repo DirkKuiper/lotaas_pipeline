@@ -32,6 +32,8 @@ class Config:
     source_roots: list = field(default_factory=lambda: [LOTAAS])
     # Only for beams whose own metadata.json does not record the DM plan.
     settings: Path = REPO / 'settings.yaml'
+    # euroflash.frb_limits writes the running FRB rate limit here (latest.json, history.jsonl, limits.png).
+    limits: Path = LOTAAS / 'limits'
     host: str = '127.0.0.1'
     port: int = 8000
     index_seconds: float = 60.0

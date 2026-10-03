@@ -1,0 +1,103 @@
+{% extends 'base.html' %}
+{% block title %}FRB rate limit{% endblock %}
+{% block page %}limits{% endblock %}
+{% macro n(v) %}{% if v is none %}–{% elif v >= 100 %}{{ '{:,.0f}'.format(('%.2g'|format(v))|float) }}{% else %}{{ '%.2g'|format(v) }}{% endif %}{% endmacro %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>FRB rate limit</h1>
+    <div class="muted">What the campaign can publish if it finds no new FRB: the 95% upper limit on the all-sky rate R(&gt;F) of bursts above fluence F at 135 MHz, with N(&gt;F) ∝ F<sup>α</sup>. Every SAP searched since the FRB configuration of 28 September 2026 counts with its tied-array beams' positions, its length, its sky temperature (Haslam 408 MHz) and elevation, and the pulsar-calibrated sensitivity (SEFD 410 Jy at the zenith under a 350 K sky, ±25%). The chance that a burst reaches the review queue is measured, per release and source, on the bursts the injection lane puts through the whole pipeline. Population: DM log-uniform 100–3000, scattering log-uniform 1 ms – 3 s at 135 MHz. None found gives R &lt; 3 / exposure. Recomputed daily at 06:20 UTC by <code>python -m euroflash.frb_limits</code>.</div>
+  </div>
+</div>
+{% if not latest %}
+<div class="card"><p>No limit computed yet: {{ 'latest.json' }} is missing from the limits directory.</p></div>
+{% else %}
+{% set mwa = latest.references|selectattr('alpha', 'equalto', -1.4)|selectattr('rate')|first %}
+<div class="tiles">
+  <div class="tile"><div class="label">Searched with the FRB search</div><div class="value">{{ '{:,}'.format(latest.saps) }} <span class="muted small">SAPs</span></div>
+    <div class="sub">{{ '{:,}'.format(latest.beams) }} beams · {{ '{:,.0f}'.format(latest.hours) }} h{% for s, k in latest.by_source.items() %} · {{ k }} {{ 'SPIDER' if s == 'spider' else 'LTA' }}{% endfor %}</div></div>
+  <div class="tile"><div class="label">R(&gt;100 Jy ms), 95% upper limit now</div><div class="value">{{ n(mix.nominal.r95['100']) }} <span class="muted small">sky⁻¹ day⁻¹</span></div>
+    <div class="sub">SEFD ±25%: {{ n(mix.sefd_low.r95['100']) }}–{{ n(mix.sefd_high.r95['100']) }} · scattered &lt; 50 ms: {{ n(scat.nominal.r95['100']) if scat else '–' }}</div></div>
+  <div class="tile"><div class="label">The whole campaign, if nothing is found</div><div class="value">{{ n(mix.nominal.r95_projected['100']) }} <span class="muted small">sky⁻¹ day⁻¹</span></div>
+    <div class="sub">R(&gt;100 Jy ms) after {{ '{:,}'.format(latest.campaign_saps.values()|sum) }} SAPs · scattered &lt; 50 ms: {{ n(scat.nominal.r95_projected['100']) if scat else '–' }}</div></div>
+  {% if mwa %}
+  <div class="tile"><div class="label">FRBs expected at the MWA's rate</div><div class="value">{{ '%.2f'|format(mwa.expected_now) }} <span class="muted small">so far</span></div>
+    <div class="sub">{{ '%.2f'|format(mwa.expected_projected) }} in the whole campaign ({{ '%.1f'|format(mwa.expected_projected_at_95_high) }} at its 95% upper rate)</div></div>
+  {% endif %}
+  <div class="tile"><div class="label">SEFD of the searched fields</div><div class="value">{{ latest.sefd_jy.median }} <span class="muted small">Jy</span></div>
+    <div class="sub">10–90%: {{ latest.sefd_jy.p10 }}–{{ latest.sefd_jy.p90 }} Jy at mid-observation</div></div>
+</div>
+
+{% if has_plot %}
+<div class="card"><img src="/limits/plot.png?t={{ latest.time }}" alt="Upper limit on the FRB rate against fluence, and its history" style="max-width: 100%"></div>
+{% endif %}
+
+<div class="card flush">
+  <h2>95% upper limits on R(&gt;F), per sky per day</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>α</th><th>Population</th><th></th>{% for f in mix.nominal.r95 %}<th class="num">F &gt; {{ f }} Jy ms</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for (alpha, population), by in limits.items() %}
+        <tr><td>{{ alpha }}</td><td>{{ population }}</td><td class="muted">so far</td>
+          {% for f, v in by.nominal.r95.items() %}<td class="num" title="SEFD ±25%: {{ n(by.sefd_low.r95[f]) }}–{{ n(by.sefd_high.r95[f]) }}">{{ n(v) }}</td>{% endfor %}</tr>
+        <tr><td></td><td></td><td class="muted">whole campaign</td>
+          {% for f, v in by.nominal.r95_projected.items() %}<td class="num muted">{{ n(v) }}</td>{% endfor %}</tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card flush">
+  <h2>Against published rates near 135 MHz</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Reference</th><th>α</th><th class="num">Fluence (Jy ms)</th><th class="num">Their rate</th><th class="num">Our limit now</th><th class="num">Whole campaign</th><th class="num">Expected now</th><th class="num">Expected, whole campaign</th></tr></thead>
+      <tbody>
+      {% for r in latest.references %}
+        <tr><td>{{ r.reference }}</td><td>{{ r.alpha }}</td><td class="num">{{ r.fluence|round|int }}</td>
+          <td class="num">{% if r.rate %}{{ n(r.rate) }} ({{ n(r.rate_95[0]) }}–{{ n(r.rate_95[1]) }}){% else %}&lt; {{ n(r.rate_95[1]) }}{% endif %}</td>
+          <td class="num">&lt; {{ n(r.ours_r95) }}</td><td class="num">&lt; {{ n(r.ours_r95_projected) }}</td>
+          <td class="num">{{ '%.3f'|format(r.expected_now) if r.expected_now is not none else '–' }}</td>
+          <td class="num">{% if r.expected_projected is not none %}{{ '%.2f'|format(r.expected_projected) }} ({{ '%.2f'|format(r.expected_projected_at_95_high) }} at the 95% upper rate){% else %}≤ {{ '%.2f'|format(r.expected_projected_at_95_high) }}{% endif %}</td></tr>
+      {% endfor %}
+      {% for e in latest.expected %}
+        <tr><td>CHIME/FRB Catalog 1 (525 sky⁻¹ day⁻¹ above 5 Jy ms at 600 MHz) carried to 135 MHz with spectral index {{ e.spectral_index }}</td><td>-1.4</td><td class="num">–</td><td class="num">–</td><td class="num">–</td><td class="num">–</td>
+          <td class="num">{{ '%.3f'|format(e.expected) }}</td><td class="num">{{ '%.2f'|format(e.expected_projected) }} (P(≥1) {{ '%.0f'|format(100 * e.p_projected) }}%)</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted small" style="padding: 0 16px 12px">ARTEMIS assumed 5 ms pulses with neither scattering nor dispersion smearing; the MWA's FRB 20191203A had 360 Jy ms and 90 ms of scattering at 154 MHz. Ours counts each injected burst's real width, scattering and smearing in 48.8 kHz channels, and only bursts that reach the review queue.</p>
+</div>
+
+<div class="card flush">
+  <h2>How complete each epoch of the search is</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Epoch / source</th><th class="num">SAPs</th><th>Injected bursts that stand for it</th><th class="num">Bursts</th><th class="num">Queued</th></tr></thead>
+      <tbody>
+      {% for key, c in latest.completeness_from.items() %}
+        <tr><td>{{ key }}</td><td class="num">{{ latest.by_epoch.get(key.split('/')[0], '') }}</td><td>{{ c['from'] }}</td><td class="num">{{ c.bursts }}</td>
+          <td class="num">{{ '%.0f'|format(100 * c.queued) if c.queued is defined else '–' }}%</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if trend|length > 1 %}
+<div class="card flush">
+  <h2>As the survey grows</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Computed</th><th class="num">SAPs</th><th class="num">Hours</th><th class="num">R(&gt;100 Jy ms) &lt;</th></tr></thead>
+      <tbody>{% for t in trend %}<tr><td>{{ t.time[:16]|replace('T', ' ') }}</td><td class="num">{{ t.saps }}</td><td class="num">{{ '{:,.0f}'.format(t.hours) }}</td><td class="num">{{ n(t.r100) }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+<p class="muted small">Computed {{ latest.time[:16]|replace('T', ' ') }} UTC.</p>
+{% endif %}
+{% endblock %}

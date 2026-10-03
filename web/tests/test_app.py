@@ -1048,3 +1048,41 @@ def test_keys_sharing_a_short_id_do_not_stop_the_queue(cfg, campaign, monkeypatc
     indexer.run_pass()                                    # the ids stay what they were
     assert dict(indexer.db.execute('SELECT key, id FROM candidates').fetchall()) == rows
     assert Indexer(cfg).long_ids == {k: v for k, v in rows.items() if v != 'same'}
+
+
+def test_the_limits_page_shows_the_running_limit_and_survives_its_absence(cfg, campaign, tmp_path):
+    Indexer(cfg).run_pass()
+    cfg.limits = tmp_path / 'limits'
+    client = client_for(cfg)
+    assert 'No limit computed yet' in client.get('/limits').text
+    assert client.get('/limits/plot.png').status_code == 404
+    cfg.limits.mkdir()
+
+    def entry(alpha, population, sefd, scale):
+        r95 = {f: 5530.0 * scale * (float(f) / 100) ** alpha for f in ('50', '100', '200', '500', '1000')}
+        return {'alpha': alpha, 'population': population, 'sefd': sefd, 'exposure_sky_days': 1e-6,
+                'projected_exposure_sky_days': 1e-5, 'r95': r95, 'r95_projected': {f: v / 11 for f, v in r95.items()}}
+    limits = [entry(a, p, s, k) for a in (-1.4, -1.5)
+              for p in ('lane mix of scattering (1 ms - 3 s)', 'scattered < 50 ms')
+              for s, k in (('nominal', 1.0), ('sefd_high', 1.3), ('sefd_low', 0.7))]
+    latest = {'time': '2026-10-03T09:24:00+00:00', 'saps': 561, 'beams': 40886, 'hours': 560.9,
+              'by_source': {'lta': 464, 'spider': 97}, 'by_epoch': {'slow-cap': 77}, 'campaign_saps': {'lta': 4829, 'spider': 1290},
+              'sefd_jy': {'p10': 409, 'median': 548, 'p90': 821}, 'limits': limits,
+              'expected': [{'spectral_index': 0.0, 'expected': 0.004, 'p_at_least_one': 0.004, 'expected_projected': 0.05,
+                            'p_projected': 0.05}],
+              'references': [{'alpha': -1.4, 'reference': 'MWA 139-170 MHz, one FRB', 'fluence': 57.0, 'rate': 54.0,
+                              'rate_95': [1.0, 302.0], 'ours_r95': 12100.0, 'ours_r95_projected': 1100.0,
+                              'expected_now': 0.0133, 'expected_projected': 0.147, 'expected_projected_at_95_high': 0.825},
+                             {'alpha': -1.4, 'reference': 'ARTEMIS 145 MHz', 'fluence': 62.0, 'rate': None,
+                              'rate_95': [None, 29.0], 'ours_r95': 10800.0, 'ours_r95_projected': 977.0,
+                              'expected_now': None, 'expected_projected': None, 'expected_projected_at_95_high': 0.089}],
+              'completeness_from': {'slow-cap/lta': {'from': 'slow-cap (dd93aec)', 'bursts': 480, 'queued': 0.79}}}
+    (cfg.limits / 'latest.json').write_text(json.dumps(latest))
+    (cfg.limits / 'history.jsonl').write_text(json.dumps(dict(latest, time='2026-10-02T06:20:00+00:00', saps=500)) + '\n'
+                                              + json.dumps(latest) + '\n')
+    (cfg.limits / 'limits.png').write_bytes(b'\x89PNG\r\n')
+    page = client.get('/limits').text
+    assert '5,500' in page and '500' in page and '0.15 in the whole campaign' in page
+    assert 'slow-cap (dd93aec)' in page and '79%' in page and 'As the survey grows' in page
+    assert '&lt; 29' in page and 'FRB limit' in page
+    assert client.get('/limits/plot.png').content == b'\x89PNG\r\n'

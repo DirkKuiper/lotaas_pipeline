@@ -1027,6 +1027,35 @@ def create_app(cfg, run_background=True):
         return page(request, 'lotaas.html', found=shown, summary=summary, show=show, shows=LOTAAS_SHOWS,
                     searched_radius=SEARCHED_RADIUS_DEG, beam_radius=BEAM_RADIUS_DEG)
 
+    @app.get('/limits', response_class=HTMLResponse)
+    def frb_limits(request: Request):
+        latest, history = None, []
+        try:
+            latest = json.loads((cfg.limits / 'latest.json').read_text())
+            history = [json.loads(line) for line in (cfg.limits / 'history.jsonl').read_text().splitlines() if line.strip()]
+        except (OSError, ValueError):
+            pass
+        limits = {}
+        for entry in (latest or {}).get('limits', []):
+            limits.setdefault((entry['alpha'], entry['population']), {})[entry['sefd']] = entry
+        trend = []
+        for h in history[-30:]:
+            e = next((x for x in h.get('limits', []) if x['alpha'] == -1.4 and x['sefd'] == 'nominal'
+                      and 'mix' in x['population']), None)
+            if e:
+                trend.append({'time': h['time'], 'saps': h['saps'], 'hours': h['hours'], 'r100': e['r95'].get('100')})
+        mix = next((v for (alpha, pop), v in limits.items() if alpha == -1.4 and 'mix' in pop), {})
+        scattered = next((v for (alpha, pop), v in limits.items() if alpha == -1.4 and 'scattered' in pop), {})
+        return page(request, 'limits.html', latest=latest, limits=limits, mix=mix, scat=scattered, trend=trend[::-1],
+                    has_plot=(cfg.limits / 'limits.png').is_file())
+
+    @app.get('/limits/plot.png')
+    def frb_limits_plot():
+        path = cfg.limits / 'limits.png'
+        if not path.is_file():
+            raise HTTPException(404, 'No limits plot yet')
+        return FileResponse(path, media_type='image/png', headers={'Cache-Control': 'no-cache'})
+
     # --------------------------------------------------------------- API
     def load_snippet(cid):
         with store.reading(cfg) as db:
