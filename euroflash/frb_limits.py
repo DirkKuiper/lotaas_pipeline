@@ -349,8 +349,13 @@ def plot(history, latest, path):
         if rate is not None:
             ax[0].errorbar([fluence], [rate], yerr=[[rate - low], [high - rate]], fmt='s', color='k', ms=5, capsize=3,
                            label=short)
+            span = np.array([fluence, max(FLUENCES)])
+            ax[0].fill_between(span, low * (span / fluence) ** -1.4, high * (span / fluence) ** -1.4, color='0.5',
+                               alpha=0.15, lw=0)
+            ax[0].plot(span, rate * (span / fluence) ** -1.4, '--', color='0.4', lw=1)
         else:
             ax[0].plot([fluence], [high], 'v', color='0.4', ms=7, label=short)
+    ax[0].set_xlim(40, 1300)
     ax[0].set_xlabel('fluence at 135 MHz (Jy ms)'); ax[0].set_ylabel('R(>F) per sky per day, 95% upper limit')
     ax[0].legend(fontsize=7); ax[0].grid(alpha=0.3, which='both')
     ax[0].set_title(f"{latest['saps']} SAPs, {latest['hours']:.0f} h to {latest['time'][:10]}; alpha -1.4, "
@@ -362,7 +367,10 @@ def plot(history, latest, path):
             times.append(dt.datetime.fromisoformat(h['time'])); values.append(e['r95']['100'])
     ax[1].semilogy(times, values, 'o-', ms=3)
     ax[1].set_ylabel('R(>100 Jy ms), 95% upper limit'); ax[1].set_title('as the survey grows (alpha -1.4, lane mix)', fontsize=9)
-    ax[1].grid(alpha=0.3, which='both'); fig.autofmt_xdate()
+    if times:
+        ax[1].set_xlim(min(times) - dt.timedelta(days=1), max(times) + dt.timedelta(days=1))
+    ax[1].tick_params(axis='x', labelrotation=30)
+    ax[1].grid(alpha=0.3, which='both')
     fig.tight_layout(); fig.savefig(path, dpi=90); plt.close(fig)
 
 
