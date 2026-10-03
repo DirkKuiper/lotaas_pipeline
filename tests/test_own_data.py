@@ -413,3 +413,39 @@ def test_with_the_search_s_slow_cap_a_wide_pulse_is_measured_against_the_noise_t
     plain = own_data.measure(fil, 30.0, centre, 16, PLAN, (), 2.0, 8)
     capped = own_data.measure(fil, 30.0, centre, 16, PLAN, (), 2.0, 8, {'sigma': 4.0, 'samples': [32, 64, 128, 256]})
     assert capped > 1.08 * plain and capped > 7
+
+
+def test_a_candidate_over_filled_samples_is_rejected_and_the_beam_goes_on(tmp_path, monkeypatch):
+    from test_tiers import classifier
+    classify = classifier(tmp_path, monkeypatch)
+    fil = write_filterbank(tmp_path / 'beam.fil', [(60.0, 30.0, 3, 1.2)])
+
+    class Model:
+        def predict(self, inputs, batch_size=1, verbose=0):
+            return np.array([[0.9, 0.1]])
+
+    def fetch_inputs(filterbank_file, dm, tcand, *args, **kwargs):
+        if tcand > 90:
+            raise classify.FlatInput(f"FETCH's DM-time plane holds one value at DM={dm}, time={tcand}")
+        return None, np.zeros((1, 256, 256, 1)), np.zeros((1, 256, 256, 1)), 1
+
+    from lotaas_reprocessing import fetch_models
+    monkeypatch.setattr(fetch_models, 'load_models', lambda names, factory=None: {'a': Model()})
+    monkeypatch.setattr(classify, 'fetch_inputs', fetch_inputs)
+    monkeypatch.setattr(classify, 'plot_candidate', lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(classify, 'FilterbankFile', lambda *args: type('F', (), {
+        'fch1': FCH1, 'foff': FOFF, 'nchans': NCHANS, 'close': lambda self: None})())
+    candidates = tmp_path / 'cands.tsv'
+    candidates.write_text('DM\tS/N\tTime\tSample\tFilter_Width\n'
+                          f'130.0\t15.0\t100.0\t12716\t3\n30.0\t15.0\t{60.0 + TSAMP}\t7631\t3\n')
+    route = {'min_dm': 100.0, 'min_snr': 8.0, 'tiers': [{'max_width_seconds': 1.0, 'min_own_snr': -99.0, 'max_ratio': 9.9}]}
+    limits = {'min_dm': 2.0, 'min_snr': 8.0, 'min_own_snr': -99.0, 'min_own_fraction': 0.0, 'dispersed': route}
+    counts = classify.classify_candidates(str(fil), candidates, str(tmp_path / 'plots'),
+                                          {'RA (J2000)': '12:00:00', 'DEC (J2000)': '+45:00:00'},
+                                          limits=limits, tsamp=TSAMP, plan=PLAN, baseline_seconds=2.0)
+    assert counts['fetch'] == 2 and counts['fetch_flat'] == 1 and counts['dispersed'] == 0
+    with sqlite3.connect(tmp_path / 'classifier.sqlite') as db:
+        rows = dict(db.execute('SELECT round(candidate_dm), detection_type || "|" || COALESCE(model_probabilities, "") '
+                               'FROM detections').fetchall())
+    # The flat one stays out of the dispersed route however lax its tier; the other is judged as before.
+    assert rows[130.0] in ('rejected|{}', 'rejected|') and rows[30.0].startswith('rejected|{"a"')

@@ -156,3 +156,22 @@ def test_the_rfi_mask_zeroes_a_channel_block_the_search_would_flag():
     assert z[3000:4000, 9].std() < 0.3                 # zeroed: only minus each row's mean over 32 channels
     assert z[5000:6000, 9].std() > 0.8                 # an unflagged block keeps its noise
     assert np.array_equal(z[:3000, 9] != 0, plain[:3000, 9] != 0)               # other blocks untouched
+
+
+def test_a_chunk_of_filled_samples_is_flat_input_not_a_division_error(monkeypatch):
+    """The flatfield fills lost samples at their channel's level; FETCH's planes there hold one value."""
+    data = np.tile(np.linspace(0.9, 1.0, 64, dtype=np.float32), (6000, 1))     # one level per channel, no noise
+
+    class FakeCandidate(ArrayCandidate):
+        def __init__(self, fp, dm, tcand, width, label, snr, min_samp, device):
+            super().__init__(data.copy(), np.linspace(151.0, 119.5, 64), TSAMP, dm)
+            self.tcand, self.width, self.snr, self.tsamp = tcand, width, snr, TSAMP
+            self.dedispersed = None
+
+        def get_chunk(self):
+            pass
+
+    monkeypatch.setattr(classify, 'Candidate', FakeCandidate)
+    for kwargs in ({}, {'bowtie': 0.5, 'clean': {'rfi_mask': True}}):
+        with pytest.raises(classify.FlatInput):
+            classify.fetch_inputs('x.fil', 450.0, 20.0, 8, 10.0, [], **kwargs)

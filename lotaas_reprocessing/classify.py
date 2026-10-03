@@ -204,6 +204,11 @@ def clean_chunk(data, good, rfi_mask=False, baseline_pixels=None, pixel=1):
     return z
 
 
+class FlatInput(ValueError):
+    """FETCH's planes hold a single value: the candidate's chunk is samples the flatfield filled at their channel's
+    level where the data were lost (gaps in early-cycle beams), so there is nothing to judge."""
+
+
 def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_size=256, freq_size=256, dm_size=256,
                  range_dm=FETCH_MIN_RANGE_DM, bowtie=None, clean=False):
     """The candidate and FETCH's two inputs, the frequency-time plane X and the DM-time plane Y.
@@ -250,6 +255,9 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
     cand.dedispersed = crop(cand.dedispersed, cand.dedispersed.shape[0] // 2 - time_size // 2, time_size, 0)
     cand.decimate(key="ft", axis=1, pad=True, decimate_factor=max(1, cand.dedispersed.shape[1] // freq_size), mode="median")
     cand.resize(key="ft", size=freq_size, axis=1, anti_aliasing=True, mode="constant")
+    # normalise subtracts the median before dividing by the spread, which a single-valued plane leaves at zero.
+    if np.ptp(cand.dedispersed) == 0:
+        raise FlatInput(f"FETCH's frequency-time plane holds one value at DM={dm}, time={tcand}")
     cand.dedispersed = normalise(cand.dedispersed)
 
     # The DM-time plane is already decimated and cropped in time.
@@ -261,6 +269,8 @@ def fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels=(), time_s
     cand.resize(key="dmt", size=dm_size, axis=1, anti_aliasing=True, mode="constant")
 
     # Normalize `dmt`
+    if np.ptp(cand.dmt) == 0:
+        raise FlatInput(f"FETCH's DM-time plane holds one value at DM={dm}, time={tcand}")
     cand.dmt = normalise(cand.dmt)
 
     # Prepare data for FETCH classification
@@ -311,7 +321,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
     if limits['min_local_snr'] is not None and evidence is None:
         raise ValueError('Local S/N screening requires single_pulse_evidence.json')
     counts = {"fetch": 0, "known_pulsar": 0, "unconfirmed": 0, "unclassified": 0, "own_data": 0, "dispersed": 0,
-              "unjudged": 0, "fetch_unsupported": 0}
+              "unjudged": 0, "fetch_unsupported": 0, "fetch_flat": 0}
     own_check = limits['min_own_snr'] is not None and limits['min_own_fraction'] is not None and bool(plan)
     os.makedirs(output_dir, exist_ok=True)
     observation_info = observation_info or {}
@@ -493,6 +503,7 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
             fetch_probs = highest_prob = None
             accepted = False
             high_ratio = high_smooth = None
+            flat = False
             fetch_bowtie = high.get('bowtie') if high else limits['fetch_bowtie']
             fetch_clean = high.get('clean', False) if high else limits['fetch_clean']
             if unjudged:
@@ -503,15 +514,25 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                     from lotaas_reprocessing.fetch_models import load_models
                     fetch_models = load_models(model_names, factory=get_model)
                 # Proceed with classification of non-pulsar candidates
-                cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
-                                                                time_size, freq_size, dm_size,
-                                                                bowtie=fetch_bowtie, clean=fetch_clean)
-                fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
-                               for name, model in fetch_models.items()}
-                if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
-                    raise ValueError(f"Invalid FETCH probabilities at DM={dm}, time={tcand}")
-                highest_prob = max(fetch_probs.values())
-                accepted = highest_prob > 0.5
+                try:
+                    cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr, bad_channels,
+                                                                    time_size, freq_size, dm_size,
+                                                                    bowtie=fetch_bowtie, clean=fetch_clean)
+                except FlatInput as error:
+                    # Filled samples where the data were lost: no burst there. Until 3 October 2026 the error
+                    # failed the whole beam (9 early-cycle SAPs, ~140 beams, of 0.25 s-row data).
+                    logger.warning("Rejected without FETCH, no data under the candidate: %s", error)
+                    counts["fetch_flat"] += 1
+                    flat = True
+                if flat:
+                    fetch_probs, highest_prob, accepted = {}, 0.0, False
+                else:
+                    fetch_probs = {name: model.predict([X,Y], batch_size=1, verbose=0)[0,1]
+                                   for name, model in fetch_models.items()}
+                    if not all(np.isfinite(p) and 0 <= p <= 1 for p in fetch_probs.values()):
+                        raise ValueError(f"Invalid FETCH probabilities at DM={dm}, time={tcand}")
+                    highest_prob = max(fetch_probs.values())
+                    accepted = highest_prob > 0.5
                 if accepted and high:
                     if high.get('edge_seconds') and near_edge(filterbank_file, dm, tcand, high['edge_seconds']):
                         accepted = False
@@ -556,15 +577,21 @@ def classify_candidates(filterbank_file, candidate_file, output_dir, observation
                             smooth = smoothness(stretch_data)
                     except Exception as error:
                         logger.warning("Dispersion not measured at DM=%.2f t=%.3f: %s", dm, tcand, error)
-                dispersed = (ratio is not None and ratio <= tier['max_ratio']
+                dispersed = (not flat and ratio is not None and ratio <= tier['max_ratio']
                              and (smooth is None or smooth >= route['min_smoothness']))
                 if dispersed:
                     counts["dispersed"] += 1
                     logger.info("Dispersed at DM=%.2f t=%.3f: own S/N %.1f, ratio %.2f", dm, tcand, own, ratio)
                     if unjudged:                       # the review plot shows what FETCH would have seen
-                        cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr,
-                                                                        bad_channels, time_size, freq_size, dm_size,
-                                                                        bowtie=fetch_bowtie, clean=fetch_clean)
+                        try:
+                            cand, X, Y, time_decimate_factor = fetch_inputs(filterbank_file, dm, tcand, width, snr,
+                                                                            bad_channels, time_size, freq_size, dm_size,
+                                                                            bowtie=fetch_bowtie, clean=fetch_clean)
+                        except FlatInput as error:
+                            logger.warning("Not dispersed after all, no data under the candidate: %s", error)
+                            counts["dispersed"] -= 1
+                            counts["fetch_flat"] += 1
+                            dispersed = False
                 insert_detection(
                     beam_id=beam_id,
                     beam_run_id=beam_run_id,
