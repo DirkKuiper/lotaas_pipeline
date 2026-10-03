@@ -183,13 +183,21 @@ def kappa_units(bursts):
 
 
 def lane_bursts(lane_db):
-    """{(release sha, source): bursts recording their fluence} of the injection lane."""
+    """{(release sha, source): bursts recording their fluence} of the injection lane, each burst with the time its
+    batch started ('started')."""
     db = sqlite3.connect(f'file:{lane_db}?mode=ro', uri=True)
+    try:
+        started = dict(db.execute('SELECT name, started FROM batches'))
+    except sqlite3.Error:
+        started = {}
+    columns = {r[1] for r in db.execute('PRAGMA table_info(bursts)')}
+    batch = 'batch' if 'batch' in columns else 'NULL'
     out = {}
-    for fp, source, queued, record in db.execute('SELECT fingerprint, source, queued, record FROM bursts WHERE record IS NOT NULL'):
+    for fp, source, queued, record, name in db.execute(
+            f'SELECT fingerprint, source, queued, record, {batch} FROM bursts WHERE record IS NOT NULL'):
         b = json.loads(record)
         if b.get('fluence_units') and b.get('sigma_mean'):
-            out.setdefault((fp, source), []).append(dict(b, queued=bool(queued)))
+            out.setdefault((fp, source), []).append(dict(b, queued=bool(queued), started=started.get(name)))
     db.close()
     return out
 
@@ -211,16 +219,25 @@ def replay(bursts, source, min_search_snr=None, min_votes=None):
 
 
 def epoch_lane(epochs, lane, epoch, source):
-    """(bursts, where they came from) standing for `source` in `epoch`."""
+    """(bursts, where they came from) standing for `source` in `epoch`: the lane's bursts of the releases its `lane`
+    lists for the source, or else those of batches started within the epoch, as its SAPs' runs were."""
     by_name = {e['name']: e for e in epochs}
     e = by_name[epoch]
-    releases = (e.get('lane') or {}).get(source, [])
-    own = [b for (fp, src), bs in lane.items() if src == source and any(fp.startswith(r) for r in releases) for b in bs]
+    releases = (e.get('lane') or {}).get(source)
+    if releases is not None:
+        own = [b for (fp, src), bs in lane.items() if src == source and any(fp.startswith(r) for r in releases) for b in bs]
+        came = f"{epoch} ({', '.join(releases)})"
+    else:
+        later = [x['start'] for x in epochs if x['start'] > e['start']]
+        end = min(later) if later else float('inf')
+        own = [b for (fp, src), bs in lane.items() if src == source for b in bs
+               if b.get('started') is not None and e['start'] <= b['started'] < end]
+        came = f'{epoch} (batches started in it)'
     stand_in = e.get('stand_in')
     if len(own) >= MIN_LANE_BURSTS or not stand_in:
-        return own, f"{epoch} ({', '.join(releases)})"
-    bursts, came = epoch_lane(epochs, lane, stand_in['epoch'], source)
-    return replay(bursts, source, stand_in.get('min_search_snr'), stand_in.get('min_votes')), f'{came} replayed as {epoch}'
+        return own, came
+    bursts, before = epoch_lane(epochs, lane, stand_in['epoch'], source)
+    return replay(bursts, source, stand_in.get('min_search_snr'), stand_in.get('min_votes')), f'{before} replayed as {epoch}'
 
 
 def unit_exposure(bursts, alpha, scattered_below=None):

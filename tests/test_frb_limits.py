@@ -144,3 +144,25 @@ def test_the_limit_tightens_with_time_on_sky_and_projects_to_the_whole_campaign(
     # no less than 3 / (4 / 41253 / 24) x 100^-1.4 per sky per day.
     assert r100(one) > 3 / (4.5 / frb_limits.frb_rate.SKY_DEG2 / 24) * 100 ** -1.4
     assert 0 < one['expected'][0]['expected'] < one['expected'][-1]['expected']
+
+
+def test_without_listed_releases_an_epoch_takes_the_bursts_of_batches_started_in_it(tmp_path):
+    e = epochs(tmp_path, EPOCHS.replace("    lane: {lta: ['bbb222']}\n", ''))
+    t = frb_limits.parse_time
+    lane = {('ccc333' + 'f' * 34, 'lta'): [dict(burst(20, True), started=t('2026-10-02T00:00:00Z'))] * frb_limits.MIN_LANE_BURSTS
+            + [dict(burst(20, False), started=t('2026-09-30T00:00:00Z'))] * 50,
+            ('ddd444' + 'f' * 34, 'spider'): [dict(burst(20, True), started=t('2026-10-02T00:00:00Z'))] * 5}
+    got, came = frb_limits.epoch_lane(e, lane, 'two', 'lta')
+    assert len(got) == frb_limits.MIN_LANE_BURSTS and all(b['queued'] for b in got) and 'batches started in it' in came
+    got, came = frb_limits.epoch_lane(e, lane, 'two', 'spider')        # too few of its own: the stand-in's, none listed
+    assert got == [] and 'replayed as two' in came
+
+
+def test_lane_bursts_carry_their_batch_start(tmp_path):
+    with sqlite3.connect(tmp_path / 'lane.sqlite') as db:
+        db.execute('CREATE TABLE bursts (fingerprint TEXT, source TEXT, queued INTEGER, record TEXT, batch TEXT)')
+        db.execute('CREATE TABLE batches (name TEXT, started REAL)')
+        db.execute("INSERT INTO batches VALUES ('b1', 123.0)")
+        db.execute("INSERT INTO bursts VALUES ('abc', 'lta', 1, ?, 'b1')", (json.dumps(burst(20, True)),))
+    lane = frb_limits.lane_bursts(tmp_path / 'lane.sqlite')
+    assert lane[('abc', 'lta')][0]['started'] == 123.0 and lane[('abc', 'lta')][0]['queued'] is True

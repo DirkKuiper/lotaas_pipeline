@@ -1,7 +1,8 @@
 # Epochs of the FRB search for euroflash.frb_limits. A SAP belongs to the epoch in which its run was made; the
-# chance that a burst in it reaches the review queue is measured on the injection lane's bursts of the releases
-# listed for its source (lta: LT5_004 and the other LTA projects, spider: early-cycle beams from SPIDER). A new epoch
-# starts whenever search or classification changes what reaches the queue. Until a source has MIN_LANE_BURSTS of its
+# chance that a burst in it reaches the review queue is measured on the injection lane's bursts of the batches started
+# in the same epoch, or, where `lane` lists releases for a source (lta: LT5_004 and the other LTA projects, spider:
+# early-cycle beams from SPIDER), on those releases' bursts. Start a new epoch whenever search or classification
+# changes what reaches the queue, not for releases that leave it alone. Until a source has MIN_LANE_BURSTS of its
 # own, `stand_in` names the epoch whose bursts stand for it, with the new rules replayed on their records.
 # Quote the release shas: YAML reads an all-digit sha as a number.
 ec: &ec ['1dd3ce1', '878f41b', '7981e0a', '3796107', '0468b12', 'dd93aec', 'b043fdc']   # early-cycle settings unchanged
@@ -33,6 +34,5 @@ epochs:
     note: slow per-channel excesses capped before the zero-DM filter, widest dispersed tier at own S/N 8 (LT5)
   - name: route-votes
     from: '2026-10-03T09:07:05Z'
-    lane: {lta: ['f790cbf'], spider: ['f790cbf']}
     stand_in: {epoch: slow-cap, min_search_snr: 8.0, min_votes: {lta: 1}}
     note: dispersed route from S/N 8 only, and for LT5 at least one FETCH vote when FETCH was asked
