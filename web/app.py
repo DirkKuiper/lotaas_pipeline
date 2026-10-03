@@ -41,7 +41,8 @@ STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding',
 FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
 # Single-pulse and periodic candidates are listed and reviewed apart. 'queue' is
 # what waits for a person; the other types can be listed but are not queued.
-# 'dispersed': FETCH said no, but its own data show a dispersed pulse (classify, 28 September 2026).
+# 'dispersed': short of FETCH's verdict (from DM 100 five of its six models; for LT5 at least one since 3 October
+# 2026), or not asked (early-cycle clusters wider than 0.15 s), but its own data show a dispersed pulse.
 # What the classifier turned down (rejected, unconfirmed, unclassified) is not listed: the index keeps those as
 # the other events at a candidate's moment (sp_events), and the campaign ledger keeps each one.
 KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar'),
@@ -399,7 +400,7 @@ def create_app(cfg, run_background=True):
     env = templates.env
     env.filters.update(ago=ago, duration=duration, when=when, size=size, beam=beam_label, fromjson=json.loads,
                        kind=lambda t: {'candidate': 'FETCH positive', 'known_pulsar': 'known pulsar',
-                                       'dispersed': 'dispersed, FETCH said no',
+                                       'dispersed': 'dispersed, FETCH split',
                                        'rejected': 'FETCH reject', 'periodic': 'periodic',
                                        'unclassified': 'not sent to FETCH',
                                        'unconfirmed': 'low local significance',

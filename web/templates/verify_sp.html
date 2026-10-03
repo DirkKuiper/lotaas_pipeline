@@ -3,7 +3,7 @@
 {% block page %}verify{% endblock %}
 {% block head %}<script src="/static/review.js" defer></script><script src="/static/viewer.js" defer></script>{% endblock %}
 {% block content %}
-{% set kinds = {'candidate': 'FETCH positive', 'dispersed': 'Dispersed on its own data, FETCH said no', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject', 'unconfirmed': 'Low local significance'} %}
+{% set kinds = {'candidate': 'FETCH positive', 'dispersed': 'Dispersed on its own data; FETCH short of 5 of 6 models, or not asked', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject', 'unconfirmed': 'Low local significance'} %}
 <div class="page-head">
   <div>
     <div class="muted small"><a href="/single-pulse">Single-pulse candidates</a> / {% if candidate.sap_key %}<a href="/sap/{{ candidate.sap_key }}">{{ candidate.sap_key }}</a> / {% endif %}<a href="/beam/{{ candidate.item }}">{{ candidate.item|beam }}</a></div>

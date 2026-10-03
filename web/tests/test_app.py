@@ -106,9 +106,9 @@ def test_what_fetch_rejected_but_its_own_data_show_dispersed_is_queued_with_its_
     assert row['key'].startswith('dispersed|') and row['plot_id'] is not None
     client = client_for(cfg)
     listed = client.get('/single-pulse?type=dispersed').text
-    assert 'dispersed, FETCH said no' in listed and '830.00' in listed
+    assert 'dispersed, FETCH split' in listed and '830.00' in listed
     queue = client.get('/single-pulse').text                        # the queue: beside FETCH's positives
-    assert 'dispersed, FETCH said no' in queue and 'FETCH positive' in queue
+    assert 'dispersed, FETCH split' in queue and 'FETCH positive' in queue
     # Its DM is far beyond the Milky Way's here (41.5): badged, and first to review.
     assert 'beyond the Milky Way' in queue and queue.index('830.00') < queue.index('30.00')
     first = client.get('/verify?kind=sp', follow_redirects=False)
