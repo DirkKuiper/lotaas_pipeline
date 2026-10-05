@@ -32,18 +32,22 @@ observation shows, not by looking at the candidate:
   below DM 100 (a flatfielded pulse dips a third at most). Verdict 'rfi'.
 - a wide event (32 samples or more) below DM 100 in an LT5_004 beam, within
   a second and its width of a 24.16 s block boundary, where each channel's
-  level steps, and no more dispersed than a step. Verdict 'rfi'.
+  level steps, and no more dispersed than a step, or as strong at DM 0 as a
+  step would be within the noise (BLOCK_STEP_SIGMA). Verdict 'rfi'.
 - an event no more dispersed than an undispersed burst where its DM is too
   small to tell (a pulse would keep over half its S/N at DM 0), when such
   events reach BLIND_BEAMS or more beams of the observation. Verdict 'rfi'.
 - a dispersed event at the DM of a catalogued pulsar within 5 degrees
-  (max(1, 2%)): its pulses through the sidelobes, as the Crab's giant pulses
+  (max(1, 2%), and for a narrow pulse up to half a unit more, as its width
+  allows): its pulses through the sidelobes, as the Crab's giant pulses
   in 22 beams of L549917. Verdict 'known'.
 - the classifier's redetection of a catalogued pulsar in its own beam, at the
   pulsar's DM. Verdict 'known'.
 - a candidate the search put at S/N 7 or more whose own data show under
   LOCAL_MIN at its time, DM and width (the review page's local S/N,
-  indexer.measure_local). The search fills each 7.9 s channel block its RFI
+  indexer.measure_local), or under LOCAL_CLEAR and LOCAL_FRACTION of its
+  search S/N; below COARSE_MIN_DM, when no other rule settles it, under
+  LOCAL_FRACTION_FINE. The search fills each 7.9 s channel block its RFI
   mask flags at a level that can lift the dedispersed baseline for the whole
   block; an event on such a step reached S/N 7 with no pulse there (27
   September: 7.09 for L543457 SAP000 B013 DM 3.0, 1.4 without the mask, and
@@ -77,6 +81,13 @@ SEARCH_MIN = 7.0
 # 2026 read 0.8-1.4 times their search S/N on the review page; interference the search saw
 # through read a quarter to a half.
 LOCAL_FRACTION = 0.6
+# Since 5 October 2026, below COARSE_MIN_DM and when no other rule settles it, under this fraction too: of the 661
+# injected bursts of the levelled chain test none there read under it (the lowest 0.71), and 96 candidates later
+# called interference or noise by eye read 0.6-0.7, 21 of them one observation's narrow noise-floor events (L543477;
+# benchmarks/triage-tweaks-2026-10-05). From the DM where the search downsamples by 16 (0.13 s samples) the page's
+# snippet splits a narrow burst, and 23 of the 288 injected bursts there read under 0.7.
+LOCAL_FRACTION_FINE = 0.7
+COARSE_MIN_DM = 1010.8
 # ... unless its own data show it at this S/N or more. None of 103 pilot positives the rule removed
 # read above 5.7, while injected FRB-like bursts at DM 300-2500 read 0.4-0.55 times their search S/N
 # (10-11 against 20-27) when the review page's snippet, at the search's resolution, splits a
@@ -199,19 +210,28 @@ def settled(db):
                                   f"{r['snr_min']:.1f} beside it at its DM, where a pulse dips to a third of its "
                                   f"height at most. A level stepping down and up again (2-bit requantisation).",
                                   r['dm'], r['earlier']))
-    for r in db.execute(f"""SELECT c.key, c.dm, c.item, c.time, c.width, d.snr_dm, d.snr_zero, {earlier} AS earlier
-            FROM candidates c JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN} AND c.dm < ?
-            AND c.width >= ? AND d.snr_dm > 0 AND d.snr_zero >= ? * d.snr_dm AND c.time IS NOT NULL AND {NOT_KNOWN}""",
-            (BLOCK_MAX_DM, BLOCK_MIN_WIDTH, UNDISPERSED_RATIO)):
+    nearby = _at_a_nearby_pulsars_dm(db, earlier)
+    attributed = {key for key, *_ in nearby}
+    for r in db.execute(f"""SELECT c.key, c.type, c.dm, c.item, c.time, c.width, d.snr_dm, d.snr_zero,
+            {earlier} AS earlier FROM candidates c JOIN sp_dispersion d ON d.key=c.key WHERE {QUEUED} AND {OPEN}
+            AND c.dm < ? AND c.width >= ? AND d.snr_dm IS NOT NULL AND d.snr_zero IS NOT NULL AND c.time IS NOT NULL
+            AND {NOT_KNOWN}""", (BLOCK_MAX_DM, BLOCK_MIN_WIDTH)):
         if not _lt5(r['item']):
             continue
         offset = r['time'] - round(r['time'] / LT5_BLOCK_SECONDS) * LT5_BLOCK_SECONDS
-        if abs(offset) <= r['width'] * LOTAAS_TSAMP + 1.0:
+        if abs(offset) > r['width'] * LOTAAS_TSAMP + 1.0:
+            continue
+        how = None
+        if r['snr_dm'] > 0 and r['snr_zero'] >= UNDISPERSED_RATIO * r['snr_dm']:
+            how = 'no more dispersed than a step'
+        elif (r['snr_zero'] >= r['snr_dm'] - BLOCK_STEP_SIGMA and r['type'] != 'known_pulsar'
+              and r['key'] not in attributed):
+            how = 'as strong at DM 0 as a step would be, within the noise'
+        if how:
             out.setdefault(r['key'], (r['key'], 'rfi', f"At a {LT5_BLOCK_SECONDS:.2f} s block boundary ({offset:+.2f} s), "
-                                      f"where each channel's level steps in LT5_004 beams flatfielded before 29 "
-                                      f"September 2026, {r['width']} samples wide and no more dispersed than a step "
-                                      f"(S/N {r['snr_zero']:.1f} at DM 0, {r['snr_dm']:.1f} at its DM).", r['dm'],
-                                      r['earlier']))
+                                      f"where each channel's level steps in LT5_004 beams, {r['width']} samples wide "
+                                      f"and {how} (S/N {r['snr_zero']:.1f} at DM 0, {r['snr_dm']:.1f} at its DM).",
+                                      r['dm'], r['earlier']))
     # Events that cannot be told from undispersed (a pulse of their width would keep over half its S/N at DM 0,
     # and they keep 80%), counted by the beams of their observation that have one: a source is at one place.
     blind = [dict(r) for r in db.execute(f"""SELECT c.key, c.dm, c.item, {earlier} AS earlier FROM candidates c
@@ -228,7 +248,7 @@ def settled(db):
             out.setdefault(r['key'], (r['key'], 'rfi', f"No more dispersed than an undispersed burst, as are such "
                                       f"events in {n} beams of this observation: a source on the sky is in one or a "
                                       f"few neighbouring beams.", r['dm'], r['earlier']))
-    for key, label, note, dm, before in _at_a_nearby_pulsars_dm(db, earlier):
+    for key, label, note, dm, before in nearby:
         out.setdefault(key, (key, label, note, dm, before))
     catalogue = _catalogue_dms()
     for r in db.execute(f"""SELECT c.key, c.dm, c.pulsar, {earlier} AS earlier FROM candidates c
@@ -237,6 +257,16 @@ def settled(db):
         if dm is not None and abs(r['dm'] - dm) <= max(2.0, 0.05 * dm):
             out.setdefault(r['key'], (r['key'], 'known', f"{r['pulsar']} in its own beam, at its DM ({dm:g}): the "
                                       f"classifier's redetection of a catalogued pulsar.", r['dm'], r['earlier']))
+    # Last, so that what another rule settles keeps that rule's verdict.
+    for r in db.execute(f"""SELECT c.key, c.dm, c.snr, l.local_snr, {earlier} AS earlier FROM candidates c
+            JOIN sp_local_snr l ON l.key=c.key WHERE {QUEUED} AND {OPEN} AND l.local_snr IS NOT NULL
+            AND l.local_snr < ? * c.snr AND l.local_snr < ? AND c.snr >= ? AND c.dm < ? AND {NOT_KNOWN}""",
+            (LOCAL_FRACTION_FINE, LOCAL_CLEAR, SEARCH_MIN, COARSE_MIN_DM)):
+        out.setdefault(r['key'], (r['key'], 'noise', f"Search S/N {r['snr']:.1f}, but S/N {r['local_snr']:.1f} on its "
+                                  f"own data at its time, DM and width, measured as the search measures (the local "
+                                  f"S/N of the review page), under {LOCAL_FRACTION_FINE:g} of it: no pulse there. Below "
+                                  f"DM {COARSE_MIN_DM:g} a pulse reads 0.7-1.4 times its search S/N there.",
+                                  r['dm'], r['earlier']))
     return list(out.values())
 
 
@@ -248,6 +278,13 @@ LOTAAS_TSAMP = 0.00786432
 LT5_BLOCK_SECONDS = 3072 * LOTAAS_TSAMP
 BLOCK_MAX_DM = 100.0
 BLOCK_MIN_WIDTH = 32
+# The levelling does not remove every step (L605718: 49 of 52 wide events within a second before a boundary, 4
+# October 2026), and a step that the zero-DM filter half cancels keeps only S/N ~3 without it, where noise alone
+# puts its DM-0 S/N below 0.8 of that. Also a step, then, when its DM-0 S/N is within 2 sigma of the S/N at its DM
+# (2.8: the difference of two unit-variance measures): 49 of the 57 such events of 3-5 October, and 91 more that
+# were called interference or noise by eye; no candidate called anything else (benchmarks/triage-tweaks-2026-10-05).
+# Own-beam redetections and pulses at a nearby pulsar's DM are left to the rules that attribute them.
+BLOCK_STEP_SIGMA = 2.8
 # Beams of one observation with events no more dispersed than a burst at DM 0 (L169691: 53; 2013 2-bit steps).
 BLIND_BEAMS = 5
 
@@ -285,16 +322,18 @@ def _at_a_nearby_pulsars_dm(db, earlier):
     if not pulsars:
         return []
     out, cones = [], {}
-    for r in db.execute(f"""SELECT c.key, c.dm, b.ra_deg, b.dec_deg, {earlier} AS earlier FROM candidates c
-            JOIN beams b ON b.dir=c.dir WHERE {QUEUED} AND {OPEN} AND {NOT_KNOWN} AND b.ra_deg IS NOT NULL"""):
+    for r in db.execute(f"""SELECT c.key, c.dm, c.width, b.ra_deg, b.dec_deg, b.tsamp, b.nu_min, b.nu_max,
+            {earlier} AS earlier FROM candidates c JOIN beams b ON b.dir=c.dir
+            WHERE {QUEUED} AND {OPEN} AND {NOT_KNOWN} AND b.ra_deg IS NOT NULL"""):
         place = (round(r['ra_deg'], 1), round(r['dec_deg'], 1))
         if place not in cones:
             cones[place] = [p for p in psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], NEARBY_BRIGHT_RADIUS_DEG)
                             if p['separation_deg'] <= NEARBY_RADIUS_DEG or _bright(p)]
+        slack = _narrow_dm_slack(r)
         for pulsar in cones[place]:
             wide = _bright(pulsar) or pulsar['separation_deg'] <= OWN_BEAM_DEG
             tolerance = max(3.0 if _bright(pulsar) else 2.0, 0.1 * pulsar['dm']) if wide else max(1.0, 0.02 * pulsar['dm'])
-            if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= tolerance:
+            if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= tolerance + slack:
                 name = pulsar.get('bname') or pulsar['name']
                 name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
                 out.append((r['key'], 'known', f"At the DM of {name} ({pulsar['dm']:g}), "
@@ -302,6 +341,25 @@ def _at_a_nearby_pulsars_dm(db, earlier):
                             f"sidelobes.", r['dm'], r['earlier']))
                 break
     return out
+
+
+# A narrow pulse's DM is measured to about its width over the sweep per unit DM, so its window widens by that much,
+# up to NARROW_DM_SLACK: B1133+16's pulses (DM 4.84, 0.04-0.07 s wide) were found at DM 3.8-6.0, 1.04-1.16 from it,
+# 3 degrees away (L626310, 5 October 2026). Over all queued candidates this attributes the 42 pulses people had called
+# known by eye that the window missed, and 6 they had called interference or noise. Wider events' DMs are too loose
+# to attribute on DM alone (with them the slack would have attributed 5,598, nearly all interference).
+NARROW_MAX_SECONDS = 0.13
+NARROW_DM_SLACK = 0.5
+DISPERSION_SECONDS = 4148.808            # s MHz^2 per unit DM
+
+
+def _narrow_dm_slack(r):
+    """DMs a candidate's measured DM may lie from its true one, from its width: 0 above NARROW_MAX_SECONDS."""
+    width = (r['width'] or 0) * (r['tsamp'] or LOTAAS_TSAMP)
+    per_dm = DISPERSION_SECONDS * ((r['nu_min'] or 119.45) ** -2 - (r['nu_max'] or 151.04) ** -2)
+    if not 0 < width <= NARROW_MAX_SECONDS or per_dm <= 0:
+        return 0.0
+    return min(width / per_dm, NARROW_DM_SLACK)
 
 
 def _catalogue_dms():

@@ -738,14 +738,14 @@ def test_beams_recorded_with_a_garbled_right_ascension_are_repaired(cfg, campaig
 @pytest.mark.parametrize('amplitude, settled', [(1.2, False), (0.0, True), (0.65, True), (0.8, False)])
 def test_a_candidate_its_own_data_do_not_show_is_noise(cfg, campaign, amplitude, settled):
     # The search put it at S/N 12; the snippet holds the pulse, none, or one too faint to be what the search saw
-    # (0.65: S/N 5.4), or one clearly there (0.8: 6.6) though below 0.6 of the search's: never called noise.
+    # (0.65: S/N 5.4), or one clearly there (0.8: 6.6) though below 0.7 of the search's: never called noise.
     synthetic_filterbank(cfg.source_roots[0] / f'{ITEM}.fil', amplitude=amplitude)
     indexer = Indexer(cfg)
     indexer.run_pass()
     Snippets(cfg).run_pass()
     indexer.run_pass()
     local = indexer.db.execute('SELECT local_snr FROM sp_local_snr').fetchall()
-    assert len(local) == 1 and (local[0][0] < 4.0 or (local[0][0] < 0.6 * 12.0 and local[0][0] < 6.0)) == settled
+    assert len(local) == 1 and (local[0][0] < 4.0 or (local[0][0] < 0.7 * 12.0 and local[0][0] < 6.0)) == settled
     if amplitude == 0.65:
         assert local[0][0] > 4                    # only the fraction of the search's S/N settles it
     noise = [v for v in verdicts(cfg) if v['label'] == 'noise']
@@ -963,7 +963,8 @@ def test_a_pulse_at_the_dm_of_a_pulsar_a_few_degrees_away_is_known(cfg, campaign
     assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == []
 
 
-@pytest.mark.parametrize('snr, local, label', [(7.5, 5.0, 'noise'), (7.5, 6.5, None), (9.0, 5.8, None)])
+@pytest.mark.parametrize('snr, local, label', [(7.5, 5.0, 'noise'), (7.5, 6.5, None),
+                                               (8.2, 5.8, None)])   # above the gate, and above 0.7 of its S/N
 def test_a_fetch_positive_below_the_gate_its_own_data_barely_show_is_noise(cfg, campaign, snr, local, label):
     indexer = Indexer(cfg)
     indexer.run_pass()
@@ -1007,6 +1008,62 @@ def test_a_wide_event_at_an_lt5_block_boundary_is_the_step(cfg, campaign, time, 
     indexer.triage()
     found = [v for v in verdicts(cfg) if v['key'] == key]
     assert [v['label'] for v in found] == ([label] if label else [])
+
+
+@pytest.mark.parametrize('dm, local, label', [(30.0, 5.8, 'noise'),     # 0.64 of the search's S/N 9
+                                              (1200.0, 5.8, None),       # where the page splits narrow bursts: 0.6
+                                              (1200.0, 5.0, 'noise')])
+def test_the_page_fraction_is_looser_where_the_search_downsamples_by_16(cfg, campaign, dm, local, label):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET snr=9.0, dm=? WHERE key=?', (dm, key))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_local_snr VALUES (?,?,0)', (key, local))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ([label] if label else [])
+
+
+@pytest.mark.parametrize('snr_dm, zero, label', [(3.5, 1.2, 'rfi'),    # S/N ~3 at its DM: a step, within the noise
+                                                 (-0.9, 2.1, 'rfi'),   # nothing at its DM without the zero-DM filter
+                                                 (6.0, 2.0, None),     # 4 below: dispersed
+                                                 (12.0, 3.0, None)])
+def test_a_weak_wide_event_at_a_block_boundary_is_the_step_unless_its_data_say_dispersed(cfg, campaign, snr_dm, zero,
+                                                                                       label):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key = indexer.db.execute("SELECT key FROM candidates WHERE kind='sp' AND type='candidate'").fetchone()[0]
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET time=?, width=91 WHERE key=?', (24.1592 * 40 - 0.5, key))
+        indexer.db.execute('INSERT OR REPLACE INTO sp_dispersion(key, snr_dm, snr_zero, expected_zero, dropout, '
+                           'snr_min, measured, version) VALUES (?,?,?,0.5,0,-1,0,2)', (key, snr_dm, zero))
+    indexer.triage()
+    found = [v for v in verdicts(cfg) if v['key'] == key]
+    assert [v['label'] for v in found] == ([label] if label else [])
+    if label:
+        assert 'within the noise' in found[0]['note'] or 'no more dispersed' in found[0]['note']
+
+
+@pytest.mark.parametrize('offset, width, label', [(1.15, 9, 'known'),   # 0.07 s: its DM known to ~0.65, capped 0.5
+                                                  (1.15, 91, None),     # 0.7 s: no slack
+                                                  (1.6, 9, None),
+                                                  (0.9, 91, 'known')])
+def test_a_narrow_pulse_near_a_pulsars_dm_is_its_pulse(cfg, campaign, monkeypatch, tmp_path, offset, width, label):
+    # B1133+16 (DM 4.84) at DM 3.8-6.0, 0.04-0.07 s wide, 3 degrees away (L626310, 5 October 2026).
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key, ra, dec, dm = indexer.db.execute("""SELECT c.key, b.ra_deg, b.dec_deg, c.dm FROM candidates c JOIN beams b
+        ON b.dir=c.dir WHERE c.kind='sp' AND c.type='candidate'""").fetchone()
+    with indexer.db:
+        indexer.db.execute('UPDATE candidates SET width=? WHERE key=?', (width, key))
+    near_dec = dec + 3.0 if dec < 80 else dec - 3.0
+    catalogue = tmp_path / 'near.db'
+    catalogue.write_text(f'PSRJ     J0000+0000\nRAJ      {int(ra / 15):02d}:{int(ra % 15 * 4):02d}:00\n'
+                         f'DECJ     {"+" if near_dec >= 0 else "-"}{int(abs(near_dec)):02d}:00:00\nDM       '
+                         f'{dm + offset:.2f}\nP0       1.188\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    indexer.triage()
+    assert [v['label'] for v in verdicts(cfg) if v['key'] == key] == ([label] if label else [])
 
 
 def test_events_too_little_dispersed_to_tell_in_many_beams_of_an_observation_are_interference(cfg, campaign):
