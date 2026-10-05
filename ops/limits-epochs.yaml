@@ -36,3 +36,11 @@ epochs:
     from: '2026-10-03T09:07:05Z'
     stand_in: {epoch: slow-cap, min_search_snr: 8.0, min_votes: {lta: 1}}
     note: dispersed route from S/N 8 only, and for LT5 at least one FETCH vote when FETCH was asked
+  - name: ec-slow-cap
+    from: '2026-10-05T10:43:37Z'
+    stand_in: {epoch: route-votes, min_search_snr: 8.0, min_votes: {lta: 1}}
+    note: >-
+      early-cycle beams get the slow cap and LT5's classification (dba053e); LT5 unchanged. Until the lane has its
+      own early-cycle bursts, route-votes' stand in as they were: in the chain test the new rules queued more (77.0%
+      against 73.8%), while replaying the one-vote rule alone on the old records, which FETCH judged without
+      fetch_high_dm's cleaned input, would drop them from 67% to 58%.
