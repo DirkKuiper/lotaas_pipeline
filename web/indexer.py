@@ -489,6 +489,14 @@ class Indexer:
         now = time.time()
         known = {r['path']: r['mtime'] for r in db.execute('SELECT path,mtime FROM result_dirs')}
         full = full or now - meta_get(db, 'results_full_scan', 0) > 3600
+        if not meta_get(db, 'twin_folds_restored', 0):
+            # Once: production beams whose folds an injection twin took over (same keys) are read again.
+            with db:
+                db.execute('UPDATE beams SET mtime=0 WHERE COALESCE(pilot, 0)=0 AND EXISTS (SELECT 1 FROM periodic p '
+                           'WHERE p.item=beams.item AND p.fp16=beams.fp16 AND p.dir != beams.dir AND ('
+                           + ' OR '.join('p.dir LIKE ?' for _ in PILOT_DIRS) + '))', [f'%/{name}/%' for name in PILOT_DIRS])
+                meta_set(db, 'twin_folds_restored', now)
+            full = True
         indexed = 0
         for processed in self.processed_dirs():
             try:
@@ -501,9 +509,11 @@ class Indexer:
             with db:
                 db.execute('INSERT OR REPLACE INTO result_dirs VALUES (?,?,?)', (str(processed), mtime, now))
         with db:
-            # Beams indexed before PILOT_DIRS.
-            db.execute('UPDATE beams SET pilot=1 WHERE COALESCE(pilot, 0)=0 AND ('
-                       + ' OR '.join('dir LIKE ?' for _ in PILOT_DIRS) + ')', [f'%/{name}/%' for name in PILOT_DIRS])
+            # Beams and folds indexed before PILOT_DIRS, or before a run's own "pilot": false stopped
+            # overriding them (injection-lane folds reached the periodic queue until 5 October 2026).
+            for table in ('beams', 'periodic'):
+                db.execute(f'UPDATE {table} SET pilot=1 WHERE COALESCE(pilot, 0)=0 AND ('
+                           + ' OR '.join('dir LIKE ?' for _ in PILOT_DIRS) + ')', [f'%/{name}/%' for name in PILOT_DIRS])
             if full:
                 meta_set(db, 'results_full_scan', now)
         return indexed
@@ -542,6 +552,8 @@ class Indexer:
 
     def index_beam(self, path, item, run_name, node, fingerprint, pilot, mtime):
         meta = json.loads((path / 'metadata.json').read_text())
+        # A run under PILOT_DIRS is a pilot even when its own metadata says "pilot": false (the injection lane's does).
+        pilot = bool(meta.get('pilot')) or bool(pilot)
         info = meta.get('observation_info') or {}
         parsed = parse_item(item) or (None, None, None)
         pointing = POINTING.search(str(info.get('Object', '')))
@@ -565,7 +577,7 @@ class Indexer:
             # euroflash.findings.periodic_key gives the same key, so the campaign sees these reviews.
             key = 'periodicity|' + hashlib.sha256((item + '|' + path.name + '|' + row['plot']).encode()).hexdigest()
             names = ', '.join(m.get('name', '') for m in row.get('catalogue_matches') or [])
-            periodic_rows.append((key, str(path), item, path.name, meta.get('pilot', pilot), rank, row.get('dm'),
+            periodic_rows.append((key, str(path), item, path.name, pilot, rank, row.get('dm'),
                                   row.get('refined_period_seconds') or row.get('period_seconds'),
                                   row.get('statistic'), row.get('harmonic_count'), row.get('fold_chi2'),
                                   int(bool(row.get('rfi_like'))), names, row.get('plot'), row.get('fold_data'),
@@ -588,7 +600,7 @@ class Indexer:
         pd = summary['periodicity_summary.json']
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO beams VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
-                str(path), item, path.name, run_name, node, fingerprint, meta.get('pilot', pilot),
+                str(path), item, path.name, run_name, node, fingerprint, pilot,
                 parsed[0], parsed[1], parsed[2], pointing[1] if pointing else info.get('Object'),
                 sexagesimal(info.get('RA (J2000)'), hours=True), sexagesimal(info.get('DEC (J2000)')),
                 info.get('Observation Date'), meta.get('tstart_mjd'), meta.get('tsamp'),
@@ -599,6 +611,11 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO plots(dir,item,kind,name,path,key) VALUES (?,?,?,?,?,?)',
                                 plots)
             self.db.execute('DELETE FROM periodic WHERE dir=?', (str(path),))
+            if pilot:
+                # An injection twin folds what its production beam folded, under the same key (same item,
+                # fingerprint and plot); the twin must not take the production fold's place.
+                periodic_rows = [r for r in periodic_rows if not self.db.execute(
+                    'SELECT 1 FROM periodic WHERE key=? AND COALESCE(pilot, 0)=0', (r[0],)).fetchone()]
             self.db.executemany('INSERT OR REPLACE INTO periodic VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                 periodic_rows)
             self.store_low_dm(str(path), item, low)
@@ -739,8 +756,10 @@ class Indexer:
             # The retained folds still provide cross-beam evidence, but explicitly
             # removed candidates must not return to the dashboard after a refresh.
             db.execute('DELETE FROM candidates WHERE key IN (SELECT key FROM review_state.candidate_removals)')
+            # The production beam before an injection twin of it: the twin finds the same candidates under the
+            # same keys, and taking its (pilot) directory hid 609 production candidates until 5 October 2026.
             db.execute("""UPDATE candidates SET dir=(SELECT dir FROM beams WHERE beams.item=candidates.item
-                    AND beams.fp16=candidates.fp16 ORDER BY mtime DESC LIMIT 1) WHERE kind='sp'""")
+                    AND beams.fp16=candidates.fp16 ORDER BY COALESCE(pilot, 0), mtime DESC LIMIT 1) WHERE kind='sp'""")
             db.execute("""UPDATE candidates SET pilot=(SELECT pilot FROM beams WHERE beams.dir=candidates.dir)
                     WHERE kind='sp'""")
             # The classifier plots FETCH positives and 'dispersed' clusters alike; plots carry candidate| keys.
