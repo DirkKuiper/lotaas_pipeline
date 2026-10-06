@@ -44,6 +44,9 @@ DEFAULTS = {
     "fold_bins": 64,
     "fold_subintegrations": 32,
     "catalogue_match": True,
+    # Fold every catalogued pulsar near the beam at its ephemeris before the trials
+    # are pruned (lotaas_reprocessing.catalogue_fold): whether a known pulsar is seen.
+    "catalogue_fold": True,
     # Trials whose FFT length has a large prime factor fall back to Bluestein's
     # algorithm. Zero-padding each (mean-subtracted) trial up to a 7-smooth
     # length keeps every sample and cut the FFT cost of a beam from 88 s to

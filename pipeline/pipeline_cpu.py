@@ -81,8 +81,26 @@ def periodic_config(metadata):
 
 def periodicity(output, metadata):
     from lotaas_reprocessing.periodicity import search_periodicity
-    search_periodicity(output/'Periodic_DM_trials', output, metadata, periodic_config(metadata))
+    config = periodic_config(metadata)
+    search_periodicity(output/'Periodic_DM_trials', output, metadata, config)
+    if config.get('catalogue_fold', True):
+        catalogue_fold(output, metadata)
     prune_trials(output)
+
+
+def catalogue_fold(output, metadata):
+    """Fold the catalogued pulsars near the beam while every periodic trial is still there.
+
+    A context product, like the catalogue association of a fold: its failure is
+    logged and never fails the beam's search.
+    """
+    from lotaas_reprocessing.catalogue_fold import fold_catalogue
+    try:
+        records = fold_catalogue(output/'Periodic_DM_trials', output, metadata)
+        print(f"Catalogue folds: {sum(r.get('seen', False) for r in records)} of {len(records)} pulsars seen",
+              flush=True)
+    except Exception as error:
+        print(f'Catalogue folds failed: {type(error).__name__}: {error}', flush=True)
 
 
 def prune_trials(output):
