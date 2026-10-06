@@ -165,6 +165,14 @@ def test_a_period_in_many_beams_is_rfi_unless_it_keeps_one_dm(cfg, campaign):
     assert '5 beams in 1 SAP(s)' in page and 'multi-beam: RFI' in page and 'Same period in other beams' in page
 
 
+def crowd(beam_dir, dm, count=6, best=14.0):
+    """Pulses at a pulsar's DM in the beam's clusters, as many as its DM must hold beyond the DMs beside it
+    for a classifier redetection to count (indexer.cluster_tests); the brightest at S/N best."""
+    with (beam_dir / 'clustered_candidates.txt').open('a') as stream:
+        for i in range(count):
+            stream.write(f'{dm}\t{best - i * 0.5}\t{100.0 + 37.0 * i}\t{1000 + i}\t2\t1\t{10 + i}\n')
+
+
 def add_detections(campaign, rows):
     """(beam number, dm, snr, width, type, pulsar, time) detections of ITEM's observation in the ledger."""
     with campaign['ledger'].connect() as db:
@@ -219,7 +227,9 @@ def test_known_pulsars_no_lofar_paper_reports_are_listed_with_what_was_found(cfg
     monkeypatch.setattr(lofar, 'TABLE', census)
     add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0),
                               (25, 10.1, 9.0, 2, 'known_pulsar', 'J0845+6900', 1200.0)])
-    fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 80.0, 'half')     # its second harmonic
+    crowd(campaign['beam_dir'], 30.0)              # its DM holds its pulses: the redetection counts
+    # Its second harmonic, far above what chance gives a harmonic (indexer.HARMONIC_MIN_STATISTIC).
+    fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 300.0, 'half')
     Indexer(cfg).run_pass()
     client = client_for(cfg)
     # A reviewer found the J0845+6900 'redetection' to be noise: it no longer counts.
@@ -299,7 +309,8 @@ def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, c
         'PSRJ     J0845+6900\nRAJ      08:45:00.0\nDECJ     +69:00:00\nDM       10.0\nP0       0.7\nSURVEY   gbncc\n@----\n')
     monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
     add_detections(campaign, [(25, 30.0, 14.0, 2, 'known_pulsar', 'J0847+6830', 812.0)])
-    fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 80.0, 'half')
+    crowd(campaign['beam_dir'], 30.0)
+    fold(campaign['beam_dir'], 30.1, 0.25 * (1 + 4e-5), 300.0, 'half')
     Indexer(cfg).run_pass()
     client = client_for(cfg)
     page = client.get('/lotaas').text
