@@ -105,6 +105,42 @@ KNOWN_MIN_PERIOD = 0.05   # faster pulsars cannot be phased with 7.9 ms samples
 # SEARCHED_RADIUS_DEG of it; within BEAM_RADIUS_DEG of one the search should see a bright one.
 BEAM_RADIUS_DEG = 0.5
 SEARCHED_RADIUS_DEG = 1.0
+# What counts as finding a catalogued source (found), measured on 6 October 2026
+# (benchmarks/redetection-audit-2026-10-06). A fold at its own period is the
+# pulsar: with every catalogue period scrambled, 0.3 such matches came by chance
+# against 143 claimed. Its period is widened to FUNDAMENTAL_TOLERANCE for a
+# binary's orbit and Earth's: B0655+64 folded at statistic 8,527 at dP/P -3.6e-4
+# and went unfound at psrcat's 3e-4; the scramble gained nothing at 1e-3. A
+# harmonic, multiple or fraction of it came by chance as often as claimed below
+# statistic HARMONIC_MIN_STATISTIC.
+FUNDAMENTAL_TOLERANCE = 1e-3
+HARMONIC_MIN_STATISTIC = 200.0
+# Beyond psrcat's 3e-4 a fold at statistic 12 and DM 906 matched J1852+0056_P 0.8 degrees
+# away; the widened band asks this much (B0655+64: 8,527).
+WIDE_MIN_STATISTIC = 50.0
+# The classifier calls any cluster within 0.5 of a catalogued pulsar's DM and 1
+# degree of it a redetection. They count only where the pulsar's DM holds
+# clearly more clusters (dm_excess) than windows DM_EXCESS_OFFSETS away: of 67
+# such claims, 18 had as many at the other DMs. ON/OFF: at least DM_EXCESS_MIN,
+# and DM_EXCESS_RATIO times the mean of the others plus DM_EXCESS_MIN.
+DM_EXCESS_OFFSETS = (-8, -6, -4, -3, -2, 2, 3, 4, 6, 8)
+DM_EXCESS_MIN = 5
+DM_EXCESS_RATIO = 3.0
+DM_EXCESS_SNR = 7.0
+# A single pulse of a pulsar faster than this is out of the search's reach: ten
+# millisecond pulsars were 'found' by one noise event at their DM.
+SP_MIN_PERIOD = 0.016
+# Single pulses say nothing of a source with a brighter catalogued pulsar this near
+# and this close in DM (rival): B1919+21's pulses had 'found' J1918+1541 and
+# J1929+16, B2016+28's J2011+3006_P.
+RIVAL_DEG = 10.0
+RIVAL_DM = 1.0
+# Catalogue entries for one pulsar (J1647+6609 and J1647+6608, J1930+6205 and
+# J1929+62): period, DM and position this close share what LOFAR has published.
+DUPLICATE_PERIOD = 1e-3
+DUPLICATE_DM = (2.0, 0.05)
+DUPLICATE_DEG = 0.5
+PULSAR_NAME = re.compile(r'\b([BJ]\d{4}[+-]\d{2,4}[A-Za-z0-9_]*)')
 
 
 def uri(path):
@@ -1072,13 +1108,19 @@ class Indexer:
         singles: {(observation, pulsar): [(snr, item)]} of the classifier's
         redetections, less those a reviewer called noise or RFI and those seen
         across beams at scattered DMs (the start of L603674 was announced nine
-        times as J0152+0948); known: {observation: [(dm, snr, item)]} of FETCH
-        positives a reviewer called a known source.
+        times as J0152+0948); known: {(observation, name): [(snr, item)]} of
+        pulses shown to be that pulsar's: on its rotation (sp_known), or called
+        known by a person whose note names it.
+        Pulses the triage called known for a pulsar near them at their DM, and
+        nothing more, are not among them: B2217+47's 597 pulses had made
+        J2236+4929, 1.4 degrees from its own field, 'found'. dirs: {observation:
+        [(dir, ra, dec)]} of the searched beams, for dm_excess.
         """
-        beams = {}
-        for r in self.db.execute("""SELECT item, observation, ra_deg, dec_deg FROM beams WHERE ra_deg IS NOT NULL
+        beams, dirs = {}, {}
+        for r in self.db.execute("""SELECT item, observation, ra_deg, dec_deg, dir FROM beams WHERE ra_deg IS NOT NULL
                 AND COALESCE(pilot, 0)=0"""):
             beams.setdefault(r['observation'], {})[r['item']] = (r['ra_deg'], r['dec_deg'])
+            dirs.setdefault(r['observation'], []).append((r['dir'], r['ra_deg'], r['dec_deg']))
         folds = {}
         for r in self.db.execute("""SELECT item, dm, period, statistic FROM periodic
                 WHERE period > 0 AND COALESCE(pilot, 0)=0"""):
@@ -1096,12 +1138,23 @@ class Indexer:
             if parsed:
                 singles.setdefault((parsed[0], r['pulsar']), []).append((r['snr'], r['item']))
         known = {}
-        for r in self.db.execute(f"""SELECT c.item, c.dm, c.snr FROM candidates c WHERE c.kind='sp'
-                AND c.type IN ('candidate', 'dispersed') AND COALESCE(c.pilot, 0)=0 AND {latest}='known'"""):
+        # On its rotation: a fold alone may be a harmonic at the level chance gives (fold_relation).
+        for r in self.db.execute(f"""SELECT c.item, c.snr, k.pulsar FROM sp_known k JOIN candidates c ON c.key=k.key
+                WHERE COALESCE(c.pilot, 0)=0 AND COALESCE({latest}, '') NOT IN ('noise', 'rfi')
+                AND k.route LIKE '%rotation%'"""):
             parsed = parse_item(r['item'])
             if parsed:
-                known.setdefault(parsed[0], []).append((r['dm'], r['snr'], r['item']))
-        return beams, folds, singles, known
+                known.setdefault((parsed[0], r['pulsar']), []).append((r['snr'], r['item']))
+        person = "(SELECT reviewer FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)"
+        note = "(SELECT note FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)"
+        for r in self.db.execute(f"""SELECT c.item, c.snr, {note} AS note FROM candidates c WHERE c.kind='sp'
+                AND c.type IN ('candidate', 'dispersed') AND COALESCE(c.pilot, 0)=0 AND {latest}='known'
+                AND {person} != 'auto-triage'
+                AND NOT EXISTS (SELECT 1 FROM sp_known k WHERE k.key=c.key)"""):
+            parsed, named = parse_item(r['item']), PULSAR_NAME.findall(r['note'] or '')
+            if parsed and named:
+                known.setdefault((parsed[0], named[0]), []).append((r['snr'], r['item']))
+        return beams, folds, singles, known, dirs
 
     @staticmethod
     def fields(beams):
@@ -1135,24 +1188,149 @@ class Indexer:
         return out
 
     @staticmethod
-    def found(src, observations, evidence):
+    def fold_relation(fold, src):
+        """How a fold's period relates to a source's ('1/1', '1/2', '3', ...), or None when it shows nothing of it:
+        its own period (psrcat's tolerance, or FUNDAMENTAL_TOLERANCE from WIDE_MIN_STATISTIC), other relations
+        (psrcat.match) only from HARMONIC_MIN_STATISTIC."""
+        from euroflash import psrcat
+        dm = fold['dm'] or 0.0
+        if abs(dm - src['dm']) > max(3.0, 0.1 * src['dm']):
+            return None
+        period = psrcat.period_at(src) if src.get('f0') else src['period']
+        off = abs(fold['period'] / period - 1)
+        if off <= psrcat.PERIOD_TOLERANCE or (off <= FUNDAMENTAL_TOLERANCE
+                                               and (fold['statistic'] or 0) >= WIDE_MIN_STATISTIC):
+            return '1/1'
+        found = psrcat.match(fold['period'], dm, [src])
+        if found and (fold['statistic'] or 0) >= HARMONIC_MIN_STATISTIC:
+            return found[1]
+        return None
+
+    @staticmethod
+    def found(src, observations, evidence, excess=None, rival=None):
         """(single pulses [(snr, item)], best fold (statistic, item, relation), folds matched) of a source.
 
-        Single pulses are the classifier's redetections under the catalogue
-        name, and FETCH positives a reviewer called a known source at its DM;
-        periods any fold at its DM and period, a harmonic, a multiple or a
-        small fraction.
+        Single pulses are those shown to be its (campaign_evidence known), and,
+        in an observation where excess(observation, src) finds its DM holding
+        clearly more clusters than the DMs beside it (dm_excess), the
+        classifier's redetections under its name and the brightest cluster at
+        its DM. None for a pulsar faster than SP_MIN_PERIOD, nor when
+        rival(src) names a brighter pulsar that could have given them. Periods:
+        a fold that fold_relation relates to it.
         """
-        from euroflash import psrcat
-        _, folds, singles, known = evidence
+        _, folds, singles, known = evidence[:4]
+        names = {src['name'], src.get('bname')} - {None}
+        period = src['period'] if src.get('period') else 1 / src['f0']
         sp, matched = [], []
         for observation in observations:
-            sp += singles.get((observation, src['name']), [])
-            sp += [(snr, item) for dm, snr, item in known.get(observation, [])
-                   if abs(dm - src['dm']) <= max(1.0, 0.05 * src['dm'])]
-            matched += [(f['statistic'] or 0, f['item'], found[1]) for f in folds.get(observation, [])
-                        for found in [psrcat.match(f['period'], f['dm'] or 0.0, [src])] if found]
-        return sorted(sp, reverse=True), max(matched, default=(None, None, None)), len(matched)
+            if period >= SP_MIN_PERIOD:
+                for name in names:
+                    sp += known.get((observation, name), [])
+                best = excess(observation, src) if excess else None
+                if best:
+                    sp += singles.get((observation, src['name']), []) + [best]
+            matched += [(f['statistic'] or 0, f['item'], relation) for f in folds.get(observation, [])
+                        for relation in [Indexer.fold_relation(f, src)] if relation]
+        if sp and rival and rival(src):
+            sp = []
+        return sorted(set(sp), reverse=True), max(matched, default=(None, None, None)), len(matched)
+
+    @staticmethod
+    def rival(pulsars):
+        """rival(src) for found: the name of a catalogued pulsar within RIVAL_DEG and RIVAL_DM of the source
+        and brighter at 135 MHz (an unknown flux counts as none), other than an entry for the same pulsar."""
+        from euroflash import psrcat
+        def flux(p):
+            return psrcat.flux_at(p)[0] or 0.0
+
+        def rival(src):
+            mine = flux(src)
+            for q in psrcat.cone(pulsars, src['ra'], src['dec'], RIVAL_DEG):
+                if q['name'] == src['name'] or abs(q['dm'] - src['dm']) > RIVAL_DM or flux(q) <= mine:
+                    continue
+                if q.get('f0') and src.get('f0') and abs(src['f0'] / q['f0'] - 1) <= DUPLICATE_PERIOD:
+                    continue
+                return q['name']
+            return None
+        return rival
+
+    def dm_excess(self, dirs):
+        """excess(observation, src) for found: (S/N, item) of the brightest cluster at the source's DM (within
+        the classifier's 0.5) when the clusters of the observation's beams within SEARCHED_RADIUS_DEG of it, at
+        S/N DM_EXCESS_SNR or more, crowd that DM beyond the same windows DM_EXCESS_OFFSETS away; else None.
+        Counts are kept in sp_dm_excess until the observation gains beams; a beam whose clusters cannot be
+        read counts as none."""
+        from euroflash import psrcat
+        cached = {(r['observation'], r['pulsar']): (r['beams'], r['on_count'], r['off_mean'], r['best_snr'],
+                                                    r['best_item'])
+                  for r in self.db.execute('SELECT * FROM sp_dm_excess')}
+
+        def excess(observation, src):
+            near = [d for d, ra, dec in dirs.get(observation, [])
+                    if psrcat.separation(ra, dec, src['ra'], src['dec']) <= SEARCHED_RADIUS_DEG]
+            counted = cached.get((observation, src['name']))
+            if counted is None or counted[0] != len(near):
+                dm = src['dm']
+                offsets = [k for k in DM_EXCESS_OFFSETS if dm + k >= 1.5]
+                on, off, best = 0, [0] * len(offsets), (None, None)
+                for directory in near:
+                    try:
+                        lines = (Path(directory)/'clustered_candidates.txt').read_text().splitlines()[1:]
+                    except OSError:
+                        continue
+                    for line in lines:
+                        fields = line.split('\t')
+                        try:
+                            cdm, snr = float(fields[0]), float(fields[1])
+                        except (IndexError, ValueError):
+                            continue
+                        if snr < DM_EXCESS_SNR:
+                            continue
+                        if abs(cdm - dm) <= 0.5:
+                            on += 1
+                            if best[0] is None or snr > best[0]:
+                                best = (snr, Path(directory).parent.name)
+                        for i, k in enumerate(offsets):
+                            off[i] += abs(cdm - dm - k) <= 0.5
+                counted = (len(near), on, sum(off) / len(off) if off else 0.0, *best)
+                cached[(observation, src['name'])] = counted
+                with self.db:
+                    self.db.execute('INSERT OR REPLACE INTO sp_dm_excess VALUES (?,?,?,?,?,?,?)',
+                                    (observation, src['name'], *counted))
+            _, on, off, snr, item = counted
+            if on >= DM_EXCESS_MIN and on >= DM_EXCESS_RATIO * off + DM_EXCESS_MIN:
+                return snr, item
+            return None
+        return excess
+
+    @staticmethod
+    def same_pulsar(p, pulsars):
+        """Other catalogue entries for the pulsar p is: period, DM and position within DUPLICATE_*."""
+        from euroflash import psrcat
+        if not p.get('f0'):
+            return []
+        return [q for q in psrcat.cone(pulsars, p['ra'], p['dec'], DUPLICATE_DEG)
+                if q['name'] != p['name'] and q.get('f0') and abs(p['f0'] / q['f0'] - 1) <= DUPLICATE_PERIOD
+                and abs(p['dm'] - q['dm']) <= max(DUPLICATE_DM[0], DUPLICATE_DM[1] * p['dm'])]
+
+    @staticmethod
+    def duplicate_seen(p, pulsars, seen):
+        """(name, evidence) of another catalogue entry for the same pulsar that LOFAR has published, or None."""
+        for q in Indexer.same_pulsar(p, pulsars):
+            if seen.get(q['name'], {}).get('seen'):
+                return q['name'], seen[q['name']]
+        return None
+
+    def found_as_any(self, src, observations, evidence, excess, rival, pulsars):
+        """found for the source and for every other catalogue entry of the same pulsar: LOTAAS's J2352+65
+        (P 1.164) folds as J2351+6500 (1.1648832)."""
+        sp, top, matched = self.found(src, observations, evidence, excess, rival)
+        for twin in self.same_pulsar(src, pulsars):
+            more, best, n = self.found(twin, observations, evidence, excess, rival)
+            sp, matched = sorted(set(sp) | set(more), reverse=True), matched + n
+            if best[0] is not None and (top[0] is None or best[0] > top[0]):
+                top = best
+        return sp, top, matched
 
     def derive_pulsars(self):
         """Every catalogued pulsar within SEARCHED_RADIUS_DEG of a searched beam: what LOFAR has
@@ -1173,19 +1351,25 @@ class Indexer:
         attributes = lotaas.attributes(lotaas.catalogue_text())
         evidence = self.campaign_evidence()
         beams = evidence[0]
+        excess, rival = self.dm_excess(evidence[4]), self.rival(pulsars)
         reached = self.reach(pulsars, beams, self.fields(beams))
         rows = []
         for p in pulsars:
             best, observations, near = reached.get(p['name'], (None, set(), 0))
             if best is None or best[0] > SEARCHED_RADIUS_DEG:
                 continue
-            sp, top, matched = self.found(p, observations, evidence)
+            sp, top, matched = self.found_as_any(p, observations, evidence, excess, rival, pulsars)
             flux, flux_source = psrcat.flux_at(p)
             a, e = attributes.get(p['name'], {}), seen.get(p['name'], {})
+            published = '; '.join(e.get('seen', []))
+            if not published:
+                twin = self.duplicate_seen(p, pulsars, seen)
+                if twin:
+                    published = f"as {twin[0]}: " + '; '.join(twin[1]['seen'])
             limits = '; '.join(f'{r}: < {m:g} mJy' if m else r for r, m in e.get('limits', []))
             rows.append((p['name'], p.get('bname'), p['dm'], 1 / p['f0'], flux, flux_source,
                          (a.get('surveys') or [None])[0], int('RRAT' in a.get('type', '').upper()),
-                         '; '.join(e.get('seen', [])) or None, limits or None, lofar.scattering_ms(p['dm']),
+                         published or None, limits or None, lofar.scattering_ms(p['dm']),
                          best[2], best[1], best[0], near, len(sp), sp[0][0] if sp else None,
                          sp[0][1] if sp else None, matched, top[0], top[1], top[2]))
         with self.db:
@@ -1205,11 +1389,13 @@ class Indexer:
         sources = lotaas.sources()
         evidence = self.campaign_evidence()
         beams = evidence[0]
+        pulsars = psrcat.load()
+        excess, rival = self.dm_excess(evidence[4]), self.rival(pulsars)
         reached = self.reach(sources, beams, self.fields(beams))
         rows = []
         for src in sources:
             best, observations, near = reached.get(src['name'], (None, set(), 0))
-            sp, top, matched = self.found(src, observations, evidence)
+            sp, top, matched = self.found_as_any(src, observations, evidence, excess, rival, pulsars)
             flux, flux_source = psrcat.flux_at(src)
             searched = best is not None and best[0] <= SEARCHED_RADIUS_DEG
             rows.append((src['name'], src.get('bname'), src['dm'], src['period'], flux, flux_source,
