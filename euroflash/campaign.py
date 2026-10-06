@@ -813,7 +813,7 @@ class Campaign:
             command += ['--remote-root', self.o.remote_root]
         if getattr(self.o, 'cpu_nodes', None):
             command += ['--cpu-nodes', *self.o.cpu_nodes, '--cpu-tier-workers', str(getattr(self.o, 'cpu_tier_workers', 64)),
-                        '--cpu-lock-dir', str(self.root/'.cpu-slots')]
+                        '--cpu-slots', str(getattr(self.o, 'cpu_slots', 1)), '--cpu-lock-dir', str(self.root/'.cpu-slots')]
         if self.o.control_dir:
             command += ['--control-dir', str(self.o.control_dir)]
         for timeout in getattr(self.o, 'stage_timeout', []):
@@ -1200,6 +1200,9 @@ def parser():
                      help='Runs per GPU node at once: one in its GPU stages, the others finishing on CPU nodes')
     run.add_argument('--cpu-nodes', nargs='+', help='Classify and search for periodicity on these CPU nodes')
     run.add_argument('--cpu-tier-workers', type=int, default=64, help='Concurrent beams on a CPU node')
+    # One batch per CPU node held 7 batches in their CPU tier at once; each holds its slot for its whole GPU
+    # stage, so six GPU nodes (efc-gpu-00/01, efc-bfc-00..03, 6 October 2026) need more of 7 192-core nodes.
+    run.add_argument('--cpu-slots', type=int, default=1, help='Batches one CPU node may take at once')
     run.add_argument('--remote-root', help='Run directory on the compute nodes (euroflash.cluster default if unset)')
     run.add_argument('--gpus', default='0,1')
     run.add_argument('--workers-per-gpu', type=int, default=3)
