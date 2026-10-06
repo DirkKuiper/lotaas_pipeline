@@ -120,7 +120,7 @@ HARMONIC_MIN_STATISTIC = 200.0
 WIDE_MIN_STATISTIC = 50.0
 # The classifier calls any cluster within 0.5 of a catalogued pulsar's DM and 1
 # degree of it a redetection. They count only where the pulsar's DM holds
-# clearly more clusters (dm_excess) than windows DM_EXCESS_OFFSETS away: of 67
+# clearly more clusters (cluster_tests) than windows DM_EXCESS_OFFSETS away: of 67
 # such claims, 18 had as many at the other DMs. ON/OFF: at least DM_EXCESS_MIN,
 # and DM_EXCESS_RATIO times the mean of the others plus DM_EXCESS_MIN.
 DM_EXCESS_OFFSETS = (-8, -6, -4, -3, -2, 2, 3, 4, 6, 8)
@@ -135,6 +135,15 @@ SP_MIN_PERIOD = 0.016
 # J1929+16, B2016+28's J2011+3006_P.
 RIVAL_DEG = 10.0
 RIVAL_DM = 1.0
+# Unless its own pulses keep its rotation (cluster_tests rotation): Rayleigh Z of the
+# observation's clusters within ROTATION_DM of its DM at its period, against the same
+# scan at unrelated periods. B2016+28 itself scores 14,404 against controls up to 38.
+# Z is -ln p for one trial: the scan's n trials must leave p below ROTATION_P, and Z beat
+# the best control by the log of the controls' trials.
+ROTATION_DM = 0.75
+ROTATION_P = 1e-3
+ROTATION_CONTROLS = (1.0371, 1.0713, 0.9417, 0.9613, 1.137, 0.883, 1.211, 0.811)
+ROTATION_SPAN_SECONDS = 3600.0
 # Catalogue entries for one pulsar (J1647+6609 and J1647+6608, J1930+6205 and
 # J1929+62): period, DM and position this close share what LOFAR has published.
 DUPLICATE_PERIOD = 1e-3
@@ -1114,13 +1123,16 @@ class Indexer:
         Pulses the triage called known for a pulsar near them at their DM, and
         nothing more, are not among them: B2217+47's 597 pulses had made
         J2236+4929, 1.4 degrees from its own field, 'found'. dirs: {observation:
-        [(dir, ra, dec)]} of the searched beams, for dm_excess.
+        [(dir, ra, dec)]} of the searched beams and epochs: {observation: MJD},
+        for cluster_tests.
         """
-        beams, dirs = {}, {}
-        for r in self.db.execute("""SELECT item, observation, ra_deg, dec_deg, dir FROM beams WHERE ra_deg IS NOT NULL
-                AND COALESCE(pilot, 0)=0"""):
+        beams, dirs, epochs = {}, {}, {}
+        for r in self.db.execute("""SELECT item, observation, ra_deg, dec_deg, dir, tstart_mjd FROM beams
+                WHERE ra_deg IS NOT NULL AND COALESCE(pilot, 0)=0"""):
             beams.setdefault(r['observation'], {})[r['item']] = (r['ra_deg'], r['dec_deg'])
             dirs.setdefault(r['observation'], []).append((r['dir'], r['ra_deg'], r['dec_deg']))
+            if r['tstart_mjd']:
+                epochs.setdefault(r['observation'], r['tstart_mjd'])
         folds = {}
         for r in self.db.execute("""SELECT item, dm, period, statistic FROM periodic
                 WHERE period > 0 AND COALESCE(pilot, 0)=0"""):
@@ -1154,7 +1166,7 @@ class Indexer:
             parsed, named = parse_item(r['item']), PULSAR_NAME.findall(r['note'] or '')
             if parsed and named:
                 known.setdefault((parsed[0], named[0]), []).append((r['snr'], r['item']))
-        return beams, folds, singles, known, dirs
+        return beams, folds, singles, known, dirs, epochs
 
     @staticmethod
     def fields(beams):
@@ -1207,32 +1219,37 @@ class Indexer:
         return None
 
     @staticmethod
-    def found(src, observations, evidence, excess=None, rival=None):
+    def found(src, observations, evidence, excess=None, rival=None, rotation=None):
         """(single pulses [(snr, item)], best fold (statistic, item, relation), folds matched) of a source.
 
         Single pulses are those shown to be its (campaign_evidence known), and,
         in an observation where excess(observation, src) finds its DM holding
-        clearly more clusters than the DMs beside it (dm_excess), the
+        clearly more clusters than the DMs beside it (cluster_tests), the
         classifier's redetections under its name and the brightest cluster at
-        its DM. None for a pulsar faster than SP_MIN_PERIOD, nor when
-        rival(src) names a brighter pulsar that could have given them. Periods:
-        a fold that fold_relation relates to it.
+        its DM. None for a pulsar faster than SP_MIN_PERIOD; where rival(src)
+        names a brighter pulsar that could have given them, only those of an
+        observation whose pulses keep the source's own rotation
+        (rotation(observation, src)). Periods: a fold that fold_relation
+        relates to it.
         """
         _, folds, singles, known = evidence[:4]
         names = {src['name'], src.get('bname')} - {None}
         period = src['period'] if src.get('period') else 1 / src['f0']
-        sp, matched = [], []
+        sp, matched, rivalled = [], [], None
         for observation in observations:
             if period >= SP_MIN_PERIOD:
-                for name in names:
-                    sp += known.get((observation, name), [])
+                here = [pulse for name in names for pulse in known.get((observation, name), [])]
                 best = excess(observation, src) if excess else None
                 if best:
-                    sp += singles.get((observation, src['name']), []) + [best]
+                    here += singles.get((observation, src['name']), []) + [best]
+                if here and rival:
+                    if rivalled is None:
+                        rivalled = bool(rival(src))
+                    if rivalled and not (rotation and rotation(observation, src)):
+                        here = []
+                sp += here
             matched += [(f['statistic'] or 0, f['item'], relation) for f in folds.get(observation, [])
                         for relation in [Indexer.fold_relation(f, src)] if relation]
-        if sp and rival and rival(src):
-            sp = []
         return sorted(set(sp), reverse=True), max(matched, default=(None, None, None)), len(matched)
 
     @staticmethod
@@ -1254,54 +1271,106 @@ class Indexer:
             return None
         return rival
 
-    def dm_excess(self, dirs):
-        """excess(observation, src) for found: (S/N, item) of the brightest cluster at the source's DM (within
-        the classifier's 0.5) when the clusters of the observation's beams within SEARCHED_RADIUS_DEG of it, at
-        S/N DM_EXCESS_SNR or more, crowd that DM beyond the same windows DM_EXCESS_OFFSETS away; else None.
-        Counts are kept in sp_dm_excess until the observation gains beams; a beam whose clusters cannot be
-        read counts as none."""
+    def cluster_tests(self, dirs, epochs):
+        """(excess, rotation) for found, from the clusters (clustered_candidates.txt) of the observation's
+        beams at S/N DM_EXCESS_SNR or more; a beam whose clusters cannot be read counts as none.
+
+        excess(observation, src): (S/N, item) of the brightest cluster at the source's DM (within the
+        classifier's 0.5) when, in the beams within SEARCHED_RADIUS_DEG of it, that DM holds clearly more
+        clusters than the same windows DM_EXCESS_OFFSETS away; else None.
+
+        rotation(observation, src): whether the clusters within ROTATION_DM of its DM in every beam of the
+        observation (its pulses reach far through the sidelobes) keep its period: the Rayleigh Z, best of n
+        trials over KNOWN_PERIOD_RANGE around the period at the epoch, with n e^-Z at most ROTATION_P and Z
+        above the best of the same scan at each of ROTATION_CONTROLS times the period by the log of their
+        trials. B2016+28's 14,460 pulses at DM 14.2 gave J2011+3006_P (DM 14.0) Z 6.0 against controls up
+        to 7.9; J1847-0308_P's 25 pulses at DM 150 Z 10.9 (n 3) against 6.7. Measured only when asked, and
+        kept with the counts in sp_dm_excess until the observation gains beams.
+        """
         from euroflash import psrcat
-        cached = {(r['observation'], r['pulsar']): (r['beams'], r['on_count'], r['off_mean'], r['best_snr'],
-                                                    r['best_item'])
-                  for r in self.db.execute('SELECT * FROM sp_dm_excess')}
+        cached = {(r['observation'], r['pulsar']): dict(r) for r in self.db.execute('SELECT * FROM sp_dm_excess')}
+        files = {}
+
+        def clusters(directory):
+            if directory not in files:
+                rows = []
+                try:
+                    lines = (Path(directory)/'clustered_candidates.txt').read_text().splitlines()[1:]
+                except OSError:
+                    lines = []
+                for line in lines:
+                    fields = line.split('\t')
+                    try:
+                        dm, snr, at = float(fields[0]), float(fields[1]), float(fields[2])
+                    except (IndexError, ValueError):
+                        continue
+                    if snr >= DM_EXCESS_SNR:
+                        rows.append((dm, snr, at))
+                files[directory] = rows
+            return files[directory]
+
+        def save(row):
+            cached[(row['observation'], row['pulsar'])] = row
+            with self.db:
+                self.db.execute('INSERT OR REPLACE INTO sp_dm_excess VALUES (?,?,?,?,?,?,?,?,?)',
+                                tuple(row[k] for k in ('observation', 'pulsar', 'beams', 'on_count', 'off_mean',
+                                                       'best_snr', 'best_item', 'z_on', 'z_control')))
+
+        def measured(observation, src):
+            beams = dirs.get(observation, [])
+            row = cached.get((observation, src['name']))
+            if row is not None and row['beams'] == len(beams):
+                return row
+            dm = src['dm']
+            offsets = [k for k in DM_EXCESS_OFFSETS if dm + k >= 1.5]
+            on, off, best = 0, [0] * len(offsets), (None, None)
+            for directory, ra, dec in beams:
+                if psrcat.separation(ra, dec, src['ra'], src['dec']) > SEARCHED_RADIUS_DEG:
+                    continue
+                for cdm, snr, _ in clusters(directory):
+                    if abs(cdm - dm) <= 0.5:
+                        on += 1
+                        if best[0] is None or snr > best[0]:
+                            best = (snr, Path(directory).parent.name)
+                    for i, k in enumerate(offsets):
+                        off[i] += abs(cdm - dm - k) <= 0.5
+            row = {'observation': observation, 'pulsar': src['name'], 'beams': len(beams), 'on_count': on,
+                   'off_mean': sum(off) / len(off) if off else 0.0, 'best_snr': best[0], 'best_item': best[1],
+                   'z_on': None, 'z_control': None}
+            save(row)
+            return row
 
         def excess(observation, src):
-            near = [d for d, ra, dec in dirs.get(observation, [])
-                    if psrcat.separation(ra, dec, src['ra'], src['dec']) <= SEARCHED_RADIUS_DEG]
-            counted = cached.get((observation, src['name']))
-            if counted is None or counted[0] != len(near):
-                dm = src['dm']
-                offsets = [k for k in DM_EXCESS_OFFSETS if dm + k >= 1.5]
-                on, off, best = 0, [0] * len(offsets), (None, None)
-                for directory in near:
-                    try:
-                        lines = (Path(directory)/'clustered_candidates.txt').read_text().splitlines()[1:]
-                    except OSError:
-                        continue
-                    for line in lines:
-                        fields = line.split('\t')
-                        try:
-                            cdm, snr = float(fields[0]), float(fields[1])
-                        except (IndexError, ValueError):
-                            continue
-                        if snr < DM_EXCESS_SNR:
-                            continue
-                        if abs(cdm - dm) <= 0.5:
-                            on += 1
-                            if best[0] is None or snr > best[0]:
-                                best = (snr, Path(directory).parent.name)
-                        for i, k in enumerate(offsets):
-                            off[i] += abs(cdm - dm - k) <= 0.5
-                counted = (len(near), on, sum(off) / len(off) if off else 0.0, *best)
-                cached[(observation, src['name'])] = counted
-                with self.db:
-                    self.db.execute('INSERT OR REPLACE INTO sp_dm_excess VALUES (?,?,?,?,?,?,?)',
-                                    (observation, src['name'], *counted))
-            _, on, off, snr, item = counted
+            row = measured(observation, src)
+            on, off = row['on_count'], row['off_mean']
             if on >= DM_EXCESS_MIN and on >= DM_EXCESS_RATIO * off + DM_EXCESS_MIN:
-                return snr, item
+                return row['best_snr'], row['best_item']
             return None
-        return excess
+
+        def rotation(observation, src):
+            import numpy as np
+            row = measured(observation, src)
+            period = psrcat.period_at(src, epochs.get(observation)) if src.get('f0') else src['period']
+            if period < KNOWN_MIN_PERIOD:
+                return False
+            step = period / (4 * ROTATION_SPAN_SECONDS)
+            n = min(2001, 2 * int(math.ceil(KNOWN_PERIOD_RANGE / step)) + 1)
+            if row['z_on'] is None:
+                times = np.array([at for directory, _, _ in dirs.get(observation, [])
+                                  for cdm, _, at in clusters(directory) if abs(cdm - src['dm']) <= ROTATION_DM])
+                row = dict(row, z_on=0.0, z_control=0.0)
+                if len(times) >= 3:
+                    def best_z(centre):
+                        best = 0.0
+                        for trial in np.linspace(centre * (1 - KNOWN_PERIOD_RANGE), centre * (1 + KNOWN_PERIOD_RANGE), n):
+                            phase = 2 * np.pi * times / trial
+                            best = max(best, float(np.cos(phase).sum() ** 2 + np.sin(phase).sum() ** 2) / len(times))
+                        return best
+                    row.update(z_on=best_z(period), z_control=max(best_z(period * f) for f in ROTATION_CONTROLS))
+                save(row)
+            return (row['z_on'] >= math.log(n / ROTATION_P)
+                    and row['z_on'] >= row['z_control'] + math.log(n * len(ROTATION_CONTROLS)))
+        return excess, rotation
 
     @staticmethod
     def same_pulsar(p, pulsars):
@@ -1321,12 +1390,12 @@ class Indexer:
                 return q['name'], seen[q['name']]
         return None
 
-    def found_as_any(self, src, observations, evidence, excess, rival, pulsars):
+    def found_as_any(self, src, observations, evidence, tests, pulsars):
         """found for the source and for every other catalogue entry of the same pulsar: LOTAAS's J2352+65
-        (P 1.164) folds as J2351+6500 (1.1648832)."""
-        sp, top, matched = self.found(src, observations, evidence, excess, rival)
+        (P 1.164) folds as J2351+6500 (1.1648832). tests: (excess, rival, rotation) for found."""
+        sp, top, matched = self.found(src, observations, evidence, *tests)
         for twin in self.same_pulsar(src, pulsars):
-            more, best, n = self.found(twin, observations, evidence, excess, rival)
+            more, best, n = self.found(twin, observations, evidence, *tests)
             sp, matched = sorted(set(sp) | set(more), reverse=True), matched + n
             if best[0] is not None and (top[0] is None or best[0] > top[0]):
                 top = best
@@ -1351,14 +1420,15 @@ class Indexer:
         attributes = lotaas.attributes(lotaas.catalogue_text())
         evidence = self.campaign_evidence()
         beams = evidence[0]
-        excess, rival = self.dm_excess(evidence[4]), self.rival(pulsars)
+        excess, rotation = self.cluster_tests(evidence[4], evidence[5])
+        tests = (excess, self.rival(pulsars), rotation)
         reached = self.reach(pulsars, beams, self.fields(beams))
         rows = []
         for p in pulsars:
             best, observations, near = reached.get(p['name'], (None, set(), 0))
             if best is None or best[0] > SEARCHED_RADIUS_DEG:
                 continue
-            sp, top, matched = self.found_as_any(p, observations, evidence, excess, rival, pulsars)
+            sp, top, matched = self.found_as_any(p, observations, evidence, tests, pulsars)
             flux, flux_source = psrcat.flux_at(p)
             a, e = attributes.get(p['name'], {}), seen.get(p['name'], {})
             published = '; '.join(e.get('seen', []))
@@ -1390,12 +1460,13 @@ class Indexer:
         evidence = self.campaign_evidence()
         beams = evidence[0]
         pulsars = psrcat.load()
-        excess, rival = self.dm_excess(evidence[4]), self.rival(pulsars)
+        excess, rotation = self.cluster_tests(evidence[4], evidence[5])
+        tests = (excess, self.rival(pulsars), rotation)
         reached = self.reach(sources, beams, self.fields(beams))
         rows = []
         for src in sources:
             best, observations, near = reached.get(src['name'], (None, set(), 0))
-            sp, top, matched = self.found_as_any(src, observations, evidence, excess, rival, pulsars)
+            sp, top, matched = self.found_as_any(src, observations, evidence, tests, pulsars)
             flux, flux_source = psrcat.flux_at(src)
             searched = best is not None and best[0] <= SEARCHED_RADIUS_DEG
             rows.append((src['name'], src.get('bname'), src['dm'], src['period'], flux, flux_source,

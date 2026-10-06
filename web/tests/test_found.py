@@ -1,6 +1,8 @@
 """What counts as finding a catalogued source (indexer.found), after the audit of 6 October 2026."""
 import sqlite3
 
+import numpy as np
+
 from web import store
 from web.indexer import Indexer, FUNDAMENTAL_TOLERANCE, HARMONIC_MIN_STATISTIC, WIDE_MIN_STATISTIC
 
@@ -72,6 +74,26 @@ def test_single_pulses_say_nothing_beside_a_brighter_pulsar_at_the_same_dm():
     assert rival(weak) == 'J1921+2153' and rival(bright) is None
     assert Indexer.found(weak, {'L1'}, evidence(known=known), None, rival)[0] == []
     assert Indexer.found(weak, {'L1'}, evidence(known=known), None, Indexer.rival([weak, far]))[0] == [(16.0, 'item-a')]
+    # Unless they keep its own rotation.
+    assert Indexer.found(weak, {'L1'}, evidence(known=known), None, rival, lambda o, s: False)[0] == []
+    assert Indexer.found(weak, {'L1'}, evidence(known=known), None, rival, lambda o, s: True)[0] == [(16.0, 'item-a')]
+
+
+def test_rotation_tells_a_pulsars_own_pulses_from_a_brighter_ones(tmp_path):
+    rng = np.random.default_rng(3)
+    slow = {'name': 'J1847-0308_P', 'ra': 281.8, 'dec': -3.1, 'dm': 149.8, 'f0': 1 / 29.7693, 'period': 29.7693}
+    own, other = tmp_path/'own'/'fp', tmp_path/'other'/'fp'
+    # 25 pulses on its rotation (phase jitter 0.02), in a beam 4 degrees away: sidelobes count.
+    turns = rng.choice(120, 25, replace=False)
+    clusters(own, [(149.6, 8.0, 29.7693 * (k + 0.3 + rng.normal(0, 0.02))) for k in turns])
+    # 2,000 pulses of another pulsar at the same DM, at its own period.
+    clusters(other, [(149.9, 9.0, 0.5580 * k) for k in rng.choice(6000, 2000, replace=False)])
+    index = Index()
+    dirs = {'L1': [(str(own), 285.0, -1.0)], 'L2': [(str(other), 281.8, -3.1)]}
+    _, rotation = Indexer.cluster_tests(index, dirs, {'L1': 57000.0, 'L2': 57000.0})
+    assert rotation('L1', slow) and not rotation('L2', slow)
+    row = index.db.execute("SELECT z_on, z_control FROM sp_dm_excess WHERE observation='L1'").fetchone()
+    assert row['z_on'] > 15 and row['z_control'] < 5
 
 
 class Index:
@@ -82,10 +104,11 @@ class Index:
 
 
 def clusters(path, rows):
+    """rows: (dm, snr) or (dm, snr, time)."""
     path.mkdir(parents=True)
     (path/'clustered_candidates.txt').write_text(
         'DM\tS/N\tTime\tSample\tFilter_Width\tDM_scaled\tCluster\n'
-        + ''.join(f'{dm}\t{snr}\t1.0\t1\t1\t0\t{i}\n' for i, (dm, snr) in enumerate(rows)))
+        + ''.join(f'{r[0]}\t{r[1]}\t{r[2] if len(r) > 2 else 1.0}\t1\t1\t0\t{i}\n' for i, r in enumerate(rows)))
 
 
 def test_dm_excess_tells_a_pulsar_from_noise_at_its_dm(tmp_path):
@@ -98,15 +121,16 @@ def test_dm_excess_tells_a_pulsar_from_noise_at_its_dm(tmp_path):
     dirs = {'L1': [(str(a), 105.0, 64.3), (str(b), 105.5, 64.4), (str(far), 105.0, 67.3)],
             'L2': [(str(b), 105.5, 64.4)]}
     index = Index()
-    excess = Indexer.dm_excess(index, dirs)
+    excess, _ = Indexer.cluster_tests(index, dirs, {})
     assert excess('L1', pulsar) == (9.0, 'a') and excess('L2', pulsar) is None
-    assert index.db.execute('SELECT beams, on_count FROM sp_dm_excess WHERE observation=?', ('L1',)).fetchone()[:] == (2, 13)
+    # Every beam of the observation is counted for keeping; those within 1 degree for the counts.
+    assert index.db.execute('SELECT beams, on_count FROM sp_dm_excess WHERE observation=?', ('L1',)).fetchone()[:] == (3, 13)
     # Kept until the observation gains beams: then counted again.
     (a/'clustered_candidates.txt').unlink()
-    assert Indexer.dm_excess(index, dirs)('L1', pulsar) == (9.0, 'a')
+    assert Indexer.cluster_tests(index, dirs, {})[0]('L1', pulsar) == (9.0, 'a')
     clusters(c, [])
     dirs['L1'].append((str(c), 105.2, 64.3))
-    assert Indexer.dm_excess(index, dirs)('L1', pulsar) is None
+    assert Indexer.cluster_tests(index, dirs, {})[0]('L1', pulsar) is None
 
 
 def test_a_duplicate_catalogue_entry_shares_what_lofar_published():
@@ -124,5 +148,5 @@ def test_a_source_is_found_by_what_another_entry_for_it_folds_at():
     precise = {'name': 'J2351+6500', 'ra': 357.85, 'dec': 65.01, 'dm': 154.294, 'f0': 1 / 1.1648832}
     folds = evidence([fold(1.16485, 154.4, 15.5)])
     assert Indexer.found(rough, {'L1'}, folds)[2] == 0
-    sp, top, n = Indexer.found_as_any(Indexer, rough, {'L1'}, folds, None, None, [rough, precise])
+    sp, top, n = Indexer.found_as_any(Indexer, rough, {'L1'}, folds, (None, None, None), [rough, precise])
     assert n == 1 and top[2] == '1/1'

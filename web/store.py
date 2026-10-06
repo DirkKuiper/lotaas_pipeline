@@ -155,10 +155,10 @@ CREATE TABLE IF NOT EXISTS catalogue_pulsars (psrj TEXT PRIMARY KEY, bname TEXT,
     sp_count INTEGER, sp_best_snr REAL, sp_item TEXT, periodic_count INTEGER, periodic_best REAL,
     periodic_item TEXT, periodic_relation TEXT);
 DROP TABLE IF EXISTS known_pulsars;
--- Clusters at a catalogued pulsar's DM and beside it in the beams of an observation within 1 degree
--- (indexer.dm_excess), kept until the observation gains beams.
+-- Clusters at a catalogued pulsar's DM and beside it in the beams of an observation within 1 degree, and
+-- whether those at its DM keep its rotation (indexer.cluster_tests), kept until the observation gains beams.
 CREATE TABLE IF NOT EXISTS sp_dm_excess (observation TEXT, pulsar TEXT, beams INTEGER, on_count INTEGER,
-    off_mean REAL, best_snr REAL, best_item TEXT, PRIMARY KEY (observation, pulsar));
+    off_mean REAL, best_snr REAL, best_item TEXT, z_on REAL, z_control REAL, PRIMARY KEY (observation, pulsar));
 -- Every published LOTAAS source (web.lotaas), how LOTAAS found it, and what this campaign found of it.
 CREATE TABLE IF NOT EXISTS lotaas_sources (psrj TEXT PRIMARY KEY, bname TEXT, dm REAL, period REAL,
     flux_mjy REAL, flux_source TEXT, discovery INTEGER, reference TEXT, rrat INTEGER, lotaas_mode TEXT,
