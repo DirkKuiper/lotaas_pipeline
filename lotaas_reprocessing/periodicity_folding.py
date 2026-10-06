@@ -52,7 +52,7 @@ def catalogue_matches(metadata):
     beam=SkyCoord(info['RA (J2000)'],info['DEC (J2000)'],unit=(u.hourangle,u.deg))
     try:
         from lotaas_reprocessing.atnf import query_atnf
-        query=query_atnf(factory=QueryATNF,params=['PSRJ','RAJ','DECJ','DM','P0','F0','F1','PEPOCH'],
+        query=query_atnf(factory=QueryATNF,params=['PSRJ','RAJ','DECJ','DM','P0','F0','F1','PEPOCH','A1','PB'],
                         coord1=info['RA (J2000)'],coord2=info['DEC (J2000)'],radius=1.,checkupdate=False)
         rows=[]
         for _,row in query.pandas.iterrows():
@@ -64,8 +64,11 @@ def catalogue_matches(metadata):
             if epoch and np.isfinite(row.get('F1',np.nan)) and np.isfinite(row.get('PEPOCH',np.nan)):
                 f=float(row.F0)+float(row.F1)*(epoch-float(row.PEPOCH))*86400
                 if f>0: period=1/f
+            # A binary's orbit shifts the period it is seen at by up to 2 pi a sin i / (c Pb).
+            a1,pb=row.get('A1',np.nan),row.get('PB',np.nan)
+            doppler=float(2*np.pi*a1/(pb*86400)) if np.isfinite(a1) and np.isfinite(pb) and pb>0 else 0.
             rows.append({'name':str(row.PSRJ),'dm':float(row.DM),'period_seconds':period,
-                         'separation_deg':float(beam.separation(position).deg)})
+                         'separation_deg':float(beam.separation(position).deg),'binary_doppler':doppler})
         return rows,'available'
     except Exception as error:
         # No live catalogue is required to search, fold, retain or review data.

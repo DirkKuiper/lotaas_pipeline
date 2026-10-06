@@ -79,3 +79,12 @@ def test_fold_catalogue_reads_the_periodic_trials_and_writes_its_product(tmp_pat
     assert written['schema'] == catalogue_fold.SCHEMA and len(written['pulsars']) == 2
     assert records[0]['seen'] and records[0]['trial_dm'] == 27.0
     assert records[1]['status'].startswith('too fast')
+
+
+def test_a_binarys_orbit_widens_the_period_it_is_looked_for_at():
+    # B0655+64 (a 1-day orbit, 2 pi a sin i / c Pb = 2.9e-4) was seen 3.6e-4 below its catalogue period.
+    psr = {'name': 'J0700+6418', 'dm': 8.77, 'period_seconds': 0.1956709, 'separation_deg': 0.0}
+    series = pulsar_series(0.1956709, 0.3, offset=-3.6e-4, width=0.008)
+    assert not fold_pulsar(psr, *single(series, dm=8.8))['seen']
+    record = fold_pulsar(dict(psr, binary_doppler=2.9e-4), *single(series, dm=8.8))
+    assert record['seen'] and abs(record['period_offset'] + 3.6e-4) < 3e-5 and record['period_spread'] > 4e-4

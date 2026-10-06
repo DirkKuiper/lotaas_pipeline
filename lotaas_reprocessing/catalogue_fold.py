@@ -10,8 +10,11 @@ catalogue_matches: 1 degree, period at the observation's epoch).
 
 Each is folded on the periodic trials of the beam, before they are pruned:
 - the period is scanned over PERIOD_RANGE around the catalogue value (Earth's
-  orbit shifts the topocentric period by up to 1e-4, a binary's orbit more),
-  in steps that move the last turn by half a bin;
+  orbit shifts the topocentric period by up to 1e-4), widened by a binary's
+  largest orbital Doppler shift (binary_doppler, 2 pi a sin i / c Pb; at most
+  MAX_DOPPLER): B0655+64 was seen at -3.6e-4, outside 1.5e-4, though the blind
+  search found it at statistic 573 in the same beam. Steps move the last turn
+  by half a bin;
 - then the DM trials within DM_RANGE of the catalogue DM at the best period;
 - then the period again at the best DM.
 The series is first high-passed (a running mean of max(HIGHPASS_SECONDS,
@@ -32,6 +35,7 @@ from pathlib import Path
 import numpy as np
 
 PERIOD_RANGE = 1.5e-4
+MAX_DOPPLER = 2e-3
 DM_RANGE = (1.0, 0.01)
 MIN_BINS = 4
 MAX_BINS = 64
@@ -97,12 +101,12 @@ class Folder:
         sums = np.bincount(phase, weights=self.values, minlength=bins)
         return (sums - sums.sum() / counts.sum() * counts) / np.sqrt(np.maximum(counts, 1) * self.variance)
 
-    def scan(self, centre, bins):
-        """(best chi2, its frequency, trials) over PERIOD_RANGE around a frequency."""
+    def scan(self, centre, bins, spread=PERIOD_RANGE):
+        """(best chi2, its frequency, trials) over a fractional spread around a frequency."""
         step = 1.0 / (2 * bins * self.duration)
-        n = min(MAX_PERIOD_TRIALS, 2 * int(math.ceil(PERIOD_RANGE * centre / step)) + 1)
+        n = min(MAX_PERIOD_TRIALS, 2 * int(math.ceil(spread * centre / step)) + 1)
         best = (-1.0, centre)
-        for frequency in np.linspace(centre * (1 - PERIOD_RANGE), centre * (1 + PERIOD_RANGE), n):
+        for frequency in np.linspace(centre * (1 - spread), centre * (1 + spread), n):
             value = self.chi2(frequency, bins)
             if value > best[0]:
                 best = (value, float(frequency))
@@ -131,7 +135,8 @@ def fold_pulsar(pulsar, trials, load, dt_of):
         return folders[name]
 
     centre = 1.0 / period
-    best, frequency, period_trials = folder(first).scan(centre, bins)
+    spread = PERIOD_RANGE + min(MAX_DOPPLER, float(pulsar.get('binary_doppler') or 0.0))
+    best, frequency, period_trials = folder(first).scan(centre, bins, spread)
     best_name, best_dm = first, first_dm
     dm_trials = 0
     for _, t_dm, name in near[1:]:
@@ -142,18 +147,18 @@ def fold_pulsar(pulsar, trials, load, dt_of):
         if value > best:
             best, best_name, best_dm = value, name, t_dm
     if best_name != first:
-        best, frequency, more = folder(best_name).scan(centre, bins)
+        best, frequency, more = folder(best_name).scan(centre, bins, spread)
         period_trials += more
     trials_total = period_trials * (dm_trials + 1)
     log10p = log10_chi2_sf(best, bins - 1)
     controls = []
     for factor in CONTROL_FACTORS:
-        value, _, _ = folder(first).scan(centre / factor, bins)
+        value, _, _ = folder(first).scan(centre / factor, bins, spread)
         controls.append(log10_chi2_sf(value, bins - 1))
     corrected = min(0.0, log10p + math.log10(trials_total))
     seen = corrected <= math.log10(DETECTED_P) and log10p < min(controls)
     profile = folder(best_name).profile(frequency, bins)
-    return dict(record, status='folded', trial=best_name, trial_dm=best_dm, bins=bins,
+    return dict(record, status='folded', trial=best_name, trial_dm=best_dm, bins=bins, period_spread=spread,
                 period_found=1.0 / frequency, period_offset=1.0 / (frequency * period) - 1.0,
                 chi2=best, log10p=log10p, trials=trials_total, log10p_corrected=corrected,
                 control_log10p=controls, seen=bool(seen), profile=[round(float(v), 3) for v in profile])
