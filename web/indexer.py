@@ -142,6 +142,10 @@ RIVAL_DM = 1.0
 # the best control by the log of the controls' trials.
 ROTATION_DM = 0.75
 ROTATION_P = 1e-3
+# One pulse seen in several beams, or split into several clusters, is one turn: clusters
+# closer than min(ROTATION_CLUMP_SECONDS, P/4) count once. J1847-0308_P's 25 clusters were
+# 10 such moments, several of them in beams 2-6 degrees apart at once.
+ROTATION_CLUMP_SECONDS = 2.0
 ROTATION_CONTROLS = (1.0371, 1.0713, 0.9417, 0.9613, 1.137, 0.883, 1.211, 0.811)
 ROTATION_SPAN_SECONDS = 3600.0
 # Catalogue entries for one pulsar (J1647+6609 and J1647+6608, J1930+6205 and
@@ -1280,12 +1284,13 @@ class Indexer:
         clusters than the same windows DM_EXCESS_OFFSETS away; else None.
 
         rotation(observation, src): whether the clusters within ROTATION_DM of its DM in every beam of the
-        observation (its pulses reach far through the sidelobes) keep its period: the Rayleigh Z, best of n
+        observation (its pulses reach far through the sidelobes), one per moment (ROTATION_CLUMP_SECONDS),
+        keep its period: the Rayleigh Z, best of n
         trials over KNOWN_PERIOD_RANGE around the period at the epoch, with n e^-Z at most ROTATION_P and Z
         above the best of the same scan at each of ROTATION_CONTROLS times the period by the log of their
         trials. B2016+28's 14,460 pulses at DM 14.2 gave J2011+3006_P (DM 14.0) Z 6.0 against controls up
-        to 7.9; J1847-0308_P's 25 pulses at DM 150 Z 10.9 (n 3) against 6.7. Measured only when asked, and
-        kept with the counts in sp_dm_excess until the observation gains beams.
+        to 7.9. Measured only when asked, and kept with the counts in sp_dm_excess until the observation
+        gains beams.
         """
         from euroflash import psrcat
         cached = {(r['observation'], r['pulsar']): dict(r) for r in self.db.execute('SELECT * FROM sp_dm_excess')}
@@ -1356,8 +1361,14 @@ class Indexer:
             step = period / (4 * ROTATION_SPAN_SECONDS)
             n = min(2001, 2 * int(math.ceil(KNOWN_PERIOD_RANGE / step)) + 1)
             if row['z_on'] is None:
-                times = np.array([at for directory, _, _ in dirs.get(observation, [])
-                                  for cdm, _, at in clusters(directory) if abs(cdm - src['dm']) <= ROTATION_DM])
+                every = sorted(at for directory, _, _ in dirs.get(observation, [])
+                               for cdm, _, at in clusters(directory) if abs(cdm - src['dm']) <= ROTATION_DM)
+                apart = min(ROTATION_CLUMP_SECONDS, period / 4)
+                kept = []
+                for at in every:
+                    if not kept or at - kept[-1] > apart:
+                        kept.append(at)
+                times = np.array(kept)
                 row = dict(row, z_on=0.0, z_control=0.0)
                 if len(times) >= 3:
                     def best_z(centre):
