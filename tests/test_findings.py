@@ -80,6 +80,29 @@ def test_the_catalogue_is_read_without_numpy_and_matches_harmonics_at_their_dm()
     assert psrcat.match(p0 * 1.1, 26.2, near) is None
 
 
+def test_interference_lines_are_worked_out_again_only_for_an_observation_whose_peaks_changed(tmp_path):
+    results = tmp_path/'results'
+    run = 'campaign-20261007-010000-gpu00'
+    line = 0.29575
+    for obs in ('L603686', 'L603690'):
+        for number, dm in zip(range(13, 20), (8.1, 0.0, 0.7, 1.3, 3.0, 7.1, 0.3)):
+            beam(results, run, obs, 0, number, vetoed=[(line + 0.2 * RES, dm)])
+    index = findings.Index(tmp_path)
+    index.backfill(results)
+    cache = {}
+    first = findings.Judge(index, lines_cache=cache)
+    assert first.peaks == findings.Judge(index).peaks and set(cache) == {'L603686', 'L603690'}
+    # A cached observation is not worked out again: a planted line comes back as it was.
+    signature = cache['L603690'][0]
+    cache['L603690'] = (signature, {('L603690', 1): (1.0, 'L603690', RES)})
+    assert (1.0, 'L603690', RES) in findings.Judge(index, lines_cache=cache).peaks
+    # Once its peaks change, it is.
+    beam(results, 'campaign-20261007-020000-gpu00', 'L603690', 0, 40, vetoed=[(0.5, 9.0)])
+    index.backfill(results)
+    again = findings.Judge(index, lines_cache=cache)
+    assert (1.0, 'L603690', RES) not in again.peaks and again.peaks == findings.Judge(index).peaks
+
+
 def test_a_fold_is_judged_against_its_whole_observation(tmp_path):
     results = tmp_path/'results'
     run = 'campaign-20260924-010000-gpu00'

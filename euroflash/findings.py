@@ -321,7 +321,11 @@ def reviewed_items(path, index, labels=('astro', 'unsure'), verdicts=None):
 class Judge:
     """Decides, fold by fold, what keeps a filterbank; built once per decision round."""
 
-    def __init__(self, index, pulsars=None, settled=frozenset()):
+    def __init__(self, index, pulsars=None, settled=frozenset(), lines_cache=None):
+        """lines_cache: {observation: (signature, lines)} kept by the caller between judges. An
+        observation's interference lines depend on its own peaks alone, so only an observation whose
+        peaks changed is worked out again: on 7 October 2026 the whole campaign (588,585 peaks of 393
+        observations) took 198 s, twice for every finished dispatch, while the driver did nothing else."""
         self.index = index
         self.settled = settled
         self.pulsars = psrcat.load() if pulsars is None else pulsars
@@ -340,13 +344,22 @@ class Judge:
         lines = {}
         for observation, peaks in by_observation.items():
             peaks.sort()
+            signature = (len(peaks), tuple(peaks))
+            cached = lines_cache.get(observation) if lines_cache is not None else None
+            if cached is not None and cached[0] == signature:
+                lines.update(cached[1])
+                continue
+            found = {}
             freqs = [p[0] for p in peaks]
             for f, _, _, resolution in peaks:
                 tolerance = FAMILY_BINS * resolution
                 near = peaks[bisect.bisect_left(freqs, f - tolerance):bisect.bisect_right(freqs, f + tolerance)]
                 if len({p[1] for p in near}) >= LINE_BEAMS and not dm_consistent([p[2] for p in near]):
                     centre = sorted(p[0] for p in near)[len(near) // 2]
-                    lines[(observation, round(centre / resolution))] = (centre, observation, resolution)
+                    found[(observation, round(centre / resolution))] = (centre, observation, resolution)
+            if lines_cache is not None:
+                lines_cache[observation] = (signature, found)
+            lines.update(found)
         self.peaks = sorted(lines.values())
         self.frequencies = [p[0] for p in self.peaks]
         self.pointings = {}

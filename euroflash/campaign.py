@@ -916,7 +916,9 @@ class Campaign:
         if getattr(self, 'periodic_index', None) is None:
             self.periodic_index = Index(self.root)
         self.periodic_index.backfill(self.root/'results')
-        return Judge(self.periodic_index, settled=settled)
+        if getattr(self, 'judge_lines', None) is None:
+            self.judge_lines = {}
+        return Judge(self.periodic_index, settled=settled, lines_cache=self.judge_lines)
 
     def findings(self, run_name, succeeded=()):
         """{beam stem: why} for the beams of one run worth keeping (euroflash.findings).
