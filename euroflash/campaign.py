@@ -1106,6 +1106,22 @@ class Campaign:
     def should_stop(self):
         return self.stopping or (self.root/'STOP').exists()
 
+    def stop_flatfields(self):
+        """Record flatfields still running rather than redo them next start. One not started yet is dropped:
+        its SAP stays 'flatfielding', which recover() puts back to staging. On 8 October 30 SAPs waited
+        for 2 workers, and stopping would have waited ~3 h for all of them."""
+        if not self.flatfield_jobs:
+            return
+        for key, job in list(self.flatfield_jobs.items()):
+            if job.cancel():
+                del self.flatfield_jobs[key]
+        wait(list(self.flatfield_jobs.values()))
+        self.prepare()
+        # prepare() may have started more; they run to the end, the rest wait for the next start.
+        for key, job in list(self.flatfield_jobs.items()):
+            if job.cancel():
+                del self.flatfield_jobs[key]
+
     def run(self):
         self.recover()
         while True:
@@ -1128,10 +1144,7 @@ class Campaign:
             self.collect_retrievals()
         for pool in self.retrieval_pools.values():
             pool.shutdown(wait=True)
-        if self.flatfield_jobs:
-            # Record flatfields still running rather than redo them next start.
-            wait(list(self.flatfield_jobs.values()))
-            self.prepare()
+        self.stop_flatfields()
         if not self.o.once:
             for process in list(self.dispatches.values()):
                 process.wait()

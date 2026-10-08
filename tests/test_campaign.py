@@ -1014,3 +1014,29 @@ def test_an_inventory_loaded_later_queues_behind_every_lta_sap_already_known(tmp
     options = C.parser().parse_args(['run', '--root', str(tmp_path / 'c'), '--inventory', 'a.txt', 'b.txt',
                                      '--ledger', str(tmp_path / 'ledger.sqlite')])
     assert [str(p) for p in options.inventory] == ['a.txt', 'b.txt']
+
+
+def test_stopping_waits_only_for_the_flatfields_already_running(tmp_path, monkeypatch):
+    import threading
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', s, FULL) for s in range(3)],
+                                 max_staging_saps=3, flatfield_workers=1)
+    campaign.flatfield_pool = C.ThreadPoolExecutor(max_workers=1)
+    started, gate = threading.Event(), threading.Event()
+    slow = campaign.runner.flatfield
+    campaign.runner.flatfield = lambda sap, **kw: (started.set(), gate.wait(5), slow(sap, **kw))[2]
+    campaign.tick()
+    for s in range(3):
+        put_online(api, where, '1000001', s, FULL)
+    campaign.tick()
+    assert started.wait(5)
+    states = lambda: {r['key']: r['state'] for r in campaign.state.rows('SELECT key,state FROM saps')}
+    assert set(states().values()) == {'flatfielding'}
+    gate.set()
+    campaign.stop_flatfields()
+    assert len(campaign.runner.flatfielded) == 1
+    assert sorted(states().values()) == ['flatfielding', 'flatfielding', 'prepared']
+    campaign.recover()
+    assert sorted(states().values()) == ['prepared', 'staging', 'staging']
+    campaign.tick()
+    settle(campaign)
+    assert set(states().values()) == {'prepared'}
