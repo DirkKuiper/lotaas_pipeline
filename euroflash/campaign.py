@@ -1150,10 +1150,9 @@ class Campaign:
         for pool in self.retrieval_pools.values():
             pool.shutdown(wait=True)
         self.stop_flatfields()
-        if not self.o.once:
-            for process in list(self.dispatches.values()):
-                process.wait()
-                self.finish_dispatch(process)
+        # Running dispatches go on without the driver and the next one adopts them (recover,
+        # running_dispatch). Waiting for them held a restart for most of an hour on 11 October 2026
+        # while the GPU nodes they had freed took no new batch.
         self.status()
         self.flatfield_pool.shutdown(wait=True)
 

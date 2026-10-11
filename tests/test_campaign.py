@@ -1053,3 +1053,24 @@ def test_stopping_waits_only_for_the_flatfields_already_running(tmp_path, monkey
     campaign.tick()
     settle(campaign)
     assert set(states().values()) == {'prepared'}
+
+
+def test_a_stopping_driver_leaves_running_dispatches_to_the_next(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name='campaign-running')
+
+    class Running:
+        run_name, node, returncode = 'campaign-running', 'efc-gpu-00', None
+        def poll(self):
+            return None
+        def wait(self):
+            raise AssertionError('a stopping driver must not wait for a dispatch')
+    campaign.dispatches['campaign-running'] = Running()
+    campaign.stopping = True
+    campaign.run()
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'dispatched', 'adopted by the next driver'
