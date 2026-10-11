@@ -276,6 +276,19 @@ def test_a_search_removes_prepared_beams_that_succeeded_and_keeps_failures(tmp_p
     assert after['state'] == 'attention' and after['detail'].startswith('1 beams')
 
 
+def test_an_empty_node_ledger_reads_as_nothing_searched_there(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    results = tmp_path/'campaign'/'results'
+    # The CPU node's runner never started: its collect sent back a ledger without tables.
+    for run_name in ('campaign-empty', 'campaign-mixed'):
+        (results/run_name/'efc-cpu-00').mkdir(parents=True)
+        sqlite3.connect(results/run_name/'efc-cpu-00'/'ledger-snapshot.sqlite').execute('PRAGMA user_version=1')
+    snapshot(results/'campaign-mixed'/'efc-gpu-01'/'ledger-snapshot.sqlite', {'a': 'success', 'b': 'failed'})
+    assert campaign.searched_items('campaign-empty') == (set(), False)
+    assert campaign.searched_items('campaign-mixed') == ({'a'}, True)
+    assert [e['kind'] for e in campaign.state.rows('SELECT kind FROM events')].count('snapshot_unreadable') == 2
+
+
 def test_a_dispatch_starts_one_cluster_run_with_hard_linked_inputs(tmp_path, monkeypatch):
     campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
     campaign.tick()

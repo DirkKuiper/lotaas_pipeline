@@ -835,13 +835,18 @@ class Campaign:
     def searched_items(self, run_name):
         succeeded, seen = set(), False
         for snapshot in (self.root/'results'/run_name).glob('*/ledger-snapshot.sqlite'):
-            seen = True
             db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
             try:
                 latest = db.execute('''SELECT item,status FROM attempts WHERE id IN
                     (SELECT MAX(id) FROM attempts WHERE stage='classify' GROUP BY item)''').fetchall()
+            except sqlite3.DatabaseError as error:
+                # A node whose runner never started sends back an empty ledger (efc-cpu-00 on
+                # 9 October 2026). Read as nothing searched there, not as a driver crash at every start.
+                self.state.event('snapshot_unreadable', run_name, f'{snapshot.parent.name}: {error}')
+                continue
             finally:
                 db.close()
+            seen = True
             succeeded |= {item for item, status in latest if status == 'success'}
         return succeeded, seen
 
