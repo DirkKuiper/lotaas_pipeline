@@ -17,7 +17,9 @@ import os
 from pathlib import Path
 import tarfile
 
-DEFAULT = Path.home()/'.cache'/'psrqpy'/'psrcat_pkg.tar.gz'
+# The pinned catalogue the nodes use too (lotaas_reprocessing.atnf); psrqpy's cache otherwise.
+PINNED = Path(__file__).resolve().parents[1]/'lotaas_reprocessing'/'data'/'psrcat_pkg-2.8.1.tar.gz'
+DEFAULT = PINNED if PINNED.exists() else Path.home()/'.cache'/'psrqpy'/'psrcat_pkg.tar.gz'
 # Topocentric against catalogue period: Earth's orbit shifts it by up to 1e-4.
 PERIOD_TOLERANCE = 3e-4
 HARMONICS = 32          # P/n for n up to this

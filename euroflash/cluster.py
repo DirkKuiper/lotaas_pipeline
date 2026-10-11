@@ -41,6 +41,12 @@ REPO=Path(__file__).resolve().parents[1]
 DEFAULT_ALLOWED={'efc-gpu-00','efc-gpu-01'}
 # CPU nodes for classification and periodicity; LOTAAS_ALLOWED_CPU_NODES overrides.
 DEFAULT_CPU_ALLOWED={f'efc-cpu-{i:02d}' for i in range(8)}
+# CPU nodes a batch tries before it gives up on its CPU tier (only while no beam was relayed).
+CPU_TIER_ATTEMPTS=3
+# Seconds between looks at the GPU node's handoff when there is nothing to relay.
+RELAY_POLL=15
+# The ATNF catalogue every node uses (lotaas_reprocessing.atnf pins it into psrqpy's cache).
+PINNED_CATALOGUE=REPO/'lotaas_reprocessing'/'data'/'psrcat_pkg-2.8.1.tar.gz'
 
 
 def allowed_nodes(variable='LOTAAS_ALLOWED_NODES',default=DEFAULT_ALLOWED):
@@ -183,7 +189,42 @@ def fetch(node,directory,destination,control_dir=None,excludes=()):
 
 
 def snapshot(node,work,control_dir=None):
-    remote(node,['python3','-c','import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close();',work+'/ledger.sqlite',work+'/ledger-snapshot.sqlite'],control_dir)
+    # A runner that never started has no ledger, and connecting would create an empty one whose copy the
+    # campaign then read as this node's results (efc-cpu-00, 9 October 2026).
+    remote(node,['python3','-c','import os,sqlite3,sys; os.path.getsize(sys.argv[1]) or sys.exit("empty ledger"); s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close();',work+'/ledger.sqlite',work+'/ledger-snapshot.sqlite'],control_dir)
+
+
+def runner_kill(inputs):
+    """A shell command sending SIGTERM to the runner of the run whose inputs are here.
+
+    It matches the runner's arguments (euroflash.run ... --input <inputs>)
+    exactly, so neither the shell carrying it nor another run's runner is hit.
+    """
+    code=('import os,signal,sys\n'
+          'for p in os.listdir("/proc"):\n'
+          '  try:\n'
+          '    a=open("/proc/"+p+"/cmdline","rb").read().decode().split("\\0")\n'
+          '    if "euroflash.run" in a and a[a.index("--input")+1]==sys.argv[1] and int(p)!=os.getpid():\n'
+          '      os.kill(int(p),signal.SIGTERM)\n'
+          '  except Exception:\n'
+          '    pass\n')
+    return shlex.join(['python3','-c',code,inputs])
+
+
+def remove_stale_runs(node,remote_root,current,control_dir=None,hours=24):
+    """Remove run directories under remote_root that nothing touched for `hours`; returns their paths.
+
+    A reboot or a killed head process leaves its runs behind: efc-bfc-01 still
+    held 129 GB of 8 October runs when a batch filled its disk on 9 October.
+    No live run goes a day without writing to its ledger or adding a beam.
+    """
+    base=remote_root.rstrip('/')
+    script=(f'for d in {shlex.quote(base)}/campaign-* {shlex.quote(base)}/inject-*; do '
+            f'[ -d "$d" ] && [ "$d" != {shlex.quote(current)} ] '
+            f'&& [ -z "$(find "$d" -maxdepth 2 -mmin -{int(hours*60)} -print -quit)" ] '
+            f'&& echo "$d" && rm -rf --one-file-system "$d"; done; true')
+    result=subprocess.run(ssh_args(node,control_dir)+[script],capture_output=True,text=True,timeout=1800)
+    return result.stdout.split()
 
 
 class Frozen:
@@ -218,7 +259,7 @@ def freeze_source(repo,settings,image):
     computed another fingerprint and refused every beam of the batch
     (campaign-20260927-115112-gpu01, retried automatically).
     """
-    files=[f for f in repo.rglob('*') if f.is_file() and f.suffix in {'.py','.yaml','.lock'}
+    files=[f for f in repo.rglob('*') if f.is_file() and (f.suffix in {'.py','.yaml','.lock'} or f==PINNED_CATALOGUE)
            and not any(x in f.parts for x in ['.git','__pycache__','.pytest_cache'])]
     return ([(Frozen(f),str(f.relative_to(repo))) for f in files]
             +[(Frozen(image,hold=False),'containers/runtime.sif'),(Frozen(settings),'campaign-settings.yaml')])
@@ -383,16 +424,34 @@ def main():
         partial.replace(target)
         collect(target,a.ledger,node+'/'+a.run_name)
 
+    cpu_log_path=a.work/'cpu-tier.log'
+
+    def stop_runner(node):
+        subprocess.run(ssh_args(node,a.control_dir)+[runner_kill(inputs)],capture_output=True,timeout=120)
+
     def cleanup(node):
         if a.cleanup_remote:
             # Only after the results and ledger are safely on the head. A
             # continuous campaign otherwise leaves ~90 GB per SAP on the node.
+            # A runner still waiting in the directory goes first: removed under
+            # it, four polled for two days, each holding an SSH session on the
+            # node's control master until it refused new ones (efc-cpu-00,
+            # 9-11 October 2026).
+            stop_runner(node)
             remote(node,['rm','-rf','--one-file-system',root],a.control_dir)
+
+    def clear_stale(node,log):
+        try:
+            for path in remove_stale_runs(node,a.remote_root,root,a.control_dir):
+                with log.open('a') as stream:stream.write(f'Removed stale run directory {node}:{path}\n')
+        except Exception as error:
+            with log.open('a') as stream:stream.write(f'Stale run directories on {node} not checked: {error}\n')
 
     def worker_body(pair):
         index,node=pair
         assigned=beams[index::len(nodes)]
         if not assigned:return True
+        clear_stale(node,a.work/(node+'.log'))
         upload(node,source,repo,a.control_dir)
         upload_parallel(node,[(f,f.name) for f in assigned],inputs,a.control_dir,a.upload_streams)
         log=a.work/(node+'.log')
@@ -412,99 +471,128 @@ def main():
         cpu_log=a.work/'cpu-tier.log'
         def note(text):
             with cpu_log.open('a') as stream:stream.write(time.strftime('%H:%M:%S ')+text+'\n')
+        tried=[]
         try:
-            with CpuSlot(a.cpu_nodes,lock_dir,a.cpu_slots,a.control_dir,'/home',log=note) as cpu:
-              try:
-                  upload(cpu,source,repo,a.control_dir)
-                  remote(cpu,['mkdir','-p',inputs,work+'/handoff'],a.control_dir)
-                  cpu_state={}
-                  cpu_thread=threading.Thread(target=lambda:cpu_state.update(
-                      code=run_remote(cpu,runner_command('cpu',gpu_node=False),a.work/(cpu+'.log'))))
-                  cpu_thread.start()
-                  relayed,failed_relays,tries=set(),{},{}
-                  last_live=0.
-                  with futures.ThreadPoolExecutor(max_workers=max(1,a.relay_streams)) as pool:
-                      while True:
-                          if not cpu_thread.is_alive():
-                              raise RuntimeError(f'CPU runner on {cpu} exited {cpu_state.get("code")} before the batch was handed over')
-                          finished=not gpu_thread.is_alive()
-                          if time.monotonic()-last_live>=60:
-                              try:
-                                  collect_live(cpu)
-                              except Exception as error:
-                                  note(f'Live ledger update deferred for {cpu}: {error}')
-                              last_live=time.monotonic()
-                          ready={name[:-6] for name in listing(node,work+'/handoff',a.control_dir) if name.endswith('.ready')}
-                          there=listing(cpu,work+'/handoff',a.control_dir)
-                          backlog=len({n[:-6] for n in there if n.endswith('.ready')}-{n[:-9] for n in there if n.endswith('.searched')})
-                          todo=sorted(ready-relayed-set(failed_relays))[:max(0,a.relay_backlog-backlog)]
-                          def move(item):
-                              marker=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/{item}.ready'],
-                                                               capture_output=True,text=True,check=True).stdout)
-                              members=[str(PurePosixPath(marker['input']).relative_to(root)),'work/'+marker['output']]
-                              relay(node,cpu,root,members,a.control_dir,['--exclude=DM_trials'])
-                              put_text(cpu,f'{work}/handoff/{item}.ready',json.dumps(marker),a.control_dir)
-                              remote(node,['rm','-rf',marker['input'],work+'/'+marker['output'],
-                                           f'{work}/handoff/{item}.ready'],a.control_dir)
-                              return item
-                          for future,item in [(pool.submit(move,item),item) for item in todo]:
-                              try:
-                                  relayed.add(future.result())
-                              except Exception as error:
-                                  # A dropped connection should not lose a beam; three strikes do.
-                                  tries[item]=tries.get(item,0)+1
-                                  note(f'relay of {item} failed (attempt {tries[item]}): {error}')
-                                  if tries[item]>=3:
-                                      failed_relays[item]=str(error)
-                          if finished and not (ready-relayed-set(failed_relays)):
-                              break
-                          if not todo:
-                              time.sleep(15)
-                  note(f'GPU node {node} exited {state["gpu"]}; {len(relayed)} beams relayed, {len(failed_relays)} failed')
-                  # Tell the CPU node no more beams will come before anything that can fail: on 29 September
-                  # 2026 the collect below met a locked ledger and raised, .done never reached efc-cpu-02,
-                  # and its runner polled for six hours.
-                  done=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/.done'],
-                                                 capture_output=True,text=True).stdout or '{}')
-                  put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
-                  # The GPU node's own stages are over: record them and free it for the next batch.
-                  collect_retrying(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
-                  state['collected']=True
-                  (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
-                  cleanup(node)
-                  state['cleaned']=True
-                  while cpu_thread.is_alive():
-                      cpu_thread.join(timeout=60)
-                      if cpu_thread.is_alive():
-                          try:
-                              collect_live(cpu)
-                          except Exception as error:
-                              note(f'Live ledger update deferred for {cpu}: {error}')
-                  collect_retrying(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
-                  cleanup(cpu)
-                  return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays
-              except Exception:
-                # Record what the CPU node did and leave it empty before its slot is released.
-                try:
-                    collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
-                except Exception as error:
-                    note(f'CPU node {cpu} could not be collected: {error}')
-                try:
-                    cleanup(cpu)
-                except Exception:
-                    pass
-                raise
+            while True:
+                with CpuSlot([n for n in a.cpu_nodes if n not in tried] or a.cpu_nodes,lock_dir,a.cpu_slots,
+                             a.control_dir,'/home',log=note) as cpu:
+                    tried.append(cpu)
+                    progress={'relayed':0}
+                    try:
+                        return cpu_tier(node,cpu,state,gpu_thread,note,progress)
+                    except Exception as error:
+                        # Record what the CPU node did and leave it empty before its slot is released.
+                        try:
+                            collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                        except Exception as failure:
+                            note(f'CPU node {cpu} could not be collected: {failure}')
+                        try:
+                            cleanup(cpu)
+                        except Exception:
+                            pass
+                        # A CPU tier that failed before it took a beam lost nothing: another CPU node takes the
+                        # batch. On 9 October 2026 efc-cpu-00 refused the session and the whole batch was lost.
+                        if progress['relayed'] or len(tried)>=CPU_TIER_ATTEMPTS:
+                            raise
+                        note(f'CPU tier on {cpu} failed before it took a beam ({error}); trying another CPU node')
+        except Exception:
+            # Without a CPU node the GPU node keeps every beam's DM trials (~4.3 GB each) until its
+            # disk is full, as efc-bfc-01's did on 9 October 2026.
+            note(f'Stopping the GPU runner on {node}: no CPU node takes its beams')
+            try:
+                stop_runner(node)
+            except Exception as error:
+                note(f'GPU runner on {node} could not be stopped: {error}')
+            raise
         finally:
             gpu_thread.join()
             # Whatever happened, leave the GPU node recorded and empty before it takes another batch.
             try:
                 if not state['collected']:
                     collect_node(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+            except Exception as error:
+                note(f'GPU node {node} could not be collected: {error}')
+            # Clean even when the collect failed: a full disk is what makes it fail, and a node left full
+            # fails every later batch.
+            try:
                 if not state.get('cleaned'):
                     cleanup(node)
             except Exception as error:
-                note(f'GPU node {node} could not be collected or cleaned: {error}')
+                note(f'GPU node {node} could not be cleaned: {error}')
             (a.work/f'{node}.gpu-done').touch()
+
+    def cpu_tier(node,cpu,state,gpu_thread,note,progress):
+        """Relay the GPU node's finished beams to the CPU node, then collect both; True when all succeeded."""
+        clear_stale(cpu,cpu_log_path)
+        upload(cpu,source,repo,a.control_dir)
+        remote(cpu,['mkdir','-p',inputs,work+'/handoff'],a.control_dir)
+        cpu_state={}
+        cpu_thread=threading.Thread(target=lambda:cpu_state.update(
+            code=run_remote(cpu,runner_command('cpu',gpu_node=False),a.work/(cpu+'.log'))))
+        cpu_thread.start()
+        relayed,failed_relays,tries=set(),{},{}
+        last_live=0.
+        with futures.ThreadPoolExecutor(max_workers=max(1,a.relay_streams)) as pool:
+            while True:
+                if not cpu_thread.is_alive():
+                    raise RuntimeError(f'CPU runner on {cpu} exited {cpu_state.get("code")} before the batch was handed over')
+                finished=not gpu_thread.is_alive()
+                if time.monotonic()-last_live>=60:
+                    try:
+                        collect_live(cpu)
+                    except Exception as error:
+                        note(f'Live ledger update deferred for {cpu}: {error}')
+                    last_live=time.monotonic()
+                ready={name[:-6] for name in listing(node,work+'/handoff',a.control_dir) if name.endswith('.ready')}
+                there=listing(cpu,work+'/handoff',a.control_dir)
+                backlog=len({n[:-6] for n in there if n.endswith('.ready')}-{n[:-9] for n in there if n.endswith('.searched')})
+                todo=sorted(ready-relayed-set(failed_relays))[:max(0,a.relay_backlog-backlog)]
+                def move(item):
+                    marker=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/{item}.ready'],
+                                                     capture_output=True,text=True,check=True).stdout)
+                    members=[str(PurePosixPath(marker['input']).relative_to(root)),'work/'+marker['output']]
+                    relay(node,cpu,root,members,a.control_dir,['--exclude=DM_trials'])
+                    put_text(cpu,f'{work}/handoff/{item}.ready',json.dumps(marker),a.control_dir)
+                    remote(node,['rm','-rf',marker['input'],work+'/'+marker['output'],
+                                 f'{work}/handoff/{item}.ready'],a.control_dir)
+                    return item
+                for future,item in [(pool.submit(move,item),item) for item in todo]:
+                    try:
+                        relayed.add(future.result())
+                        progress['relayed']=len(relayed)
+                    except Exception as error:
+                        # A dropped connection should not lose a beam; three strikes do.
+                        tries[item]=tries.get(item,0)+1
+                        note(f'relay of {item} failed (attempt {tries[item]}): {error}')
+                        if tries[item]>=3:
+                            failed_relays[item]=str(error)
+                if finished and not (ready-relayed-set(failed_relays)):
+                    break
+                if not todo:
+                    time.sleep(RELAY_POLL)
+        note(f'GPU node {node} exited {state["gpu"]}; {len(relayed)} beams relayed, {len(failed_relays)} failed')
+        # Tell the CPU node no more beams will come before anything that can fail: on 29 September
+        # 2026 the collect below met a locked ledger and raised, .done never reached efc-cpu-02,
+        # and its runner polled for six hours.
+        done=json.loads(subprocess.run(ssh_args(node,a.control_dir)+['cat',f'{work}/handoff/.done'],
+                                       capture_output=True,text=True).stdout or '{}')
+        put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
+        # The GPU node's own stages are over: record them and free it for the next batch.
+        collect_retrying(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+        state['collected']=True
+        (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
+        cleanup(node)
+        state['cleaned']=True
+        while cpu_thread.is_alive():
+            cpu_thread.join(timeout=60)
+            if cpu_thread.is_alive():
+                try:
+                    collect_live(cpu)
+                except Exception as error:
+                    note(f'Live ledger update deferred for {cpu}: {error}')
+        collect_retrying(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+        cleanup(cpu)
+        return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays
 
     def worker(pair):
         index,node=pair

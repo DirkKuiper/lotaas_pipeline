@@ -112,6 +112,8 @@ def fingerprint(settings, image, options, code_files=None):
 
 
 class Runner:
+    # CPU mode: how long a runner waits with nothing to search and no beam arriving before it gives up.
+    HANDOFF_IDLE_SECONDS = 2 * 3600
     def __init__(self, args):
         self.args = args
         self.root = args.work.resolve()
@@ -504,8 +506,14 @@ class Runner:
                     return item, output, found, True
                 atomic_json(handoff/f'{item}.searched', {'errors': found, 'finalized': False})
                 return item, output, found, False
+            idle_since = time.monotonic()
             while True:
+                # The head removes the run when it gives up on it, and then no .done comes: four runners on
+                # efc-cpu-00 polled a removed directory for two days (9-11 October 2026).
+                if not handoff.is_dir():
+                    raise RuntimeError(f'{handoff} was removed: the head gave up on this run')
                 done = (handoff/'.done').is_file()   # read before listing, so no beam is missed
+                arrived = False
                 for marker in sorted(handoff.glob('*.ready')):
                     entry = json.loads(marker.read_text())
                     if entry['item'] in submitted:
@@ -514,11 +522,17 @@ class Runner:
                         raise ValueError(f'{entry["item"]} was prepared as {entry["fingerprint"][:16]}, but this '
                                          f'node computes {self.fp[:16]}: the source, settings or image differ')
                     submitted.add(entry['item'])
+                    arrived = True
                     if self.ledger.completed(entry['item'], 'classify', self.fp):
                         continue
                     pending.append(cpu_pool.submit(first_pass, entry['item'], self.root/entry['output']))
                 if done:
                     break
+                if arrived or not all(future.done() for future in pending):
+                    idle_since = time.monotonic()
+                elif time.monotonic() - idle_since > self.HANDOFF_IDLE_SECONDS:
+                    raise RuntimeError(f'no beam and no .done for {self.HANDOFF_IDLE_SECONDS / 3600:g} h with '
+                                       'nothing left to search: the head has gone')
                 time.sleep(poll)
             searched = []
             for future in pending:
