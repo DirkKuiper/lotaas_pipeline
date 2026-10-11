@@ -14,7 +14,7 @@ ROOT = Path('/shared/results/dkuiper/lotaas/campaign')
 def node_health(node):
     control = Path.home()/'.ssh/control'/('lotaas-' + node.removeprefix('efc-').replace('-', ''))
     command = "uptime; df -BG --output=avail /home | tail -1"
-    if 'gpu' in node:
+    if 'gpu' in node or 'bfc' in node:
         command += '; nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader'
     try:
         result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
@@ -54,8 +54,9 @@ def main():
                 WHERE stage IN ('retrieve','classify') AND status='success'
                 GROUP BY stage,item) WHERE finished>? GROUP BY stage""", (now-hours*3600,)))
             report['rates'].append({'hours': hours, **counts})
-    nodes = ['efc-gpu-00', 'efc-gpu-01'] + [f'efc-cpu-{i:02d}' for i in range(7)]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=9) as pool:
+    nodes = (['efc-gpu-00', 'efc-gpu-01'] + [f'efc-bfc-{i:02d}' for i in range(4)]
+             + [f'efc-cpu-{i:02d}' for i in range(7)])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as pool:
         report['nodes'] = dict(pool.map(node_health, nodes))
     temporary = ROOT/'health.json.partial'
     temporary.write_text(json.dumps(report, indent=2) + '\n')
