@@ -294,6 +294,17 @@ def test_the_row_length_is_found_from_the_steps(row):
     assert found == row, excess
 
 
+@pytest.mark.parametrize('excess, row', [
+    ({32: 2.37, 512: 2.49}, 32),     # L204718 SAP000
+    ({32: 4.52, 512: 5.21}, 32),     # L214463 SAP000, the highest 512/32 ratio of rows of 32
+    ({32: 1.33, 512: 29.86}, 512),   # L318210 SAP000, levelled at 32 until 12 Oct 2026
+    ({32: 1.03, 512: 1.35}, 512),    # L249077 SAP002, weakly stepped
+    ({32: 1.01, 512: 1.02}, 0),
+])
+def test_strong_rows_of_512_are_not_taken_for_rows_of_32(excess, row):
+    assert flatfield_module().row_from_excess(excess) == row
+
+
 def test_levelling_removes_the_row_steps_and_keeps_a_pulse_within_a_row():
     F = flatfield_module()
     data = stepped(512)

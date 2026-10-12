@@ -144,15 +144,23 @@ def detect_row_length(series):
     Without steps the excess is 1.00 +- 0.02 (a median over thousands of rows).
     """
     excess = {row: round(float(np.median([edge_excess(s, row) for s in series])), 2) for row in ROW_LENGTHS}
+    return row_from_excess(excess), excess
+
+
+def row_from_excess(excess):
+    """Row length (0 for none) from the median edge excess per candidate row length."""
     # Rows of 512 put a real edge at only 1 in 16 of the 32-sample grid points,
     # which leaves that median at 1.0-1.15; rows of 32 raise both. Measured on
     # eight SAPs, Dec 2012 - Apr 2015: rows of 32 at 1.97-3.5, rows of 512 at
     # 1.64-15.4 (a weakly stepped June 2014 SAP at 1.64), no steps at 1.00.
-    if excess[32] >= 1.3:
-        return 32, excess
+    # Strongly stepped rows of 512 lift the 32 grid too: L318206/L318210 (Apr
+    # 2014) read 1.30-1.36 at 32 and 30-33 at 512, and were levelled at 32. Rows
+    # of 32 put the 512 excess at 1.0-1.15x theirs (146 SAPs, 12 Oct 2026).
+    if excess[32] >= 1.3 and excess[512] < 2 * excess[32]:
+        return 32
     if excess[512] >= 1.3:
-        return 512, excess
-    return 0, excess
+        return 512
+    return 0
 
 
 def level_rows(data, row, lost=None):
