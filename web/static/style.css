@@ -158,3 +158,4 @@ ul.claims li { margin: 2px 0; }
 .finding-form .claim-boxes { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .finding-form .claim-boxes .check { display: flex; flex-direction: row; align-items: center; gap: 4px; color: var(--text); }
 td .summary { margin-top: 4px; }
+.table-wrap.open { max-height: none; }

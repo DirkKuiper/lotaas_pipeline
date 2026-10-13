@@ -11,7 +11,7 @@
 {% endmacro %}
 {% macro recorded_table(items, empty) %}
 <div class="card flush">
-  <div class="table-wrap">
+  <div class="table-wrap open">
     <table>
       <thead><tr><th>Source</th><th>What is new</th><th>Detections here</th><th>Checked against</th><th>Recorded</th></tr></thead>
       <tbody>
@@ -46,7 +46,7 @@
     <div class="sub">found by the index, nobody has checked them</div></div>
   <div class="tile"><div class="label">Checked: not new or not real</div><div class="value">{{ groups.not_new|length + groups.not_real|length }}</div></div>
 </div>
-<div class="notice small">Compared with ATNF {{ compared.catalogue or '(no catalogue)' }} and {{ compared.literature or 0 }} results from papers the catalogue does not hold yet (web/data/literature.tsv){% if compared.time %}, {{ compared.time|ago }} over {{ '{:,}'.format(compared.folds or 0) }} folds{% endif %}. The catalogue lags the literature: before recording a finding, look for newer timing of the source. Our positions are the S/N-weighted centre of the beams that saw it, ±0.25°/√beams and never better than 5′, because earlier TAB fits here were 3–6′ off when checked against later timing.</div>
+<div class="notice small">{% if compared.time %}Compared with ATNF {{ compared.catalogue }} and {{ compared.literature }} results from papers the catalogue does not hold yet (web/data/literature.tsv), {{ compared.time|ago }} over {{ '{:,}'.format(compared.folds or 0) }} folds.{% else %}The leads have not been computed yet: the index compares the folds with the newest catalogue and web/data/literature.tsv at most every 30 minutes.{% endif %} The catalogue lags the literature: before recording a finding, look for newer timing of the source. Our positions are the S/N-weighted centre of the beams that saw it, ±0.25°/√beams and never better than 5′, because earlier TAB fits here were 3–6′ off when checked against later timing.</div>
 
 <h2>Findings</h2>
 {{ recorded_table(groups.finding, 'None recorded yet.') }}
@@ -57,7 +57,7 @@
 <h2>Leads to check</h2>
 <div class="muted small">What the index found by itself: blind folds that sharpen a loosely catalogued pulsar (no timing solution, a position worse than 3′ or a rough period), and catalogued pulsars found here that no LOFAR publication reports. Check the detection and the literature, then record it.</div>
 <div class="card flush">
-  <div class="table-wrap">
+  <div class="table-wrap open">
     <table>
       <thead><tr><th>Source</th><th>What it may add</th><th>Detections here</th><th>Record the check</th></tr></thead>
       <tbody>
