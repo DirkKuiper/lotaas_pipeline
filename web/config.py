@@ -32,6 +32,9 @@ class Config:
     source_roots: list = field(default_factory=lambda: [LOTAAS])
     # Only for beams whose own metadata.json does not record the DM plan.
     settings: Path = REPO / 'settings.yaml'
+    # The newest ATNF catalogue, against which findings are judged (python -m web.findings fetch DIRECTORY); the
+    # pipeline stays on its pinned version. Without it the pinned catalogue is used.
+    compare_catalogue: Path = LOTAAS / 'web' / 'catalogues' / 'psrcat_pkg.tar.gz'
     # euroflash.frb_limits writes the running FRB rate limit here (latest.json, history.jsonl, limits.png).
     limits: Path = LOTAAS / 'limits'
     host: str = '127.0.0.1'
@@ -81,7 +84,8 @@ class Config:
         return self
 
 
-PATHS = {'campaign_root', 'ledger', 'data', 'settings', 'control_dir', 'token_file', 'observation_catalogue'}
+PATHS = {'campaign_root', 'ledger', 'data', 'settings', 'control_dir', 'token_file', 'observation_catalogue',
+         'compare_catalogue'}
 PATH_LISTS = {'result_roots', 'source_roots'}
 
 

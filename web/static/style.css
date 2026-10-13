@@ -145,3 +145,16 @@ details > summary { cursor: pointer; color: var(--muted); }
 .history { list-style: none; padding: 0; margin: 0; font-size: 13px; }
 .history li { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .status-line { min-height: 18px; font-size: 12px; color: var(--muted); }
+
+/* Findings: what a source adds to the published record (web/findings.py). */
+ul.claims { list-style: none; margin: 0; padding: 0; }
+ul.claims li { margin: 2px 0; }
+.claim { display: inline-block; padding: 0 7px; border-radius: 4px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid var(--accent); color: var(--accent); background: var(--accent-soft); white-space: nowrap; }
+.claim.new, .claim.precovery { border-color: var(--ok); color: var(--ok); background: transparent; }
+.claim.conflict { border-color: var(--warn); color: var(--warn); background: transparent; }
+.finding-form { display: grid; gap: 6px; margin-top: 6px; min-width: 260px; }
+.finding-form label { display: grid; gap: 2px; font-size: 12px; color: var(--muted); }
+.finding-form .claim-boxes { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.finding-form .claim-boxes .check { display: flex; flex-direction: row; align-items: center; gap: 4px; color: var(--text); }
+td .summary { margin-top: 4px; }

@@ -252,9 +252,11 @@ def test_known_pulsars_no_lofar_paper_reports_are_listed_with_what_was_found(cfg
     everything = client.get('/pulsars?show=all').text.split('<tbody>')[1]
     assert 'Bilous et al. 2016' in everything.split('J0850+6800')[1].split('</tr>')[0]
     assert 'LOTAAS' in everything.split('J0849+6810')[1].split('</tr>')[0]
+    # Found here and reported by no LOFAR paper: a lead on the findings page, counted on the overview.
     overview = client.get('/').text.replace('\n', '')
-    assert 'Known pulsars no LOFAR paper reports, found here' in overview
-    assert '1 <span class="muted small">/ 4 near searched beams' in overview
+    assert 'Findings: what this campaign adds' in overview and '1 lead to check' in overview
+    leads = client.get('/findings').text.split('Leads to check')[2]
+    assert 'J0847+6830' in leads and 'First LOFAR detection' in leads and 'J0845+6900' not in leads
 
 
 def test_lofar_references_names_and_scattering():

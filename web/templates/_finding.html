@@ -1,0 +1,18 @@
+<div class="card small" id="finding-panel">
+  <h2>Findings</h2>
+  {% for f in cited %}<div><span class="flag{{ ' ok' if f.status == 'finding' }}">{{ statuses[f.status] }}</span> <a href="/findings#{{ f.source }}">{{ f.source }}</a>
+    {% for kind, text in f.claims %}<span class="claim {{ kind }}">{{ claims[kind] }}</span> {% endfor %}<span class="muted">· {{ f.reviewer }}</span></div>
+  {% endfor %}
+  <details><summary>Record as a finding…</summary>
+    <div class="muted">If this detection tells us something new about its source: a new source, a detection before its discovery, LOFAR's first, or a better position, period or DM than any published. The verdict above says whether it is real; this says what is new.</div>
+    <form class="finding-form" data-evidence='{{ [candidate.key]|tojson }}'>
+      <label>Source<input name="source" value="{{ finding_source }}" placeholder="J-name, or a name for a new source"></label>
+      <label>Status<select name="status">{% for k, t in statuses.items() %}<option value="{{ k }}">{{ t }}</option>{% endfor %}</select></label>
+      <div class="claim-boxes">{% for kind, text in claims.items() %}<label class="check"><input type="checkbox" name="claim" value="{{ kind }}"> {{ text }}</label>{% endfor %}</div>
+      <label>What is new<textarea name="summary" placeholder="Our value against the best published one, and where that is published"></textarea></label>
+      <label>Checked against<input name="checked" value="ATNF {{ compared.catalogue or '' }}; literature.tsv; "></label>
+      <label>Reviewer<input name="reviewer" class="finding-reviewer" placeholder="your name"></label>
+      <button type="submit" class="primary">Record</button> <span class="status-line"></span>
+    </form>
+  </details>
+</div>

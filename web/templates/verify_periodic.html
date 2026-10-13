@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}{{ candidate.item|beam }} P {{ '%.4f'|format(candidate.period or 0) }} s{% endblock %}
 {% block page %}verify{% endblock %}
-{% block head %}<script src="/static/review.js" defer></script><script src="/static/fold.js" defer></script>{% endblock %}
+{% block head %}<script src="/static/review.js" defer></script><script src="/static/finding.js" defer></script><script src="/static/fold.js" defer></script>{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -55,6 +55,7 @@
       </dl>
     </div>
     {% include '_review.html' %}
+    {% include '_finding.html' %}
     {% if relatives %}<div class="card small"><h2>Same period in other beams</h2>
       {% for o in relatives %}<div class="stat"><a href="/verify/{{ o.id }}">{{ o.item|beam }} DM {{ '%.1f'|format(o.dm) }}</a><span class="v">{{ '%.1f'|format(o.snr) }}</span></div>{% endfor %}</div>{% endif %}
   </aside>

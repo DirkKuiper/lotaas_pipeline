@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% block title %}Findings{% endblock %}
+{% block page %}findings{% endblock %}
+{% block head %}<script src="/static/finding.js" defer></script>{% endblock %}
+{% macro claim_list(items) %}
+  <ul class="claims">{% for kind, text in items %}<li><span class="claim {{ kind }}">{{ claims[kind] }}</span>{% if text %} <span class="small">{{ text }}</span>{% endif %}</li>{% endfor %}</ul>
+{% endmacro %}
+{% macro evidence_links(keys) %}
+  {% for key in keys %}{% set e = evidence.get(key) %}{% if e %}<div class="nowrap small"><a href="/verify/{{ e.id }}">{{ e.item|beam }}</a>
+    <span class="muted">{{ (e.observed or '')[:10] }} · {% if e.kind == 'periodic' %}P {{ '%.6f'|format(e.period) }} s, DM {{ '%.1f'|format(e.dm) }}, stat {{ '%.0f'|format(e.snr) }}{% else %}DM {{ '%.1f'|format(e.dm) }}, S/N {{ '%.1f'|format(e.snr) }}{% endif %}</span></div>{% endif %}{% endfor %}
+{% endmacro %}
+{% macro recorded_table(items, empty) %}
+<div class="card flush">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Source</th><th>What is new</th><th>Detections here</th><th>Checked against</th><th>Recorded</th></tr></thead>
+      <tbody>
+      {% for f in items %}
+        <tr id="{{ f.source }}">
+          <td class="nowrap"><strong>{{ f.source }}</strong>{% if f.status in ('not_new', 'not_real') %} <span class="flag">{{ statuses[f.status] }}</span>{% endif %}{% for n in f.names %}<div class="muted small">{{ n }}</div>{% endfor %}</td>
+          <td>{{ claim_list(f.claims) }}{% if f.summary %}<div class="small summary">{{ f.summary }}</div>{% endif %}</td>
+          <td>{{ evidence_links(f.evidence) }}</td>
+          <td class="small">{{ f.checked or '' }}</td>
+          <td class="small nowrap">{{ f.reviewer }}<div class="muted">{{ f.created|when }}</div>
+            {% set past = history.get(f.source, [])[1:] %}{% if past %}<details><summary>{{ past|length }} earlier</summary>
+              {% for h in past %}<div class="muted">{{ statuses[h.status] }} · {{ h.reviewer }} · {{ h.created|when }}</div>{% endfor %}</details>{% endif %}</td>
+        </tr>
+      {% else %}<tr><td colspan="5" class="muted">{{ empty }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endmacro %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Findings</h1>
+    <div class="muted">Sources this campaign tells us something new about: a new source, a detection before its discovery, LOFAR's first detection of it, or a position, period or DM better than any published one. A verdict on a candidate says whether it is real; a finding says what is new, against what was checked. Findings are recorded by a person, from a candidate page or from a lead below; "not new" and "not real" keep the check on record.</div>
+  </div>
+</div>
+<div class="tiles">
+  <div class="tile"><div class="label">Findings</div><div class="value">{{ groups.finding|length }}</div></div>
+  <div class="tile"><div class="label">Need follow-up</div><div class="value">{{ groups.follow_up|length }}</div>
+    <div class="sub">real-looking, not yet confirmed</div></div>
+  <div class="tile"><div class="label">Leads to check</div><div class="value">{{ leads|length }}</div>
+    <div class="sub">found by the index, nobody has checked them</div></div>
+  <div class="tile"><div class="label">Checked: not new or not real</div><div class="value">{{ groups.not_new|length + groups.not_real|length }}</div></div>
+</div>
+<div class="notice small">Compared with ATNF {{ compared.catalogue or '(no catalogue)' }} and {{ compared.literature or 0 }} results from papers the catalogue does not hold yet (web/data/literature.tsv){% if compared.time %}, {{ compared.time|ago }} over {{ '{:,}'.format(compared.folds or 0) }} folds{% endif %}. The catalogue lags the literature: before recording a finding, look for newer timing of the source. Our positions are the S/N-weighted centre of the beams that saw it, ±0.25°/√beams and never better than 5′, because earlier TAB fits here were 3–6′ off when checked against later timing.</div>
+
+<h2>Findings</h2>
+{{ recorded_table(groups.finding, 'None recorded yet.') }}
+
+<h2>Need follow-up</h2>
+{{ recorded_table(groups.follow_up, 'Nothing waiting for follow-up.') }}
+
+<h2>Leads to check</h2>
+<div class="muted small">What the index found by itself: blind folds that sharpen a loosely catalogued pulsar (no timing solution, a position worse than 3′ or a rough period), and catalogued pulsars found here that no LOFAR publication reports. Check the detection and the literature, then record it.</div>
+<div class="card flush">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Source</th><th>What it may add</th><th>Detections here</th><th>Record the check</th></tr></thead>
+      <tbody>
+      {% for lead in leads %}
+        <tr id="{{ lead.source }}">
+          <td class="nowrap"><strong>{{ lead.source }}</strong>{% for n in lead.names %}<div class="muted small">{{ n }}</div>{% endfor %}</td>
+          <td>{{ claim_list(lead.claims) }}</td>
+          <td>{{ evidence_links(lead.evidence) }}</td>
+          <td>
+            <details><summary>Record…</summary>
+              <form class="finding-form" data-source="{{ lead.source }}" data-names='{{ lead.names|tojson }}'
+                    data-evidence='{{ lead.evidence|tojson }}' data-claims='{{ dict(lead.claims)|tojson }}'>
+                <label>Status<select name="status">{% for k, t in statuses.items() %}<option value="{{ k }}">{{ t }}</option>{% endfor %}</select></label>
+                <div class="claim-boxes">{% for kind, text in lead.claims %}<label class="check"><input type="checkbox" name="claim" value="{{ kind }}" checked> {{ claims[kind] }}</label>{% endfor %}</div>
+                <label>Note<textarea name="summary" placeholder="What the check found"></textarea></label>
+                <label>Checked against<input name="checked" value="ATNF {{ compared.catalogue }}; literature.tsv; "></label>
+                <label>Reviewer<input name="reviewer" class="finding-reviewer" placeholder="your name"></label>
+                <button type="submit" class="primary">Record</button> <span class="status-line small"></span>
+              </form>
+            </details>
+          </td>
+        </tr>
+      {% else %}<tr><td colspan="4" class="muted">No lead waiting.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<details class="card"><summary><strong>Checked: not new ({{ groups.not_new|length }}) or not real ({{ groups.not_real|length }})</strong></summary>
+  {{ recorded_table(groups.not_new + groups.not_real, 'Nothing checked yet.') }}
+</details>
+<div class="muted small"><a href="/pulsars">Every catalogued pulsar near a searched beam</a>, what LOFAR has published of it and what this campaign found of it.</div>
+{% endblock %}

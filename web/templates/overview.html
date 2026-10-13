@@ -21,9 +21,9 @@
   <div class="tile"><div class="label">LOTAAS sources in fields searched so far</div>
     <div class="value">{{ lotaas.searched }} <span class="muted small">/ {{ lotaas.total }}</span></div>
     <div class="sub">{{ lotaas.missed }} searched but not found yet</div></div>
-  {% if pulsars.near %}<div class="tile"><div class="label">Known pulsars no LOFAR paper reports, found here</div>
-    <div class="value">{{ pulsars.unseen_found }} <span class="muted small">/ {{ pulsars.unseen }} near searched beams</span></div>
-    <div class="sub">{{ pulsars.unseen_open }} within reach not found · {{ pulsars.unseen_out }} millisecond or scattered<br><a href="/pulsars">Not seen by LOFAR →</a></div></div>{% endif %}
+  <div class="tile"><div class="label">Findings: what this campaign adds to the published record</div>
+    <div class="value">{{ found.findings }} <span class="muted small">+ {{ found.follow_up }} to follow up</span></div>
+    <div class="sub">{{ found.leads }} lead{{ 's' if found.leads != 1 }} to check · {{ found.checked }} checked, not new or not real<br><a href="/findings">Findings →</a></div></div>
 </div>
 {% endif %}
 {% if early and not (scope and scope.key == 'ec') %}

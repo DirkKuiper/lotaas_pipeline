@@ -114,6 +114,8 @@ SEARCHED_RADIUS_DEG = 1.0
 # harmonic, multiple or fraction of it came by chance as often as claimed below
 # statistic HARMONIC_MIN_STATISTIC.
 FUNDAMENTAL_TOLERANCE = 1e-3
+# The findings leads (derive_findings) read every fold; once in this many seconds is enough.
+FINDINGS_SECONDS = 1800
 HARMONIC_MIN_STATISTIC = 200.0
 # Beyond psrcat's 3e-4 a fold at statistic 12 and DM 906 matched J1852+0056_P 0.8 degrees
 # away; the widened band asks this much (B0655+64: 8,527).
@@ -1458,6 +1460,68 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO catalogue_pulsars VALUES '
                                 '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
 
+    def derive_findings(self, force=False):
+        """Leads for the findings page (web.findings), at most once every FINDINGS_SECONDS.
+
+        Blind folds near loose catalogue entries, judged against the newest catalogue the web layer has
+        (Config.compare_catalogue, else the pinned one) and data/literature.tsv; and catalogued pulsars
+        found here that no LOFAR publication reports (catalogue_pulsars). Folds a reviewer called RFI or
+        noise, pilot runs and the incoherent beams are left out.
+        """
+        from euroflash import psrcat
+        from euroflash.beams import INCOHERENT_BEAMS
+        from web import findings, lofar
+        last = meta_get(self.db, 'findings', {})
+        if not force and time.time() - last.get('time', 0) < FINDINGS_SECONDS:
+            return None
+        path = Path(self.cfg.compare_catalogue)
+        if not path.exists():
+            path = Path(os.environ.get('LOTAAS_PSRCAT') or psrcat.DEFAULT)
+        catalogue, version = findings.load(path)
+        version = version or path.name
+        published = findings.literature()
+        seen = {name for source in (lofar.evidence(), lofar.evidence(path)) for name, e in source.items()
+                if e.get('seen')}
+        incoherent = ','.join(str(b) for b in INCOHERENT_BEAMS) or '-1'
+        folds = [dict(r) for r in self.db.execute(f"""
+            SELECT p.key, p.item, p.dm, p.period, p.statistic,
+                   json_extract(p.row, '$.observation_seconds') AS seconds,
+                   b.ra_deg AS ra, b.dec_deg AS dec, b.observation, b.sap, b.observed
+            FROM periodic p JOIN beams b ON b.dir = p.dir
+            WHERE COALESCE(p.pilot, 0) = 0 AND NOT p.rfi_like AND p.statistic >= ? AND b.ra_deg IS NOT NULL
+              AND COALESCE(b.beam, -1) NOT IN ({incoherent})
+              AND COALESCE((SELECT v.label FROM review_state.reviews v WHERE v.key = p.key
+                            ORDER BY v.created DESC LIMIT 1), '') NOT IN ('rfi', 'noise')""",
+                                                       (findings.MIN_STATISTIC,))]
+        leads = findings.fold_leads(folds, catalogue, published, seen) if catalogue else {}
+        by_name = {e['name']: e for e in catalogue}
+        found = []
+        for k in self.db.execute("""SELECT k.*,
+                (SELECT key FROM candidates c WHERE c.kind='sp' AND c.item=k.sp_item AND c.snr=k.sp_best_snr
+                 ORDER BY c.type='known_pulsar' DESC LIMIT 1) AS sp_key,
+                (SELECT key FROM candidates c WHERE c.kind='periodic' AND c.item=k.periodic_item
+                 AND c.snr=k.periodic_best LIMIT 1) AS periodic_key,
+                (SELECT observed FROM beams b WHERE b.item=COALESCE(k.periodic_item, k.sp_item) LIMIT 1) AS observed
+            FROM catalogue_pulsars k WHERE k.lofar IS NULL AND (k.sp_count > 0 OR k.periodic_count > 0)"""):
+            k = dict(k)
+            entry = by_name.get(k['psrj'], {})
+            how = ' and '.join(text for count, text in (
+                (k['periodic_count'], f"{k['periodic_count']} fold(s), best statistic {k['periodic_best'] or 0:.0f}"),
+                (k['sp_count'], f"{k['sp_count']} single pulse(s), best S/N {k['sp_best_snr'] or 0:.1f}")) if count)
+            found.append({'psrj': k['psrj'], 'bname': k['bname'], 'period': k['period'], 'dm': k['dm'],
+                          'ra': entry.get('ra'), 'dec': entry.get('dec'), 'how': how,
+                          'evidence': [key for key in (k['periodic_key'], k['sp_key']) if key],
+                          'statistic': k['periodic_best'] or k['sp_best_snr'], 'observed': k['observed']})
+        leads.update(findings.lofar_leads(found, catalogue, published, seen, leads))
+        now = time.time()
+        with self.db:
+            self.db.execute('DELETE FROM finding_leads')
+            self.db.executemany('INSERT OR REPLACE INTO finding_leads VALUES (?,?,?,?,?,?,?,?,?,?)',
+                                [findings.lead_row(lead, version, now) for lead in leads.values()])
+            meta_set(self.db, 'findings', {'time': now, 'catalogue': version, 'path': str(path),
+                                           'literature': len(published), 'folds': len(folds), 'leads': len(leads)})
+        return len(leads)
+
     def derive_lotaas(self):
         """Every published LOTAAS source against what this campaign has searched and found.
 
@@ -1610,7 +1674,7 @@ class Indexer:
         for name, step in (('state', self.sync_state), ('ledger', self.sync_ledger),
                            ('results', lambda: self.scan_results(full)), ('low_dm', self.sync_low_dm),
                            ('snippets', self.sync_snippets), ('positions', self.repair_positions),
-                           ('derive', self.derive), ('local', self.measure_local),
+                           ('derive', self.derive), ('findings', self.derive_findings), ('local', self.measure_local),
                            ('dispersion', self.measure_dispersion), ('triage', self.triage),
                            ('counts', self.count_candidates), ('forecast', self.forecast), ('health', self.health)):
             begun = time.time()

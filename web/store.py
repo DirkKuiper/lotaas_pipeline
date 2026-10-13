@@ -159,6 +159,11 @@ DROP TABLE IF EXISTS known_pulsars;
 -- whether those at its DM keep its rotation (indexer.cluster_tests), kept until the observation gains beams.
 CREATE TABLE IF NOT EXISTS sp_dm_excess (observation TEXT, pulsar TEXT, beams INTEGER, on_count INTEGER,
     off_mean REAL, best_snr REAL, best_item TEXT, z_on REAL, z_control REAL, PRIMARY KEY (observation, pulsar));
+-- What the index found that may add to the published record (web.findings): blind folds that sharpen a loose
+-- catalogue entry, and catalogued pulsars found here that no LOFAR paper reports. Claims are [type, text] pairs;
+-- ours and published are JSON; evidence the candidate keys behind it, strongest first.
+CREATE TABLE IF NOT EXISTS finding_leads (source TEXT PRIMARY KEY, names TEXT, claims TEXT, ours TEXT, published TEXT,
+    evidence TEXT, statistic REAL, observed TEXT, catalogue TEXT, updated REAL);
 -- Every published LOTAAS source (web.lotaas), how LOTAAS found it, and what this campaign found of it.
 CREATE TABLE IF NOT EXISTS lotaas_sources (psrj TEXT PRIMARY KEY, bname TEXT, dm REAL, period REAL,
     flux_mjy REAL, flux_source TEXT, discovery INTEGER, reference TEXT, rrat INTEGER, lotaas_mode TEXT,
@@ -174,6 +179,12 @@ CREATE INDEX IF NOT EXISTS reviews_key ON reviews(key, created);
 -- The automatic triage's own verdicts it took back when their evidence no longer held (web.triage).
 CREATE TABLE IF NOT EXISTS triage_withdrawals (id INTEGER PRIMARY KEY, key TEXT NOT NULL, label TEXT NOT NULL,
     note TEXT, created REAL NOT NULL, withdrawn REAL NOT NULL, why TEXT);
+-- Sources this campaign tells us something new about (web.findings), or checked and found not to: one row per
+-- recording, the latest per source standing. claims: [[type, text], ...]; evidence: candidate keys; checked: what
+-- was compared (catalogue version, papers).
+CREATE TABLE IF NOT EXISTS findings (id INTEGER PRIMARY KEY, source TEXT NOT NULL, names TEXT, reviewer TEXT NOT NULL,
+    status TEXT NOT NULL, claims TEXT NOT NULL, summary TEXT, evidence TEXT, checked TEXT, created REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS findings_source ON findings(source, created);
 -- Explicit, audited dashboard removals. Keep these outside the rebuildable index.
 CREATE TABLE IF NOT EXISTS candidate_removals (key TEXT PRIMARY KEY, reason TEXT NOT NULL,
     evidence TEXT NOT NULL, removed_by TEXT NOT NULL, created REAL NOT NULL);

@@ -28,6 +28,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 
 from euroflash.beams import INCOHERENT_BEAMS
+from web import findings as findings_mod
 from web import store
 from web.dynspec import SUBBANDS, Snippet, parse_mask, sweep_seconds
 from web.keys import beam_label, parse_item
@@ -433,6 +434,7 @@ def create_app(cfg, run_background=True):
             for kind in KINDS:
                 where, args, _ = candidate_filter({'kind': kind, 'review': 'unreviewed'})
                 waiting[kind] = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {where}', args).fetchone()[0]
+            waiting['findings'] = len(findings_summary(db)[2])
         return templates.TemplateResponse(request, name, dict(
             context, health=health, last_index=last, waiting=waiting, path=request.url.path))
 
@@ -477,10 +479,15 @@ def create_app(cfg, run_background=True):
                 ORDER BY c.found DESC LIMIT 8""")
             _, lotaas = lotaas_summary(db)
             _, pulsars = pulsar_summary(db)
+            recorded, _, leads = findings_summary(db)
         total = sum(saps.values())
         remaining = sum(v for k, v in saps.items() if k not in ('searched', 'incomplete'))
         early_day = next((p for p in (early or {}).get('projections', []) if p['hours'] == 24), {})
-        return page(request, 'overview.html', lotaas=lotaas, pulsars=pulsars, saps=saps, files=files, total=total, remaining=remaining,
+        statuses = [f['status'] for f in recorded.values()]
+        found = {'findings': statuses.count('finding'), 'follow_up': statuses.count('follow_up'), 'leads': len(leads),
+                 'checked': statuses.count('not_new') + statuses.count('not_real')}
+        return page(request, 'overview.html', lotaas=lotaas, pulsars=pulsars, found=found, saps=saps, files=files,
+                    total=total, remaining=remaining,
                     early=early, early_day=early_day,
                     beams_searched=beams_searched, campaign_beams=campaign_beams,
                     eta_days=estimate.get('pace_days'), forecast=forecast, inventory=inventory,
@@ -886,6 +893,8 @@ def create_app(cfg, run_background=True):
                 known['evidence'] = ', '.join(KNOWN_ROUTES[r] for r in known['route'].split('+') if r in KNOWN_ROUTES)
             others = rows(db, """SELECT id, type, dm, snr, time FROM candidates WHERE item=? AND id<>?
                 AND kind=? ORDER BY snr DESC LIMIT 12""", candidate['item'], cid, candidate['kind'])
+            cited = [f for f in findings_mod.latest(db).values() if candidate['key'] in f['evidence']]
+            compared = meta(db, 'findings', {})
         initial = {}
         display = None
         if snippet and candidate['kind'] == 'sp':
@@ -919,12 +928,87 @@ def create_app(cfg, run_background=True):
                        observed=beam_run['observation_date'] if beam_run else None,
                        labels=LABELS, kept=kept, initial=initial, display=display,
                        section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence,
-                       known=known, sweep=sweep)
+                       known=known, sweep=sweep, cited=cited, compared=compared, claims=findings_mod.CLAIMS,
+                       statuses=findings_mod.STATUSES,
+                       finding_source=candidate.get('pulsar') or (known or {}).get('name') or '')
         if candidate['kind'] == 'periodic':
             context['fold'] = json.loads(periodic['row']) if periodic else {}
             context.update(family=family, relatives=relatives, triage=triage)
             return page(request, 'verify_periodic.html', **context)
         return page(request, 'verify_sp.html', **context)
+
+    # ---------------------------------------------------------- findings
+    def findings_summary(db):
+        """(latest recording per source, every recording per source, leads nobody has checked yet)."""
+        recorded = findings_mod.latest(db)
+        history = {}
+        for row in rows(db, 'SELECT * FROM r.findings ORDER BY created DESC'):
+            row['claims'] = json.loads(row['claims'] or '[]')
+            history.setdefault(row['source'], []).append(row)
+        covered = findings_mod.checked_names(recorded)
+        leads = []
+        for row in rows(db, 'SELECT * FROM finding_leads ORDER BY statistic DESC'):
+            for name in ('names', 'claims', 'ours', 'published', 'evidence'):
+                row[name] = json.loads(row[name] or 'null')
+            if not ({row['source'], *row['names']} & covered):
+                leads.append(row)
+        return recorded, history, leads
+
+    def evidence_rows(db, keys):
+        out = {}
+        for key in set(keys):
+            row = db.execute("""SELECT c.id, c.kind, c.item, c.dm, c.snr, c.period, b.observed FROM candidates c
+                LEFT JOIN beams b ON b.dir = c.dir WHERE c.key=?""", (key,)).fetchone()
+            if row:
+                out[key] = dict(row)
+        return out
+
+    @app.get('/findings', response_class=HTMLResponse)
+    def findings_page(request: Request):
+        with store.reading(cfg) as db:
+            recorded, history, leads = findings_summary(db)
+            keys = [k for f in recorded.values() for k in f['evidence']] + [k for lead in leads for k in lead['evidence']]
+            evidence = evidence_rows(db, keys)
+            compared = meta(db, 'findings', {})
+        groups = {status: [f for f in recorded.values() if f['status'] == status] for status in findings_mod.STATUSES}
+        return page(request, 'findings.html', groups=groups, leads=leads, evidence=evidence, history=history,
+                    compared=compared, claims=findings_mod.CLAIMS, statuses=findings_mod.STATUSES)
+
+    @app.post('/api/finding')
+    async def record_finding(request: Request):
+        body = await request.json()
+        source = (body.get('source') or '').strip()[:64]
+        reviewer = (body.get('reviewer') or '').strip()[:64]
+        status = body.get('status')
+        if not source or not reviewer or status not in findings_mod.STATUSES:
+            raise HTTPException(400, 'A source, a status and a reviewer name are required')
+        claims = []
+        for claim in body.get('claims') or []:
+            kind, text = (claim, '') if isinstance(claim, str) else (claim[0], claim[1] if len(claim) > 1 else '')
+            if kind not in findings_mod.CLAIMS:
+                raise HTTPException(400, f'Unknown claim: {kind}')
+            claims.append([kind, str(text or '').strip()[:1000]])
+        if status in ('finding', 'follow_up') and not claims:
+            raise HTTPException(400, 'Say what is new: at least one claim')
+        names = sorted({str(n).strip()[:64] for n in body.get('names') or [] if str(n).strip()} - {source})[:20]
+        keys = []
+        with store.reading(cfg) as db:
+            for ref in body.get('evidence') or []:
+                row = db.execute('SELECT key FROM candidates WHERE key=? OR id=?', (ref, ref)).fetchone()
+                if row is None:
+                    raise HTTPException(400, f'No such candidate: {ref}')
+                keys.append(row['key'])
+        db = store.reviews(cfg)
+        try:
+            with db:
+                db.execute("""INSERT INTO findings(source,names,reviewer,status,claims,summary,evidence,checked,created)
+                    VALUES (?,?,?,?,?,?,?,?,?)""", (source, json.dumps(names), reviewer, status, json.dumps(claims),
+                                                     (body.get('summary') or '').strip()[:4000], json.dumps(keys),
+                                                     (body.get('checked') or '').strip()[:1000], time.time()))
+            history = rows(db, 'SELECT * FROM findings WHERE source=? ORDER BY created DESC', source)
+        finally:
+            db.close()
+        return JSONResponse(clean({'findings': history}))
 
     # ------------------------------------------------ pulsars LOFAR has not seen
     PULSAR_SHOWS = {'unseen': 'Never reported by LOFAR', 'found': 'Found here, never reported by LOFAR',

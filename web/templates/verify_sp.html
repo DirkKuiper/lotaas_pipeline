@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}{{ candidate.item|beam }} DM {{ '%.1f'|format(candidate.dm) }}{% endblock %}
 {% block page %}verify{% endblock %}
-{% block head %}<script src="/static/review.js" defer></script><script src="/static/viewer.js" defer></script>{% endblock %}
+{% block head %}<script src="/static/review.js" defer></script><script src="/static/finding.js" defer></script><script src="/static/viewer.js" defer></script>{% endblock %}
 {% block content %}
 {% set kinds = {'candidate': 'FETCH positive', 'dispersed': 'Dispersed on its own data; FETCH short of 5 of 6 models, or not asked', 'known_pulsar': 'Known pulsar', 'rejected': 'FETCH reject', 'unconfirmed': 'Low local significance'} %}
 <div class="page-head">
@@ -63,6 +63,7 @@
       <div class="small" id="m-verdict" style="margin-top: 6px"></div>
     </div>
     {% include '_review.html' %}
+    {% include '_finding.html' %}
     <div class="card small">
       <h2>Data</h2>
       <dl class="kv">
@@ -82,7 +83,8 @@
 <div class="notice warn">No data was kept for this candidate: its beam's filterbank was deleted after the search and no copy was found on disk. Only the pipeline's plot below can be inspected. Candidates found from now on keep a snippet automatically.</div>
 <div class="grid cols-main">
   <div>{% set open_plots = True %}{% include '_plots.html' %}</div>
-  <aside>{% include '_review.html' %}</aside>
+  <aside>{% include '_review.html' %}
+    {% include '_finding.html' %}</aside>
 </div>
 {% endif %}
 {% if snippet %}{% set open_plots = False %}{% include '_plots.html' %}{% endif %}
