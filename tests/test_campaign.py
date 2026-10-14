@@ -727,6 +727,74 @@ def test_only_beams_with_findings_keep_their_flatfielded_filterbank(tmp_path, mo
     assert not campaign.unsearched(sap['key'])
 
 
+def test_kept_beams_follow_the_review_page_a_grace_period_and_a_budget(tmp_path, monkeypatch):
+    # 14 October 2026: kept filterbanks grew 0.7-1.2 TB a day on a disk shared with other users, most of them
+    # held by folds the review page never showed.
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(tmp_path/'no-catalogue.db'))
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    beams = {int(p.parent.name[1:]): p for p in Path(sap['sap_dir']).glob('B*/*_ff.fil')}
+    run_name = 'campaign-review'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    node = tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'
+    snapshot(node/'ledger-snapshot.sqlite', {p.stem: 'success' for p in beams.values()})
+    from db.initialize_db import initialize_database
+    initialize_database(str(node/'ledger-snapshot.sqlite'))
+    with sqlite3.connect(node/'ledger-snapshot.sqlite') as db:
+        for number in (20, 21):        # FETCH candidates; neither beam's periodic results can be read
+            db.execute('INSERT INTO detections(beam_id,detection_type,candidate_dm,width_samples,snr) '
+                       'VALUES (?,?,?,?,?)', (beams[number].name, 'candidate', 300.0, 4, 9.0))
+    for number, f in ((30, 1.25), (31, 1.7), (32, 2.3)):
+        path = node/'processed'/beams[number].stem/'abc'/'periodicity_folded_candidates.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'frequency_hz': f, 'period_seconds': 1 / f, 'frequency_resolution_hz': 1 / 3600.,
+                                    'dm': 40.0, 'statistic': 15.0, 'rfi_like': False, 'catalogue_matches': []}) + '\n')
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
+    kept = lambda: sorted(b for b, p in beams.items() if p.exists())
+    assert kept() == [20, 21, 30, 31, 32]
+    from euroflash.findings import Index, candidate_key, periodic_key
+    index = Index(tmp_path/'campaign')
+    fold_key = {n: periodic_key(index.beams[beams[n].stem], index.beams[beams[n].stem]['folds'][0]) for n in (30, 31, 32)}
+    sp_key = {n: candidate_key(beams[n].name, 300.0, 4, 9.0) for n in (20, 21)}
+    (tmp_path/'web').mkdir(exist_ok=True)
+    with sqlite3.connect(tmp_path/'web'/'web.sqlite') as db:
+        db.execute('CREATE TABLE periodic_triage (key TEXT PRIMARY KEY, status TEXT)')
+        db.executemany('INSERT INTO periodic_triage VALUES (?,?)', [(fold_key[30], 'strong'), (fold_key[31], 'deferred')])
+        db.execute('CREATE TABLE beam_runs (item TEXT, run_name TEXT)')
+    with sqlite3.connect(campaign.o.reviews) as db:
+        db.execute('CREATE TABLE reviews (key TEXT, label TEXT, created REAL)')
+        db.execute("INSERT INTO reviews VALUES (?, 'rfi', 1.0)", (sp_key[21],))
+    campaign.o.kept_grace_hours, campaign.o.max_kept_tb = 48.0, None
+    # The page left fold 31 out: nothing holds its beam. 32 waits for the page, 21 for its periodic results.
+    assert [why for _, why in campaign.release_kept()] == ['review page: deferred']
+    assert kept() == [20, 21, 30, 32]
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET updated=updated-49*3600 WHERE fil LIKE '%BEAM021%' OR fil LIKE '%BEAM032%'")
+    # Until the page has read 32's run its fold may still come: only 21 has waited out its grace.
+    assert [why for _, why in campaign.release_kept()] == ['periodic results not read yet after 49 h']
+    with sqlite3.connect(tmp_path/'web'/'web.sqlite') as db:
+        db.execute('INSERT INTO beam_runs VALUES (?,?)', (beams[32].stem, run_name))
+    assert sorted(why for _, why in campaign.release_kept()) == [
+        'fold P=0.434783 s DM 40: not on the review page yet after 49 h']
+    assert kept() == [20, 30]
+    # Over the budget the oldest goes first; the page's fold and the open candidate alike.
+    with campaign.state.db() as db:
+        db.execute("UPDATE files SET updated=updated-3600 WHERE fil LIKE '%BEAM030%'")
+    size = sum(beams[n].stat().st_size for n in (20, 30))
+    campaign.o.max_kept_tb = (size - 1) / 1e12
+    assert [why for _, why in campaign.release_kept()] == [f'over the kept budget of {(size - 1) / 1e12:g} TB (fold P=0.8 s DM 40)']
+    assert kept() == [20]
+    # A beam a reviewer called unsure is never released, budget or not.
+    with sqlite3.connect(campaign.o.reviews) as db:
+        db.execute("INSERT INTO reviews VALUES (?, 'unsure', 2.0)", (sp_key[20],))
+    campaign.o.max_kept_tb = 0.0
+    assert campaign.release_kept() == [] and kept() == [20]
+
+
 def test_a_beam_whose_periodic_results_cannot_be_read_yet_is_kept_until_they_can(tmp_path, monkeypatch):
     # 25 September: the CPU tier's results of 112 runs appeared on the head about a
     # minute after their dispatch exited, so their folds were never judged.

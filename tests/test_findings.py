@@ -321,3 +321,63 @@ def test_a_bright_pulsars_harmonics_and_their_aliases_keep_nothing(tmp_path):
     assert 'x4' in reasons[3] and 'x8' in reasons[5]
     assert verdicts[lone][0], 'an unrelated fold in the same beam still keeps its filterbank'
     assert findings.relative(1 / 0.7, 57.0, 2 * f0, 43.5) is None
+
+
+def test_a_fold_holds_its_beam_only_while_the_review_page_shows_it(tmp_path):
+    # 14 October 2026: 6,500 kept beams (7.8 TB) were held by folds the page left out of its queue, 25 by folds it showed.
+    results = tmp_path/'results'
+    run = 'campaign-20261014-010000-gpu00'
+    item = beam(results, run, 'L700001', 0, 30, folds=[fold(1.25, 40.0)])
+    index = findings.Index(tmp_path)
+    index.backfill(results)
+    entry = index.beams[item]
+    key = findings.periodic_key(entry, entry['folds'][0])
+    assert key.startswith('periodicity|')
+
+    def keep(triage, settled=frozenset()):
+        return findings.Judge(index, settled=settled, triage=triage).keep(entry)
+    assert keep(None) == (True, 'fold P=0.8 s DM 40')                   # without the page: the rule alone
+    assert keep({key: 'strong'}) == (True, 'fold P=0.8 s DM 40')
+    assert keep({key: 'deferred'}) == (False, 'review page: deferred')
+    assert keep({key: 'related'}) == (False, 'review page: related')
+    assert keep({key: 'strong'}, settled=frozenset({key})) == (False, 'judged on the review page')
+    assert keep({}) == (True, f'fold P=0.8 s DM 40: {findings.UNTRIAGED}')
+    # A fold the page shows outranks one it has not seen yet.
+    two = beam(results, run, 'L700001', 0, 31, folds=[fold(1.25, 40.0), fold(2.5, 60.0)])
+    index.add_beam(results/run, two)
+    second = findings.periodic_key(index.beams[two], index.beams[two]['folds'][1])
+    assert findings.Judge(index, triage={second: 'strong'}).keep(index.beams[two]) == (True, 'fold P=0.4 s DM 60')
+
+
+def test_the_index_reads_a_beam_whose_results_landed_after_its_run_was_indexed(tmp_path):
+    # 14 October 2026: 813 kept beams whose CPU-tier results landed after their run was indexed were never judged.
+    results = tmp_path/'results'
+    run = 'campaign-20261006-205439-bfc01'
+    beam(results, run, 'L559971', 2, 1, folds=[fold(1.25, 40.0)])
+    index = findings.Index(tmp_path)
+    index.backfill(results)
+    late = beam(results, run, 'L559971', 2, 0, folds=[fold(2.0, 30.0)], node='efc-cpu-04')
+    index.backfill(results)
+    assert late not in index.beams                           # the run is indexed: backfill never reads it again
+    assert index.add_beam(results/run, 'downsampled_L559971_SAP002_BEAM099_32bit_ff') is None
+    entry = index.add_beam(results/run, late, record=False)
+    assert entry['run'] == run and [f['dm'] for f in entry['folds']] == [30.0] and index.read(late, run)
+    assert late not in findings.Index(tmp_path).beams        # a dry run leaves the file as it was
+    index.add_beam(results/run, late)
+    assert findings.Index(tmp_path).read(late, run)
+
+
+def test_the_review_page_counts_as_absent_while_its_triage_is_empty(tmp_path):
+    # The web index is rebuilt from scratch at times: an empty triage would make every fold look untriaged.
+    path = tmp_path/'web.sqlite'
+    assert findings.ReviewPage(path).triage is None
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE periodic_triage (key TEXT PRIMARY KEY, status TEXT)')
+        db.execute('CREATE TABLE beam_runs (item TEXT, run_name TEXT)')
+        db.execute("INSERT INTO beam_runs VALUES ('beam', 'run')")
+    page = findings.ReviewPage(path)
+    assert page.triage is None and not page.read('beam', 'run')
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO periodic_triage VALUES ('periodicity|x', 'strong')")
+    page = findings.ReviewPage(path)
+    assert page.triage == {'periodicity|x': 'strong'} and page.read('beam', 'run') and not page.read('beam', 'other')

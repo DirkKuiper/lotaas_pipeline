@@ -27,6 +27,16 @@ worth keeping a filterbank for when it is
   (periodicity_veto.dm_consistent). The per-SAP veto sees one SAP at a time;
   this sees every SAP searched so far.
 
+A fold that passes all of that still holds its filterbank only while the
+review page shows it: the web layer's periodic triage (web.sqlite) puts a fold
+in the queue ('strong') or leaves it out ('deferred', 'related'), and a fold
+the page leaves out is never looked at. On 14 October 2026, 6,500 kept beams
+(7.8 TB) were held by folds the page had left out, 25 by folds it showed. A
+fold in the queue holds its beam until its latest verdict settles it; one the
+page has not triaged yet holds it while the campaign waits (see
+campaign.release_kept). The fold plots stay in the results either way, and a
+beam can be staged again from tape.
+
 Each beam's periodic evidence (its folds, and the peaks the veto removed) is
 recorded once in periodic-index.jsonl in the campaign root, so judging costs
 one read of a small file however large the campaign grows.
@@ -34,6 +44,7 @@ one read of a small file however large the campaign grows.
 Standard library only: the campaign driver runs on the head's own Python.
 """
 import bisect
+from contextlib import closing
 import json
 import math
 from pathlib import Path
@@ -47,6 +58,8 @@ INDEX = 'periodic-index.jsonl'
 SETTLED = ('rfi', 'noise', 'known')
 # Why a searched beam is kept while none of its run's periodic results can be read yet.
 AWAITING = 'periodic results not read yet'
+# Why a beam is kept for a fold the review page has not triaged yet.
+UNTRIAGED = 'not on the review page yet'
 ITEM = re.compile(r'(L\d+)_SAP(\d+)_BEAM(\d+)')
 MIN_DM = 2.0
 MAX_DM = 1000.0
@@ -258,6 +271,30 @@ class Index:
         self.runs.add(run_dir.name)
         return entries
 
+    def add_beam(self, run_dir, item, record=True):
+        """Read one beam's results of a run the index holds without them; returns its entry or None.
+        record=False takes it in memory only, leaving periodic-index.jsonl as it was.
+
+        A CPU tier's results can land after its run was indexed with the beams already there; such a
+        run is never read again, and on 14 October 2026 that held 813 kept beams for weeks.
+        """
+        run_dir = Path(run_dir)
+        outputs = {p.parent for name in ('periodicity_search_summary.json', 'periodicity_folded_candidates.jsonl')
+                   for p in run_dir.glob(f'*/processed/{item}/*/{name}')}
+        for output in sorted(outputs):
+            entry = beam_summary(output, run_dir.name)
+            if entry is None:
+                continue
+            if run_dir.name not in self._keys:
+                self._keys[run_dir.name] = run_candidate_keys(run_dir)
+            entry['sp_candidates'] = len(self._keys[run_dir.name].get(entry['item'], []))
+            if record:
+                with self.path.open('a') as stream:
+                    stream.write(json.dumps(entry, sort_keys=True) + '\n')
+            self._take(entry)
+            return entry
+        return None
+
     def backfill(self, results):
         """Add every run under results/ not indexed yet, and those whose results could not be read before."""
         added = []
@@ -302,6 +339,39 @@ def latest_verdicts(path):
         db.close()
 
 
+class ReviewPage:
+    """The web layer's index (web.sqlite) as the keep rule reads it.
+
+    triage: {fold key: 'strong' | 'deferred' | 'related'}, or None when the index is missing or holds no
+    triage (the page may be rebuilding it, and every fold would look untriaged).
+    """
+
+    def __init__(self, path):
+        self.path = Path(path) if path else None
+        self.triage = None
+        if self.path and self.path.is_file():
+            try:
+                with self._db() as db:
+                    self.triage = dict(db.execute('SELECT key, status FROM periodic_triage').fetchall()) or None
+            except sqlite3.Error:
+                self.triage = None
+
+    def _db(self):
+        return closing(sqlite3.connect(f'file:{self.path}?mode=ro', uri=True, timeout=60))
+
+    def read(self, item, run_name):
+        """Whether the page has indexed this run of the beam: a fold of it the page has not triaged by then
+        it never will."""
+        if self.triage is None:
+            return False
+        try:
+            with self._db() as db:
+                return db.execute('SELECT 1 FROM beam_runs WHERE item=? AND run_name=? LIMIT 1',
+                                  (item, run_name)).fetchone() is not None
+        except sqlite3.Error:
+            return False
+
+
 def settled_keys(verdicts):
     """Candidates whose latest verdict says there is nothing to keep data for (SETTLED)."""
     return frozenset(key for key, label in verdicts.items() if label in SETTLED)
@@ -321,13 +391,16 @@ def reviewed_items(path, index, labels=('astro', 'unsure'), verdicts=None):
 class Judge:
     """Decides, fold by fold, what keeps a filterbank; built once per decision round."""
 
-    def __init__(self, index, pulsars=None, settled=frozenset(), lines_cache=None):
-        """lines_cache: {observation: (signature, lines)} kept by the caller between judges. An
+    def __init__(self, index, pulsars=None, settled=frozenset(), lines_cache=None, triage=None):
+        """triage: ReviewPage.triage, or None to judge folds without the review page.
+
+        lines_cache: {observation: (signature, lines)} kept by the caller between judges. An
         observation's interference lines depend on its own peaks alone, so only an observation whose
         peaks changed is worked out again: on 7 October 2026 the whole campaign (588,585 peaks of 393
         observations) took 198 s, twice for every finished dispatch, while the driver did nothing else."""
         self.index = index
         self.settled = settled
+        self.triage = triage
         self.pulsars = psrcat.load() if pulsars is None else pulsars
         self._cones = {}
         # Interference lines: frequencies that formed a family across beams at
@@ -462,15 +535,38 @@ class Judge:
         keys = self.index.candidate_keys(beam)
         return sum(1 for key in keys if key not in self.settled) if keys else count
 
+    def on_page(self, fold, beam):
+        """What the review page made of a fold the rule keeps: None while the page shows it unjudged,
+        UNTRIAGED before the page has seen it, else why it holds nothing."""
+        if self.triage is None:
+            return None
+        key = periodic_key(beam, fold)
+        if key in self.settled:
+            return 'judged on the review page'
+        status = self.triage.get(key)
+        if status is None:
+            return UNTRIAGED
+        return None if status == 'strong' else f'review page: {status}'
+
     def keep(self, beam):
-        """(keep?, why): FETCH candidates without a settling verdict keep; else the first fold worth a look."""
+        """(keep?, why): FETCH candidates without a settling verdict keep; else the first fold worth a look
+        that the review page shows, else the first it has not triaged yet (why ends in UNTRIAGED)."""
         held = self.open_candidates(beam)
         if held:
             return True, f"{held} FETCH candidate(s)"
         reasons = [f"{beam['sp_candidates']} FETCH candidate(s) settled"] if beam.get('sp_candidates') else []
+        waiting = None
         for fold in beam['folds']:
             why = self.reason(fold, beam)
             if why is None:
-                return True, f"fold P={fold['period']:.6g} s DM {fold['dm']:g}"
+                held = f"fold P={fold['period']:.6g} s DM {fold['dm']:g}"
+                why = self.on_page(fold, beam)
+                if why is None:
+                    return True, held
+                if why == UNTRIAGED:
+                    waiting = waiting or f'{held}: {UNTRIAGED}'
+                    continue
             reasons.append(why)
+        if waiting:
+            return True, waiting
         return False, '; '.join(sorted(set(reasons))) or 'no folds'

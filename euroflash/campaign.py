@@ -955,37 +955,36 @@ class Campaign:
         A beam kept for a fold loses it when a later SAP of its observation
         shows the fold's frequency across beams at scattered DMs, or when the
         rule itself changed (`rekeep`). A FETCH candidate holds it until its
-        latest verdict is RFI, noise or a known source (findings.SETTLED);
-        beams whose candidates are all settled are judged again whatever their
-        observation, since the verdicts come later from the web layer, and so
-        are beams kept until their run's periodic results could be read
-        (findings.AWAITING). A reviewer's astro or unsure verdict on any
-        candidate of the beam always holds it.
+        latest verdict is RFI, noise or a known source (findings.SETTLED); a
+        beam kept until its run's periodic results could be read
+        (findings.AWAITING) is judged once they can. A reviewer's astro or
+        unsure verdict on any candidate of the beam always holds it.
+
+        Every kept beam is judged again each time, with the review page's
+        periodic triage (findings): the page triages a run only after its
+        dispatch. A beam held only while its periodic results are awaited, or
+        for a fold the page left untriaged after reading its run, is released
+        after --kept-grace-hours, and the oldest beams go
+        first, those awaited before those held, while the kept filterbanks
+        exceed --max-kept-tb. Kept data cost 0.7-1.2 TB a day on a disk shared
+        with other users (14 October 2026), and a released beam can be staged
+        again from tape.
         """
-        from euroflash.findings import AWAITING, latest_verdicts, reviewed_items, settled_keys
+        from euroflash.findings import (AWAITING, UNTRIAGED, ReviewPage, latest_verdicts, reviewed_items,
+                                        settled_keys)
         reviews = getattr(self.o, 'reviews', None) or self.root.parent/'web'/'reviews.sqlite'
+        web_index = getattr(self.o, 'web_index', None) or self.root.parent/'web'/'web.sqlite'
+        grace = getattr(self.o, 'kept_grace_hours', None)
+        budget = getattr(self.o, 'max_kept_tb', None)
         verdicts = latest_verdicts(reviews)
         judge = self.judge(settled_keys(verdicts))
+        page = ReviewPage(web_index)
+        judge.triage = page.triage
         protected = reviewed_items(reviews, judge.index, verdicts=verdicts)
-        released = []
-        for f in self.state.rows("SELECT * FROM files WHERE state='kept'"):
-            beams = [flattened(p) for p in json.loads(f['fil'] or '[]')]
-            entries = [judge.index.beams.get(b.stem) for b in beams]
-            if not beams or any(e is None for e in entries):
-                continue
-            awaiting = re.match(r'searched in (\S+); kept for review: ' + re.escape(AWAITING), f['detail'] or '')
-            if awaiting and not all(judge.index.read(b.stem, awaiting[1]) for b in beams):
-                continue      # its run's periodic results still cannot be read
-            if (observations is not None and not any(e['observation'] in observations for e in entries)
-                    and not awaiting
-                    and not any(e.get('sp_candidates') and not judge.open_candidates(e) for e in entries)):
-                continue
-            if any(b.stem in protected for b in beams):
-                continue
-            verdicts = [judge.keep(e) for e in entries]
-            if any(keep for keep, _ in verdicts):
-                continue
-            why = '; '.join(w for _, w in verdicts)
+        released, held, now = [], [], time.time()
+        kept_bytes = 0
+
+        def release(f, beams, why):
             released.append((f['name'], why))
             if apply:
                 for path in beams:
@@ -993,6 +992,53 @@ class Campaign:
                 self.state.set_file(f['surl'], state='searched',
                                     detail=f'released{" after " + run_name if run_name else ""}: {why}'[:2000])
                 self.state.event('released', f['name'], why)
+
+        for f in self.state.rows("SELECT * FROM files WHERE state='kept'"):
+            beams = [flattened(p) for p in json.loads(f['fil'] or '[]')]
+            if not beams:
+                continue
+            size = sum(p.stat().st_size for p in beams if p.exists())
+            run = re.match(r'searched in (\S+?);', f['detail'] or '')
+            for b in beams:      # results that landed after their run was indexed
+                entry = judge.index.beams.get(b.stem)
+                if run and (entry is None or entry['run'] < run[1]):
+                    judge.index.add_beam(self.root/'results'/run[1], b.stem, record=apply)
+            entries = [judge.index.beams.get(b.stem) for b in beams]
+            awaiting = re.match(r'searched in (\S+); kept for review: ' + re.escape(AWAITING), f['detail'] or '')
+            if any(b.stem in protected for b in beams):
+                kept_bytes += size
+                continue
+            if any(e is None for e in entries) or (awaiting and not all(judge.index.read(b.stem, awaiting[1])
+                                                                         for b in beams)):
+                # Its periodic results still cannot be read; its FETCH candidates hold it all the same.
+                held_by = 0
+                for b in beams if run else ():
+                    probe = {'item': b.stem, 'run': run[1]}
+                    probe['sp_candidates'] = len(judge.index.candidate_keys(probe))
+                    held_by += judge.open_candidates(probe)
+                keep, why = True, f'{held_by} FETCH candidate(s)' if held_by else AWAITING
+            else:
+                judged = [judge.keep(e) for e in entries]
+                keep = any(k for k, _ in judged)
+                why = next(w for k, w in judged if k) if keep else '; '.join(w for _, w in judged)
+            waiting = keep and (why == AWAITING or why.endswith(UNTRIAGED))
+            hours = (now - (f['updated'] or now)) / 3600
+            # A fold the page has not triaged waits out the grace only once the page has read its run: while
+            # the page lags or rebuilds its index, every fold looks untriaged.
+            expires = waiting and (why == AWAITING or (run and all(page.read(b.stem, run[1]) for b in beams)))
+            if expires and grace is not None and hours > grace:
+                keep, why = False, f'{why} after {hours:.0f} h'
+            if not keep:
+                release(f, beams, why)
+                continue
+            held.append((not waiting, f['updated'] or now, f, beams, size, why))
+            kept_bytes += size
+        if budget is not None:
+            for _, _, f, beams, size, why in sorted(held, key=lambda h: h[:2]):
+                if kept_bytes <= budget * 1e12:
+                    break
+                release(f, beams, f'over the kept budget of {budget:g} TB ({why})')
+                kept_bytes -= size
         return released
 
     def retried(self, key):
@@ -1157,6 +1203,17 @@ class Campaign:
         self.flatfield_pool.shutdown(wait=True)
 
 
+def add_keep_options(sub):
+    sub.add_argument('--web-index', type=Path,
+                     help="The web layer's index (default: web/web.sqlite beside the campaign root): a fold holds "
+                          'its beam only while the review page shows it')
+    sub.add_argument('--max-kept-tb', type=float, default=2.0,
+                     help='Release the oldest kept filterbanks beyond this size (astro or unsure ones never)')
+    sub.add_argument('--kept-grace-hours', type=float, default=48.0,
+                     help='Release a beam held only while the review page or its periodic results are awaited '
+                          'after this long')
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
@@ -1231,12 +1288,14 @@ def parser():
     run.add_argument('--reviews', type=Path,
                      help="The web layer's verdicts (default: web/reviews.sqlite beside the campaign root); "
                           'a beam with an astro or unsure verdict is never released')
+    add_keep_options(run)
     run.add_argument('--once', action='store_true', help='One pass, then exit')
     status = sub.add_parser('status', help='Print the campaign state summary')
     status.add_argument('--root', type=Path, required=True)
     rekeep = sub.add_parser('rekeep', help='Judge every kept beam again and list (--apply: release) what nothing holds')
     rekeep.add_argument('--root', type=Path, required=True)
     rekeep.add_argument('--reviews', type=Path, help='As for run')
+    add_keep_options(rekeep)
     rekeep.add_argument('--apply', action='store_true', help='Delete their filterbanks; without it, only list them')
     retry = sub.add_parser('retry', help='Queue SAPs in attention for another search of their unsearched beams')
     retry.add_argument('--root', type=Path, required=True)
@@ -1375,11 +1434,13 @@ def restage_lost(root, keys, reason):
     return queued
 
 
-def rekeep(root, reviews=None, apply=False):
+def rekeep(root, reviews=None, apply=False, web_index=None, max_kept_tb=None, kept_grace_hours=None):
     """Judge every kept beam under the current rule: what would be (or was) released."""
     root = Path(root)
     campaign = Campaign.__new__(Campaign)
-    campaign.root, campaign.o = root, SimpleNamespace(reviews=reviews, keep_prepared=False)
+    campaign.root = root
+    campaign.o = SimpleNamespace(reviews=reviews, keep_prepared=False, web_index=web_index, max_kept_tb=max_kept_tb,
+                                 kept_grace_hours=kept_grace_hours)
     campaign.state = State(root/'campaign-state.sqlite')
     kept = campaign.state.rows("SELECT COUNT(*) AS n FROM files WHERE state='kept'")[0]['n']
     released = campaign.release_kept(apply=apply)
@@ -1408,7 +1469,7 @@ def main(argv=None):
         print('Queued to be staged and searched again:', ' '.join(requeue_saps(a.root, a.keys, a.reason)) or 'nothing')
         return
     if a.command == 'rekeep':
-        print(json.dumps(rekeep(a.root, a.reviews, a.apply), indent=2))
+        print(json.dumps(rekeep(a.root, a.reviews, a.apply, a.web_index, a.max_kept_tb, a.kept_grace_hours), indent=2))
         return
     if a.command == 'release-requeued':
         print(json.dumps(release_requeued(a.root, a.apply)))
