@@ -56,6 +56,14 @@ DEFAULTS = {
     "multibeam_veto": False,
     "veto_bins": 1.1,
     "veto_beams": 4,
+    # Slow-pulsar lane, off when None: below `threshold`, templates with a period
+    # of at least min_period_seconds summed over at least min_harmonics harmonics
+    # still report peaks down to the lane's own threshold. Narrow slow pulsars
+    # spread their power over many harmonics, so they fold far above where they
+    # first appear; the GBNCC reanalysis (Sengar et al. 2026) found most of its 51
+    # pulsars that way, at spectral S/N 5-7 with 16-32 harmonics.
+    # Example: {"threshold": 9.0, "min_period_seconds": 0.3, "min_harmonics": 8}.
+    "slow_lane": None,
 }
 
 
@@ -88,6 +96,18 @@ def resolved_config(config=None):
         raise ValueError("periodicity.veto_bins must be in (0, 10]")
     if int(result["veto_beams"]) != result["veto_beams"] or result["veto_beams"] < 2:
         raise ValueError("periodicity.veto_beams must be an integer of at least 2")
+    lane = result["slow_lane"]
+    if lane is not None:
+        lane = {"threshold": float(lane["threshold"]), "min_period_seconds": float(lane["min_period_seconds"]),
+                "min_harmonics": lane["min_harmonics"]}
+        if not np.isfinite(lane["threshold"]) or not 0 < lane["threshold"] < result["threshold"]:
+            raise ValueError("periodicity.slow_lane.threshold must be positive and below periodicity.threshold")
+        if not np.isfinite(lane["min_period_seconds"]) or lane["min_period_seconds"] <= 0:
+            raise ValueError("periodicity.slow_lane.min_period_seconds must be finite and positive")
+        if int(lane["min_harmonics"]) != lane["min_harmonics"] or not 1 <= lane["min_harmonics"] <= 32:
+            raise ValueError("periodicity.slow_lane.min_harmonics must be an integer in 1..32")
+        lane["min_harmonics"] = int(lane["min_harmonics"])
+        result["slow_lane"] = lane
     return result
 
 
@@ -254,6 +274,12 @@ def search_trial(data, dt, config, stats=None):
             indices = np.rint(high_bins * (h / count)).astype(np.int64)
             summed += whitened[indices]
         cutoff = float(gammainccinv(count, 10. ** -config["threshold"]))
+        lane = config.get("slow_lane")
+        if lane and count >= lane["min_harmonics"]:
+            # Templates at or above the lane's period use its lower cutoff.
+            slow = high_bins / (2 * count) * resolution <= 1. / lane["min_period_seconds"]
+            cutoff = np.r_[np.inf, np.where(slow, float(gammainccinv(count, 10. ** -lane["threshold"])), cutoff),
+                           np.inf]
         # Padding permits peaks on BOTH limits, including a one-template range.
         peaks = find_peaks(np.r_[-np.inf, summed, -np.inf], height=cutoff)[0] - 1
         found += len(peaks)
@@ -274,6 +300,8 @@ def search_trial(data, dt, config, stats=None):
                 "observation_seconds": observed * dt, "fft_samples": int(n),
                 "effective_sampling_seconds": float(dt),
                 "rfi_like": bool(flagged), "rfi_harmonics": flagged})
+            if lane:
+                candidates[-1]["slow_lane"] = bool(score < config["threshold"])
     candidates, _ = thin_candidates(candidates, config["max_candidates_per_trial"])
     if stats is not None:
         stats.update(peaks_found=int(found), peaks_dropped=int(found - len(candidates)))

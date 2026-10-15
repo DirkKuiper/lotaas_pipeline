@@ -446,3 +446,51 @@ def test_the_dm_zero_trial_is_not_searched_after_the_zero_dm_filter(tmp_path):
     search = json.loads((tmp_path / "periodicity_search_summary.json").read_text())
     rows = [json.loads(line) for line in (tmp_path / "periodicity_raw_candidates.jsonl").read_text().splitlines()]
     assert search["trials_searched"] == 1 and rows and {row["dm"] for row in rows} == {1.0}
+
+
+SLOW_LANE = {"threshold": 9.0, "min_period_seconds": 0.3, "min_harmonics": 8}
+
+
+def pulse_train(dt, period, amplitude, width, n=65536, seed=11):
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) * dt
+    data = rng.normal(size=n)
+    data[(t % period) < width] += amplitude
+    return data.astype("float32")
+
+
+def test_slow_lane_reports_a_weak_narrow_slow_pulsar_below_the_threshold():
+    data = pulse_train(.01, 2.56, .40, .04)
+    near = lambda rows: [r for r in rows if abs(r["period_seconds"] / 2.56 - 1) < .01]
+    assert not near(search_trial(data, .01, config(period_min_seconds=.05)))
+    rows = near(search_trial(data, .01, config(period_min_seconds=.05, harmonics=[1, 2, 4, 8, 16, 32],
+                                                slow_lane=SLOW_LANE)))
+    best = max(rows, key=lambda r: r["statistic"])
+    assert best["slow_lane"] and 9 <= best["statistic"] < 12 and best["harmonic_count"] >= 8
+
+
+def test_slow_lane_leaves_fast_periods_at_the_main_threshold():
+    data = pulse_train(.002, .2, .22, .006)
+    near = lambda rows: [r for r in rows if abs(r["period_seconds"] / .2 - 1) < .01]
+    harmonics = [1, 2, 4, 8, 16, 32]
+    assert near(search_trial(data, .002, config(period_min_seconds=.05, harmonics=harmonics, threshold=9.0)))
+    assert not near(search_trial(data, .002, config(period_min_seconds=.05, harmonics=harmonics,
+                                                     slow_lane=SLOW_LANE)))
+
+
+def test_slow_lane_noise_at_full_observation_length():
+    cfg = resolved_config({"catalogue_match": False, "harmonics": [1, 2, 4, 8, 16, 32], "slow_lane": SLOW_LANE})
+    counts = [len(search_trial(np.random.default_rng(seed).normal(size=457728), .0078643197, cfg))
+              for seed in range(3)]
+    assert max(counts) <= 2
+
+
+def test_slow_lane_configuration_is_checked():
+    assert resolved_config({})["slow_lane"] is None
+    assert resolved_config({"slow_lane": SLOW_LANE})["slow_lane"] == SLOW_LANE
+    for bad in ({**SLOW_LANE, "threshold": 12.0}, {**SLOW_LANE, "min_period_seconds": 0},
+                {**SLOW_LANE, "min_harmonics": 0}, {**SLOW_LANE, "min_harmonics": 2.5}):
+        with pytest.raises(ValueError):
+            resolved_config({"slow_lane": bad})
+    rows = search_trial(pulse_train(.01, 2.56, .40, .04), .01, config(period_min_seconds=.05))
+    assert all("slow_lane" not in r for r in rows)
