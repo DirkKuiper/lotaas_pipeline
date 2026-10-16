@@ -21,8 +21,11 @@ DEFAULT = Path.home()/'.cache'/'psrqpy'/'psrcat_pkg.tar.gz'
 # Topocentric against catalogue period: Earth's orbit shifts it by up to 1e-4.
 PERIOD_TOLERANCE = 3e-4
 HARMONICS = 32          # P/n for n up to this
-MULTIPLES = 8           # m*P for m up to this
-FRACTIONS = [(m, n) for n in range(2, 5) for m in range(2, 5) if m % n and n % m]   # 2/3, 3/2, 3/4, ...
+# A fold at n/m times a pulsar's period holds it when the fold's n-th harmonic is the pulsar's m-th: since the
+# search sums 32 harmonics (16 October 2026) n reaches 32, and bright pulsars in their own beams fold at 23/4, 31/2,
+# 19/3 ... of their periods (B1541+09, B0450+55 and B1604-00 the first day, statistic 290-2015).
+MULTIPLES = 32          # m*P for m up to this
+FRACTIONS = [(m, n) for n in range(2, 5) for m in range(2, HARMONICS + 1) if m % n and n % m]   # 2/3, 3/2, 23/4, ...
 
 _cache = {}
 
