@@ -42,6 +42,8 @@ WAITING_SECONDS = 60
 # A dead index process is replaced after this long (on 15 October 2026 it died unnoticed at 22:36 and the pages
 # showed the morning's index for 16 hours).
 INDEX_RESTART_SECONDS = 30
+# A queue's order (without its verdicts) is kept this long for the review pages' previous/next.
+QUEUE_SECONDS = 120
 STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding', 'prepared', 'dispatched', 'partial',
                'searched', 'attention', 'incomplete']
 FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
@@ -769,7 +771,9 @@ def create_app(cfg, run_background=True):
         if kind == 'periodic':
             triage = params.get('triage', 'strong' if chosen == 'queue' else 'all')
             if triage in ('strong', 'deferred', 'related'):
-                clauses.append('EXISTS (SELECT 1 FROM periodic_triage t WHERE t.key=c.key AND t.status=?)')
+                # From the triage's own rows: as EXISTS the 823 strong folds took 6.6 s, a walk through all
+                # 402,000 periodic candidates (16 October 2026).
+                clauses.append('c.key IN (SELECT t.key FROM periodic_triage t WHERE t.status=?)')
                 args.append(triage)
         review = params.get('review', 'all')
         latest = '(SELECT label FROM r.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
@@ -789,19 +793,64 @@ def create_app(cfg, run_background=True):
 
     LATEST = '(SELECT label FROM r.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)'
 
-    def ordering(params):
+    def ordering(params, verdicts=True):
         """Candidates without a verdict first, then the chosen order, in every list and queue."""
         kind = params.get('kind') if params.get('kind') in KINDS else 'sp'
         # Among those, what would be extragalactic comes first (web.indexer.HALO_DM), and positives only
         # FETCH's model d passed come last (web.indexer.fetch_d_only).
-        return (f'({LATEST} IS NOT NULL), COALESCE(c.extragalactic, 0) DESC, COALESCE(c.d_only, 0), '
+        return ((f'({LATEST} IS NOT NULL), ' if verdicts else '')
+                + 'COALESCE(c.extragalactic, 0) DESC, COALESCE(c.d_only, 0), '
                 + ORDERS.get(params.get('sort'), ORDERS[KINDS[kind]['sort']]))
+
+    class Queues:
+        """A queue's order for the review pages, which every click needed: sorting it took 2.5 s (39,000
+        single-pulse candidates) on 16 October 2026. With the background loop running (the server) the order
+        without verdicts is kept QUEUE_SECONDS, and the verdicts are read again whenever reviews.sqlite changed,
+        so a verdict moves its candidate at once and only new candidates wait for the next sort."""
+
+        def __init__(self):
+            self.orders, self.labels = {}, (None, {})
+
+        def order(self, db, params):
+            """[(id, key)] in the queue's order, verdicts aside."""
+            key = tuple(sorted((k, str(v)) for k, v in params.items() if k not in ('review', 'page')))
+            kept = self.orders.get(key)
+            if kept is None or not waiting.looping or time.monotonic() - kept[0] > QUEUE_SECONDS:
+                where, args, _ = candidate_filter(dict(params, review='all'))
+                kept = (time.monotonic(), [tuple(r) for r in db.execute(
+                    f'SELECT c.id, c.key FROM candidates c WHERE {where} ORDER BY {ordering(params, False)}', args)])
+                self.orders[key] = kept
+            return kept[1]
+
+        def latest(self, db):
+            """Each reviewed candidate's latest label, by key."""
+            version = []
+            for path in (cfg.reviews_db, f'{cfg.reviews_db}-wal'):
+                try:
+                    s = os.stat(path)
+                    version.append((s.st_mtime_ns, s.st_size))
+                except OSError:
+                    version.append(None)
+            if self.labels[0] != version or not waiting.looping:
+                labels = {}
+                for k, label in db.execute('SELECT key, label FROM r.reviews ORDER BY created'):
+                    labels[k] = label
+                self.labels = (version, labels)
+            return self.labels[1]
+
+    queues = Queues()
 
     def queue_rows(db, params):
         """[(id, reviewed)] of a queue, in its order."""
-        where, args, _ = candidate_filter(params)
-        return [(r[0], r[1] is not None) for r in db.execute(
-            f'SELECT c.id, {LATEST} FROM candidates c WHERE {where} ORDER BY {ordering(params)}', args)]
+        review = params.get('review', 'all')
+        if review not in ('all', 'unreviewed'):
+            where, args, _ = candidate_filter(params)
+            return [(r[0], r[1] is not None) for r in db.execute(
+                f'SELECT c.id, {LATEST} FROM candidates c WHERE {where} ORDER BY {ordering(params)}', args)]
+        labels = queues.latest(db)
+        marked = [(cid, labels.get(key) is not None) for cid, key in queues.order(db, params)]
+        open_ = [m for m in marked if not m[1]]
+        return open_ if review == 'unreviewed' else open_ + [m for m in marked if m[1]]
 
     def queue_ids(db, params):
         return [cid for cid, _ in queue_rows(db, params)]

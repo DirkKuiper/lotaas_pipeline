@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS periodic_families (key TEXT PRIMARY KEY, family TEXT,
 CREATE INDEX IF NOT EXISTS periodic_families_family ON periodic_families(family);
 CREATE TABLE IF NOT EXISTS periodic_triage (key TEXT PRIMARY KEY, signature TEXT, score REAL,
     status TEXT, representative TEXT, members INTEGER, evidence TEXT, reasons TEXT);
+CREATE INDEX IF NOT EXISTS periodic_triage_status ON periodic_triage(status);
 
 CREATE TABLE IF NOT EXISTS sap_info (key TEXT PRIMARY KEY, observation TEXT, sap INTEGER, pointing TEXT,
     ra_deg REAL, dec_deg REAL, observed TEXT, beams_searched INTEGER, fingerprints TEXT,
