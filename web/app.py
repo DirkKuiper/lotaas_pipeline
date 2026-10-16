@@ -42,8 +42,10 @@ WAITING_SECONDS = 60
 # A dead index process is replaced after this long (on 15 October 2026 it died unnoticed at 22:36 and the pages
 # showed the morning's index for 16 hours).
 INDEX_RESTART_SECONDS = 30
-# A queue's order (without its verdicts) is kept this long for the review pages' previous/next.
+# A queue's order (without its verdicts) and the list pages' slow counts are kept this long, and renewed in the
+# background until no page has asked for them for QUEUE_IDLE_SECONDS.
 QUEUE_SECONDS = 120
+QUEUE_IDLE_SECONDS = 600
 STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding', 'prepared', 'dispatched', 'partial',
                'searched', 'attention', 'incomplete']
 FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
@@ -485,6 +487,7 @@ def create_app(cfg, run_background=True):
             while not stop.is_set():
                 try:
                     self.count()
+                    queues.renew()
                 except Exception:
                     logger.exception('Counting the waiting candidates failed')
                 self.wake.wait(WAITING_SECONDS)
@@ -806,24 +809,38 @@ def create_app(cfg, run_background=True):
         """A queue's order for the review pages, which every click needed: sorting it took 2.5 s (39,000
         single-pulse candidates) on 16 October 2026. With the background loop running (the server) the order
         without verdicts is kept QUEUE_SECONDS, and the verdicts are read again whenever reviews.sqlite changed,
-        so a verdict moves its candidate at once and only new candidates wait for the next sort."""
+        so a verdict moves its candidate at once and only new candidates wait for the next sort. The loop
+        renews what pages asked for in the last QUEUE_IDLE_SECONDS before it expires, so no page waits for it."""
 
         def __init__(self):
             self.orders, self.labels = {}, (None, {})
 
-        def kept(self, key, compute):
-            """compute(), kept QUEUE_SECONDS under key."""
+        def kept(self, db, key, compute):
+            """compute(db), kept QUEUE_SECONDS under key."""
+            now = time.monotonic()
             found = self.orders.get(key)
-            if found is None or not waiting.looping or time.monotonic() - found[0] > QUEUE_SECONDS:
-                found = (time.monotonic(), compute())
+            if found is None or not waiting.looping or now - found['made'] > QUEUE_SECONDS:
+                found = {'made': now, 'value': compute(db), 'compute': compute}
                 self.orders[key] = found
-            return found[1]
+            found['used'] = now
+            return found['value']
+
+        def renew(self):
+            now = time.monotonic()
+            for key, found in list(self.orders.items()):
+                if now - found['used'] > QUEUE_IDLE_SECONDS:
+                    self.orders.pop(key, None)
+            due = [(key, found) for key, found in list(self.orders.items()) if now - found['made'] > QUEUE_SECONDS / 2]
+            if due:
+                with store.reading(cfg) as db:
+                    for key, found in due:
+                        self.orders[key] = dict(found, made=time.monotonic(), value=found['compute'](db))
 
         def order(self, db, params):
             """[(id, key)] in the queue's order, verdicts aside."""
             where, args, _ = candidate_filter(dict(params, review='all'))
             order = ordering(params, False)
-            return self.kept(('order', where, order, *args), lambda: [tuple(r) for r in db.execute(
+            return self.kept(db, ('order', where, order, *args), lambda db: [tuple(r) for r in db.execute(
                 f'SELECT c.id, c.key FROM candidates c WHERE {where} ORDER BY {order}', args)])
 
         def latest(self, db):
@@ -886,7 +903,7 @@ def create_app(cfg, run_background=True):
                 if cached is not None:
                     return sum(cached.get(t, 0) for t in chosen_types(kind, params['type']))
                 shown, shown_args, _ = candidate_filter(dict(params, **overrides))
-                return queues.kept(('total', shown, *shown_args), lambda: db.execute(
+                return queues.kept(db, ('total', shown, *shown_args), lambda db: db.execute(
                     f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0])
             count = total()
             columns = f"""SELECT c.*, {latest} AS label,
@@ -930,7 +947,7 @@ def create_app(cfg, run_background=True):
             if kind == 'periodic':
                 all_where, all_args, _ = candidate_filter(dict(params, triage='all'))
                 # A walk through all 402,000 periodic candidates (8 s), so kept like a queue's order.
-                triage_counts = queues.kept(('triage', all_where, *all_args), lambda: dict(db.execute(
+                triage_counts = queues.kept(db, ('triage', all_where, *all_args), lambda db: dict(db.execute(
                     f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)
                     FROM candidates c LEFT JOIN periodic_triage t ON t.key=c.key
                     WHERE {all_where} GROUP BY t.status''', all_args).fetchall()))
