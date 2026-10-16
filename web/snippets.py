@@ -189,8 +189,8 @@ class Snippets:
     def _existing(self):
         return {p.stem.rsplit('_', 1)[-1] for p in self.cfg.snippets.glob('*.fil')}
 
-    def _cut_all(self, index, detections, source, how):
-        existing = self._existing()
+    def _cut_all(self, index, detections, source, how, existing=None):
+        existing = self._existing() if existing is None else existing
         made = 0
         for detection in detections:
             if short_id(detection['key']) in existing:
@@ -213,6 +213,7 @@ class Snippets:
         cut_count = released = 0
         if not self.cfg.held.is_dir():
             return 0, 0
+        existing = self._existing()
         with self._index() as index:
             for sap_dir in self.cfg.held.iterdir():
                 sap = saps.get(sap_dir.name)
@@ -238,7 +239,7 @@ class Snippets:
                         if latest['id'] is None:
                             continue      # searched, but its records are not merged yet
                         detections = self._wanted(index, 'd.beam_run_id=?', (latest['id'],))
-                        cut_count += self._cut_all(index, detections, held, 'held')
+                        cut_count += self._cut_all(index, detections, held, 'held', existing)
                     held.unlink()
                     released += 1
                 if not any(sap_dir.iterdir()):
@@ -270,12 +271,17 @@ class Snippets:
         with self._index() as index:
             detections = [d for d in self._wanted(index, '1=1', ())
                           if short_id(d['key']) not in existing and d['item'] in self.sources]
+            # Newest first, the ones waiting for review. One listing of the snippets for the whole pass, and copies
+            # the campaign released since the last scan skipped: on 16 October 2026 a listing per detection
+            # (408,000 files) and the released beams of a 16-hour backlog cut fewer than one snippet a minute.
+            detections.sort(key=lambda d: d['id'], reverse=True)
             for detection in detections:
                 # Prefer the campaign's own and held copies, then any other.
-                sources = sorted(self.sources[detection['item']],
+                sources = sorted((p for p in self.sources[detection['item']] if p.exists()),
                                  key=lambda p: (self.cfg.held not in p.parents,
                                                 self.cfg.campaign_root not in p.parents, str(p)))
-                made += self._cut_all(index, [detection], sources[0], 'found on disk')
+                if sources:
+                    made += self._cut_all(index, [detection], sources[0], 'found on disk', existing)
         return made
 
     def run_pass(self):
