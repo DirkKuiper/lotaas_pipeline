@@ -811,16 +811,20 @@ def create_app(cfg, run_background=True):
         def __init__(self):
             self.orders, self.labels = {}, (None, {})
 
+        def kept(self, key, compute):
+            """compute(), kept QUEUE_SECONDS under key."""
+            found = self.orders.get(key)
+            if found is None or not waiting.looping or time.monotonic() - found[0] > QUEUE_SECONDS:
+                found = (time.monotonic(), compute())
+                self.orders[key] = found
+            return found[1]
+
         def order(self, db, params):
             """[(id, key)] in the queue's order, verdicts aside."""
-            key = tuple(sorted((k, str(v)) for k, v in params.items() if k not in ('review', 'page')))
-            kept = self.orders.get(key)
-            if kept is None or not waiting.looping or time.monotonic() - kept[0] > QUEUE_SECONDS:
-                where, args, _ = candidate_filter(dict(params, review='all'))
-                kept = (time.monotonic(), [tuple(r) for r in db.execute(
-                    f'SELECT c.id, c.key FROM candidates c WHERE {where} ORDER BY {ordering(params, False)}', args)])
-                self.orders[key] = kept
-            return kept[1]
+            where, args, _ = candidate_filter(dict(params, review='all'))
+            order = ordering(params, False)
+            return self.kept(('order', where, order, *args), lambda: [tuple(r) for r in db.execute(
+                f'SELECT c.id, c.key FROM candidates c WHERE {where} ORDER BY {order}', args)])
 
         def latest(self, db):
             """Each reviewed candidate's latest label, by key."""
@@ -882,9 +886,10 @@ def create_app(cfg, run_background=True):
                 if cached is not None:
                     return sum(cached.get(t, 0) for t in chosen_types(kind, params['type']))
                 shown, shown_args, _ = candidate_filter(dict(params, **overrides))
-                return db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0]
+                return queues.kept(('total', shown, *shown_args), lambda: db.execute(
+                    f'SELECT COUNT(*) FROM candidates c WHERE {shown}', shown_args).fetchone()[0])
             count = total()
-            found = rows(db, f"""SELECT c.*, {latest} AS label,
+            columns = f"""SELECT c.*, {latest} AS label,
                     (SELECT COUNT(*) FROM r.reviews v WHERE v.key=c.key) AS reviews, p.row AS fold_row,
                     (SELECT (b.nu_min + b.nu_max) / 2 FROM beams b WHERE b.item=c.item LIMIT 1) AS centre_mhz,
                     f.beams AS family_beams, f.saps AS family_saps, f.dm_min AS family_dm_min,
@@ -898,8 +903,17 @@ def create_app(cfg, run_background=True):
                 LEFT JOIN periodic_families f ON f.key=c.key
                 LEFT JOIN periodic_triage t ON t.key=c.key
                 LEFT JOIN sp_coincidence x ON x.key=c.key
-                LEFT JOIN sp_known k ON k.key=c.key WHERE {where}
-                ORDER BY {ordering(params)} LIMIT 100 OFFSET ?""", *args, (number_ - 1) * 100)
+                LEFT JOIN sp_known k ON k.key=c.key"""
+            if params.get('review', 'all') in ('all', 'unreviewed'):
+                # The page's hundred from the queue's kept order: sorting all 39,000 single-pulse candidates
+                # for each page took 2.9 s (16 October 2026).
+                ids = [cid for cid, _ in queue_rows(db, params)][(number_ - 1) * 100:number_ * 100]
+                at = {cid: i for i, cid in enumerate(ids)}
+                found = sorted(rows(db, f"{columns} WHERE c.id IN ({','.join('?' * len(ids))})", *ids),
+                               key=lambda c: at[c['id']])
+            else:
+                found = rows(db, f"{columns} WHERE {where} ORDER BY {ordering(params)} LIMIT 100 OFFSET ?",
+                             *args, (number_ - 1) * 100)
             # Counts per type under the other filters, for the type selector.
             types = counted(db, params) if kind == 'sp' else None
             if types is None:
@@ -915,9 +929,11 @@ def create_app(cfg, run_background=True):
                 known_hidden = total(known='include') - count
             if kind == 'periodic':
                 all_where, all_args, _ = candidate_filter(dict(params, triage='all'))
-                triage_counts = dict(db.execute(f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)
+                # A walk through all 402,000 periodic candidates (8 s), so kept like a queue's order.
+                triage_counts = queues.kept(('triage', all_where, *all_args), lambda: dict(db.execute(
+                    f'''SELECT COALESCE(t.status, 'pending'), COUNT(*)
                     FROM candidates c LEFT JOIN periodic_triage t ON t.key=c.key
-                    WHERE {all_where} GROUP BY t.status''', all_args).fetchall())
+                    WHERE {all_where} GROUP BY t.status''', all_args).fetchall()))
         if kind == 'periodic':
             for c in found:
                 c.update(fold_summary(c))
