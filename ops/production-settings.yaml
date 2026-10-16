@@ -63,7 +63,11 @@ periodicity:
   enabled: true
   period_min_seconds: 0.016
   period_max_seconds: 300.0
-  harmonics: [1, 2, 4, 8, 16]
+  # Up to 32 harmonics since 16 October 2026: narrow slow pulsars keep power beyond the 16th harmonic. In the
+  # slow-lane pilot (benchmarks/slow-lane-pilot-2026-10-15, 1,387 early-cycle beams) the 32-harmonic sum found
+  # four catalogued pulsars the 16-harmonic search missed (J1838+1650 11.5 -> 22.7, J0546+2441, J0108+6905,
+  # J1649+2533) and lost none, for 40% more periodicity search time; J1740+48 went 13.6 -> 14.6.
+  harmonics: [1, 2, 4, 8, 16, 32]
   threshold: 12.0  # nominal -log10 Gamma tail; not Gaussian sigma
   red_noise_window_bins: 257
   rfi_frequencies_hz: [1.0, 50.0, 60.0]
