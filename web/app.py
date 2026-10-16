@@ -37,6 +37,11 @@ from web.store import LABELS
 logger = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 COOKIE = 'lotaas_web'
+# The navigation's waiting counts are recounted this often in the background, and at once after a verdict.
+WAITING_SECONDS = 60
+# A dead index process is replaced after this long (on 15 October 2026 it died unnoticed at 22:36 and the pages
+# showed the morning's index for 16 hours).
+INDEX_RESTART_SECONDS = 30
 STATE_ORDER = ['not_queued', 'pending', 'staging', 'processing', 'flatfielding', 'prepared', 'dispatched', 'partial',
                'searched', 'attention', 'incomplete']
 FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'converted', 'searched', 'kept', 'failed', 'excluded']
@@ -379,22 +384,41 @@ def create_app(cfg, run_background=True):
     secret = token(cfg) if cfg.auth else None
     @asynccontextmanager
     async def lifespan(app):
-        worker = None
+        current = {}
         if run_background:
             # Not a thread: the index pass is mostly Python, and a page sharing its
             # interpreter waits for it at every row and file it reads (the overview's
             # stat of 4,057 kept filterbanks: 0.05 s alone, 55 s beside a pass).
             context = multiprocessing.get_context('spawn')
             stop = context.Event()
-            worker = context.Process(target=index_process, args=(cfg, stop, os.getpid()), daemon=True,
-                                     name='index')
-            worker.start()
+
+            def start():
+                current['worker'] = context.Process(target=index_process, args=(cfg, stop, os.getpid()),
+                                                    daemon=True, name='index')
+                current['worker'].start()
+
+            def supervise():
+                # A negative exit code is the signal that ended it (-9: killed, as by the kernel's OOM killer).
+                while not stop.is_set():
+                    worker = current['worker']
+                    worker.join(timeout=WAITING_SECONDS)
+                    if worker.is_alive() or stop.is_set():
+                        continue
+                    logger.error('Index process exited with code %s; another starts in %d s', worker.exitcode,
+                                 INDEX_RESTART_SECONDS)
+                    if not stop.wait(INDEX_RESTART_SECONDS):
+                        start()
+
+            start()
+            threading.Thread(target=supervise, daemon=True, name='index-watch').start()
+            threading.Thread(target=waiting.loop, args=(stop,), daemon=True, name='waiting').start()
         yield
-        if worker is not None:
+        if current.get('worker') is not None:
             stop.set()
-            worker.join(timeout=10)
-            if worker.is_alive():
-                worker.terminate()
+            waiting.wake.set()
+            current['worker'].join(timeout=10)
+            if current['worker'].is_alive():
+                current['worker'].terminate()
 
     app = FastAPI(title='LOTAAS campaign', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     templates = Jinja2Templates(directory=str(HERE / 'templates'))
@@ -426,17 +450,52 @@ def create_app(cfg, run_background=True):
             return response
         return HTMLResponse(templates.get_template('login.html').render(), status_code=401)
 
+    class Waiting:
+        """What waits for a person, for the navigation of every page. Counting it took 11 s over 555,000
+        candidates on 16 October 2026, which every page paid; with the background loop running (the server),
+        pages read the last count, recounted every WAITING_SECONDS and at once after a verdict. Without it
+        (tests) a page counts whenever a verdict made the last count stale."""
+
+        def __init__(self):
+            self.value, self.wake, self.looping = None, threading.Event(), False
+
+        def count(self):
+            with store.reading(cfg) as db:
+                counts = {}
+                for kind in KINDS:
+                    where, args, _ = candidate_filter({'kind': kind, 'review': 'unreviewed'})
+                    counts[kind] = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {where}', args).fetchone()[0]
+                counts['findings'] = len(findings_summary(db)[2])
+            self.value = counts
+            return counts
+
+        def get(self):
+            return self.value if self.value is not None else self.count()
+
+        def stale(self):
+            if self.looping:
+                self.wake.set()
+            else:
+                self.value = None
+
+        def loop(self, stop):
+            self.looping = True
+            while not stop.is_set():
+                try:
+                    self.count()
+                except Exception:
+                    logger.exception('Counting the waiting candidates failed')
+                self.wake.wait(WAITING_SECONDS)
+                self.wake.clear()
+
+    waiting = Waiting()
+
     def page(request, name, **context):
         with store.reading(cfg) as db:
             health = meta(db, 'health', {})
             last = meta(db, 'last_index', {})
-            waiting = {}
-            for kind in KINDS:
-                where, args, _ = candidate_filter({'kind': kind, 'review': 'unreviewed'})
-                waiting[kind] = db.execute(f'SELECT COUNT(*) FROM candidates c WHERE {where}', args).fetchone()[0]
-            waiting['findings'] = len(findings_summary(db)[2])
         return templates.TemplateResponse(request, name, dict(
-            context, health=health, last_index=last, waiting=waiting, path=request.url.path))
+            context, health=health, last_index=last, waiting=waiting.get(), path=request.url.path))
 
     # ---------------------------------------------------------- overview
     def catalogue_scope(request, forecast):
@@ -1008,6 +1067,7 @@ def create_app(cfg, run_background=True):
             history = rows(db, 'SELECT * FROM findings WHERE source=? ORDER BY created DESC', source)
         finally:
             db.close()
+        waiting.stale()
         return JSONResponse(clean({'findings': history}))
 
     # ------------------------------------------------ pulsars LOFAR has not seen
@@ -1197,6 +1257,7 @@ def create_app(cfg, run_background=True):
             history = rows(db, 'SELECT * FROM reviews WHERE key=? ORDER BY created DESC', row['key'])
         finally:
             db.close()
+        waiting.stale()
         return JSONResponse(clean({'reviews': history}))
 
     @app.get('/plot/{plot_id}')

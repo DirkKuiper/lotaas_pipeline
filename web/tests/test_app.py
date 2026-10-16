@@ -115,6 +115,21 @@ def test_what_fetch_rejected_but_its_own_data_show_dispersed_is_queued_with_its_
     assert 'beyond the Milky Way' in client.get(first.headers['location']).text
 
 
+def test_the_navigation_count_follows_a_verdict_at_once(cfg, campaign):
+    # The count is kept between pages (it took 11 s a page on 16 October 2026); a verdict makes it stale.
+    import re
+    Indexer(cfg).run_pass()
+    client = client_for(cfg)
+    badge = lambda: int((re.search(r'Single pulse<span class="badge-count">(\d+)', client.get('/limits').text)
+                         or [0, 0])[1])
+    before = badge()
+    assert before >= 1
+    cid = Indexer(cfg).db.execute("SELECT id FROM candidates WHERE type='candidate'").fetchone()[0]
+    assert badge() == before                                       # read from the kept count
+    assert client.post('/api/review', json={'id': cid, 'label': 'rfi', 'reviewer': 'dk'}).status_code == 200
+    assert badge() == before - 1
+
+
 def test_reviews_are_kept_apart_and_validated(cfg, campaign):
     Indexer(cfg).run_pass()
     client = client_for(cfg)
