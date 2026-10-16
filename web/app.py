@@ -518,11 +518,13 @@ def create_app(cfg, run_background=True):
         with store.reading(cfg) as db:
             saps = dict(db.execute('SELECT state, COUNT(*) FROM saps GROUP BY state').fetchall())
             files = dict(db.execute('SELECT state, COUNT(*) FROM files GROUP BY state').fetchall())
-            beams_searched = db.execute("""SELECT COUNT(DISTINCT item) FROM attempts
-                WHERE stage='classify' AND status='success'""").fetchone()[0]
-            campaign_beams = db.execute("""SELECT COUNT(DISTINCT a.item) FROM attempts a
-                JOIN runs r ON r.fingerprint=a.fingerprint
-                WHERE a.stage='classify' AND a.status='success' AND r.pilot=0""").fetchone()[0]
+            # Two walks through every attempt (1.1 s), kept like a queue's order.
+            beams_searched, campaign_beams = queues.kept(db, ('beams searched',), lambda db: (
+                db.execute("""SELECT COUNT(DISTINCT item) FROM attempts
+                    WHERE stage='classify' AND status='success'""").fetchone()[0],
+                db.execute("""SELECT COUNT(DISTINCT a.item) FROM attempts a
+                    JOIN runs r ON r.fingerprint=a.fingerprint
+                    WHERE a.stage='classify' AND a.status='success' AND r.pilot=0""").fetchone()[0]))
             hours = 48
             forecast = meta(db, 'forecast', {})
             rate = next((r for r in forecast.get('rates', []) if r['hours'] == 24), {})
@@ -538,9 +540,13 @@ def create_app(cfg, run_background=True):
                                  "ORDER BY updated DESC")
             events = rows(db, 'SELECT * FROM events ORDER BY time DESC LIMIT 40')
             dispatched = rows(db, "SELECT key, run_name, updated FROM saps WHERE state='dispatched'")
-            review = rows(db, """SELECT c.*, (SELECT label FROM r.reviews v WHERE v.key=c.key
-                ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.type IN ('candidate', 'dispersed')
-                ORDER BY c.found DESC LIMIT 8""")
+            # Which eight are newest is a walk through every candidate (1 s), kept like a queue's order; their
+            # verdicts are read fresh.
+            newest = queues.kept(db, ('newest',), lambda db: [r[0] for r in db.execute(
+                "SELECT id FROM candidates WHERE type IN ('candidate', 'dispersed') ORDER BY found DESC LIMIT 8")])
+            review = rows(db, f"""SELECT c.*, (SELECT label FROM r.reviews v WHERE v.key=c.key
+                ORDER BY created DESC LIMIT 1) AS label FROM candidates c WHERE c.id IN ({','.join('?' * len(newest))})
+                ORDER BY c.found DESC""", *newest)
             _, lotaas = lotaas_summary(db)
             _, pulsars = pulsar_summary(db)
             recorded, _, leads = findings_summary(db)
