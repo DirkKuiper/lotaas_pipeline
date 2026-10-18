@@ -27,6 +27,7 @@ class FakeStageIT:
     def __init__(self):
         self.requests, self.online, self.next = {}, set(), 5000
         self.final = False
+        self.errors = {}                    # file name -> StageIT's error message for it
 
     def submit(self, surls):
         self.next += 1
@@ -37,8 +38,9 @@ class FakeStageIT:
         files = self.requests[request_id]
         online = [s for s in files if C.basename(s) in self.online]
         done = self.final or len(online) == len(files)
+        errors = {s: self.errors[C.basename(s)] for s in files if C.basename(s) in self.errors}
         return {'currentStatus': 'success' if done else 'in progress',
-                'response': json.dumps({'online': online, 'errors': {}})}
+                'response': json.dumps({'online': online, 'errors': errors})}
 
     def downloads(self, request_id):
         return {'request_id': request_id,
@@ -1142,3 +1144,59 @@ def test_a_stopping_driver_leaves_running_dispatches_to_the_next(tmp_path, monke
     campaign.stopping = True
     campaign.run()
     assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'dispatched', 'adopted by the next driver'
+
+
+def test_a_stageit_credential_failure_does_not_count_against_the_file(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], max_submissions=2)
+    campaign.tick()
+    bounced, lost = (C.basename(surl('1000001', 0, beam)) for beam in (20, 21))
+    # As on 16-18 October 2026: StageIT's own credential at SURF fails whole requests, and a file SURF does not hold.
+    api.errors = {bounced: '[Tape REST API] Stage pooling call failed: HTTP 401 : Authentication Error ',
+                  lost: '[Tape REST API] CacheException(rc=10001;msg=No such file or directory /pnfs/grid.sara.nl/...)'}
+    for _ in range(4):
+        campaign.tick()
+    files = {f['name']: f for f in campaign.state.rows('SELECT * FROM files')}
+    assert files[bounced]['state'] == 'requested' and files[bounced]['submissions'] == 1
+    assert files[lost]['state'] == 'failed' and 'No such file' in files[lost]['detail']
+    restaged = campaign.state.rows("SELECT detail FROM events WHERE kind='restage' AND subject=?", bounced)
+    assert len(restaged) == 4 and all(e['detail'].endswith('HTTP 401 : Authentication Error (not counted)')
+                                      for e in restaged)
+    # Once StageIT recovers, the file is staged as any other.
+    api.errors = {}
+    put_online(api, where, '1000001', 0, [20])
+    campaign.tick()
+    assert campaign.state.rows('SELECT state FROM files WHERE name=?', bounced)[0]['state'] == 'converted'
+
+
+@pytest.mark.parametrize('stalled_missing, state', [(None, 'staging'), (15, 'prepared')])
+def test_a_sap_stalled_further_short_than_the_lost_beam_limit_is_searched_with_stalled_missing(
+        tmp_path, monkeypatch, stalled_missing, state):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], partial_after_hours=2.0,
+                                 partial_missing=3, stalled_missing=stalled_missing)
+    campaign.tick()
+    late = list(range(20, 30))                       # half a tape SURF has not recalled
+    put_online(api, where, '1000001', 0, [b for b in FULL if b not in late])
+    campaign.tick()
+    settle(campaign)
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'staging'
+    with campaign.state.db() as db:                  # two hours without an arrival
+        db.execute("UPDATE files SET updated=updated-7300 WHERE state='converted'")
+    settle(campaign)
+    settle(campaign)
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == state
+    if state == 'prepared':
+        assert str(late) in campaign.state.rows("SELECT detail FROM events WHERE kind='partial'")[0]['detail']
+
+
+def test_stalled_missing_leaves_the_lost_beam_limit_alone(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], partial_after_hours=2.0,
+                                 partial_missing=3, stalled_missing=15, max_submissions=1)
+    campaign.tick()
+    lost = [20, 21, 22, 23]
+    api.errors = {C.basename(surl('1000001', 0, b)): 'CacheException(rc=10001;msg=No such file or directory)'
+                  for b in lost}
+    put_online(api, where, '1000001', 0, [b for b in FULL if b not in lost])
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT state,detail FROM saps')[0]
+    assert sap == {'state': 'attention', 'detail': f'central beams not retrieved: {lost}'}

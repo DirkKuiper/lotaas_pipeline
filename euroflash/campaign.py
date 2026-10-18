@@ -55,7 +55,11 @@ CENTRAL = range(13, 74)
 MEAN = 'flatfield-mean.npy'
 OUTSTANDING = ('pending', 'requested', 'online', 'working')
 FINAL = {'success', 'failed', 'aborted', 'partial success'}
-NAME = re.compile(r'^L(\d+)_SAP(\d+)_B(\d+)_')
+# StageIT errors that are not the file's: its own credential towards SURF's Tape REST API ("Stage pooling call
+# failed: HTTP 401 : Authentication Error") failed 42 of 98 requests whole on 16-18 October 2026, and four such
+# bounces in a row marked the 20 beams of L1235632_SAP001 failed. They are retried without counting a submission.
+NOT_THE_FILE = ('HTTP 401',)
+NAME =re.compile(r'^L(\d+)_SAP(\d+)_B(\d+)_')
 # SPIDER SAPs are positioned after every LTA SAP: LT5_004 keeps first claim on the GPUs.
 SPIDER_POSITION = 10**6
 
@@ -442,6 +446,8 @@ class Campaign:
             errors = response.get('errors') or {}
             error_names = {basename(k) for k in (errors if isinstance(errors, (dict, list)) else [])
                            if isinstance(k, str)}
+            messages = {basename(k): str(v) for k, v in errors.items() if isinstance(k, str)} \
+                if isinstance(errors, dict) else {}
             final_seen = request['final_seen'] or (now if current in FINAL else None)
             with self.state.db() as db:
                 db.execute('UPDATE requests SET status=?,checked=?,final_seen=? WHERE id=?',
@@ -449,7 +455,10 @@ class Campaign:
             files = self.state.rows("SELECT * FROM files WHERE request_id=? AND state='requested'", request['id'])
             for f in files:
                 if f['name'] in error_names:
-                    self.retry(f, f'StageIT reported an error for this file (request {request["id"]})')
+                    message = messages.get(f['name'], '')
+                    self.retry(f, f'StageIT reported an error for this file (request {request["id"]})'
+                                  + (f': {message.strip()}' if message else ''),
+                               counted=not any(m in message for m in NOT_THE_FILE))
             files = [f for f in files if f['name'] not in error_names]
             hinted = [f for f in files if f['name'] in online or current in FINAL]
             due = [f for f in hinted if not f['checked'] or now - f['checked'] >= self.o.locality_interval]
@@ -478,14 +487,19 @@ class Campaign:
                     self.retry(f, f'not on disk {self.o.restage_after_hours} h after request {request["id"]} '
                                   f'reported {current or "no status"} (dCache: {f["locality"]})')
 
-    def retry(self, f, reason):
-        """Back to 'pending' for another request, or 'failed' after too many."""
-        if f['submissions'] >= self.o.max_submissions:
+    def retry(self, f, reason, counted=True):
+        """Back to 'pending' for another request, or 'failed' after too many. A failure that is not the file's
+        (`counted` False) gives the submission back, so it never brings the file nearer to 'failed'."""
+        if counted and f['submissions'] >= self.o.max_submissions:
             self.state.set_file(f['surl'], state='failed', detail=str(reason))
             self.state.event('file_failed', f['name'], reason)
-        else:
+        elif counted:
             self.state.set_file(f['surl'], state='pending', detail=str(reason), checked=None)
             self.state.event('restage', f['name'], reason)
+        else:
+            self.state.set_file(f['surl'], state='pending', detail=str(reason), checked=None,
+                                submissions=max(0, f['submissions'] - 1))
+            self.state.event('restage', f['name'], f'{reason} (not counted)')
 
     # ---------------------------------------------------------- retrieval
     def retrieve(self):
@@ -724,9 +738,12 @@ class Campaign:
         return {'level_rows': 'auto'} if sap.get('source') == 'spider' else {'level_rows': str(LT5_BLOCK)}
 
     def stalled(self, files, outstanding, now):
-        """A few beams short, with no beam of the SAP converted for --partial-after-hours."""
+        """At most --stalled-missing beams short, with no beam of the SAP converted for --partial-after-hours."""
         hours = getattr(self.o, 'partial_after_hours', 0)
-        if not hours or len(outstanding) > getattr(self.o, 'partial_missing', 0):
+        limit = getattr(self.o, 'stalled_missing', None)
+        if limit is None:
+            limit = getattr(self.o, 'partial_missing', 0)
+        if not hours or len(outstanding) > limit:
             return False
         done = [f['updated'] or 0 for f in files if f['state'] == 'converted']
         return bool(done) and now - max(done) >= hours * 3600
@@ -1259,10 +1276,14 @@ def parser():
     run.add_argument('--exclude-beams', type=int, nargs='+', default=[12],
                      help='Beams never staged, converted or searched (default: 12, the incoherent beam)')
     run.add_argument('--partial-after-hours', type=float, default=2.0,
-                     help='Search a SAP without its last --partial-missing beams once none has arrived for this long; '
+                     help='Search a SAP without its last --stalled-missing beams once none has arrived for this long; '
                           'the late ones are searched as they come (0 waits for every beam)')
     run.add_argument('--partial-missing', type=int, default=3,
-                     help='Beams a SAP may still be waiting for, or have lost, and be searched without')
+                     help='Central beams a SAP may have lost and be searched without')
+    run.add_argument('--stalled-missing', type=int, default=None,
+                     help='Beams a SAP may still be waiting for after --partial-after-hours and be searched without '
+                          '(default: --partial-missing). SURF recalling half an observation and stalling on the '
+                          'rest (18 October 2026) left every staging SAP 4-39 beams short')
     run.add_argument('--max-missing-central', type=int, default=3,
                      help='Stage and search a SAP whose archive lacks up to this many central beams')
     run.add_argument('--keep-unflattened', action='store_true')
