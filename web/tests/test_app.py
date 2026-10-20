@@ -152,15 +152,18 @@ def test_reviews_are_kept_apart_and_validated(cfg, campaign):
 def test_a_period_in_many_beams_is_rfi_unless_it_keeps_one_dm(cfg, campaign):
     beam_dir = campaign['beam_dir']
 
-    def beam(number):
+    def beam(number, declination='+68:24:59.00'):
         path = beam_dir.parents[1] / ITEM.replace('BEAM025', f'BEAM{number:03d}') / beam_dir.name
         path.mkdir(parents=True, exist_ok=True)
-        (path / 'metadata.json').write_text((beam_dir / 'metadata.json').read_text())
+        metadata = json.loads((beam_dir / 'metadata.json').read_text())
+        metadata['observation_info']['DEC (J2000)'] = declination
+        (path / 'metadata.json').write_text(json.dumps(metadata))
         return path
 
-    # Narrowband RFI: the same 5.93 s in five beams, at whatever DM each trial happened to have.
-    for number, dm in ((25, 1.0), (30, 40.7), (31, 700.0), (40, 3100.0), (41, 0.0)):
-        fold(beam(number), dm, 5.9323 * (1 + 1e-4 * (number % 3)), 20.0, f'rfi{number}')
+    # Narrowband RFI: the same 5.93 s in five beams across the SAP, at whatever DM each trial happened to have.
+    for number, dm, declination in ((25, 1.0, '+68:24:59.00'), (30, 40.7, '+69:24:59.00'), (31, 700.0, '+67:24:59.00'),
+                                    (40, 3100.0, '+70:04:59.00'), (41, 0.0, '+66:54:59.00')):
+        fold(beam(number, declination), dm, 5.9323 * (1 + 1e-4 * (number % 3)), 20.0, f'rfi{number}')
     # A bright pulsar in four neighbouring beams, at one DM.
     for number in (50, 51, 52, 53):
         fold(beam(number), 26.2 + 0.1 * (number % 2), 3.0317926, 50.0, f'psr{number}')

@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS periodic (key TEXT PRIMARY KEY, dir TEXT, item TEXT, 
 CREATE INDEX IF NOT EXISTS periodic_item ON periodic(item);
 -- Folds of one observation that share a period, across its beams and SAPs.
 CREATE TABLE IF NOT EXISTS periodic_families (key TEXT PRIMARY KEY, family TEXT, beams INTEGER, saps INTEGER,
-    dm_min REAL, dm_max REAL);
+    dm_min REAL, dm_max REAL, radius REAL);
 CREATE INDEX IF NOT EXISTS periodic_families_family ON periodic_families(family);
 CREATE TABLE IF NOT EXISTS periodic_triage (key TEXT PRIMARY KEY, signature TEXT, score REAL,
     status TEXT, representative TEXT, members INTEGER, evidence TEXT, reasons TEXT);
@@ -200,6 +200,8 @@ RETIRED = {'candidates': ('slack_sent',), 'reviews': ('slack_ts',)}
 # Columns added since, given to databases made before them: a SAP's source is 'lta' or
 # 'spider' (early-cycle beams fetched from SPIDER, euroflash.spider).
 ADDED = {'saps': (('source', "TEXT DEFAULT 'lta'"),),
+         # How far a periodic family's beams lie from its strongest fold's beam, in degrees (20 October 2026).
+         'periodic_families': (('radius', 'REAL'),),
          'sp_coincidence': (('near_zero', 'INTEGER'), ('events', 'INTEGER'), ('expected', 'REAL'),
                             ('chance', 'REAL')),
          # Each FETCH model's score (the classifier keeps them since 28 September 2026), how many of

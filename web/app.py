@@ -32,6 +32,7 @@ from web import findings as findings_mod
 from web import store
 from web.dynspec import SUBBANDS, Snippet, parse_mask, sweep_seconds
 from web.keys import beam_label, parse_item
+from web.periodic_quality import LOCAL_BEAMS, LOCAL_RADIUS_DEG
 from web.store import LABELS
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,8 @@ KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar'),
 CENTRE_MHZ = 135.25  # LOTAAS band centre, when a beam's own band is unknown
 # A period found in several beams, or in two SAPs, of one observation is RFI,
 # unless every fold of it sits at one DM above zero, as a bright pulsar seen in
-# neighbouring beams would. The indexer groups the folds (periodic_families).
+# neighbouring beams would, or all its beams are one beam and its neighbours.
+# The indexer groups the folds (periodic_families).
 MULTIBEAM_BEAMS = 4
 
 
@@ -91,9 +93,12 @@ def coincident_sql(alias):
 
 
 def multibeam_sql(alias):
+    # A family in one beam and its neighbours is a source, not interference (periodic_quality.localised).
     f = alias
     return (f'(({f}.beams >= {MULTIBEAM_BEAMS} OR {f}.saps >= 2) AND NOT ({f}.dm_min >= 2 '
-            f'AND {f}.dm_max - {f}.dm_min <= MAX(2, 0.1 * {f}.dm_max)))')
+            f'AND {f}.dm_max - {f}.dm_min <= MAX(2, 0.1 * {f}.dm_max)) '
+            f'AND NOT ({f}.saps = 1 AND {f}.beams BETWEEN 2 AND {LOCAL_BEAMS} '
+            f'AND COALESCE({f}.radius, 99) <= {LOCAL_RADIUS_DEG}))')
 
 
 def typical_scattering(dm, frequency_mhz):

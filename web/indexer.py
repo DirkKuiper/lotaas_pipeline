@@ -837,14 +837,28 @@ class Indexer:
         are chained in period order while neighbours differ by at most
         FAMILY_TOLERANCE. Refined periods within one RFI family scatter by
         ~1e-4. Only equal periods are matched: allowing harmonics up to 16
-        merged unrelated long-period folds by chance.
+        merged unrelated long-period folds by chance. Each family also records
+        its radius on the sky, which tells a source seen in a beam and its
+        neighbours from interference (web.periodic_quality.localised).
         """
         by_observation = {}
-        for row in self.db.execute('SELECT key, item, dm, period FROM periodic WHERE period > 0'):
+        for row in self.db.execute('''SELECT p.key, p.item, p.dm, p.period, p.statistic, b.ra_deg, b.dec_deg
+                FROM periodic p LEFT JOIN beams b ON b.dir=p.dir WHERE p.period > 0'''):
             parsed = parse_item(row['item'])
             if parsed:
                 by_observation.setdefault(parsed[0], []).append(
-                    (row['period'], row['key'], (parsed[1], parsed[2]), row['dm']))
+                    (row['period'], row['key'], (parsed[1], parsed[2]), row['dm'], row['statistic'] or 0,
+                     row['ra_deg'], row['dec_deg']))
+
+        def radius(members):
+            """Degrees from the strongest fold's beam to the farthest member's; None when a position is missing."""
+            centre = max(members, key=lambda m: m[4])
+            if any(m[5] is None or m[6] is None for m in members):
+                return None
+            a0, d0 = math.radians(centre[5]), math.radians(centre[6])
+            return max(math.degrees(math.acos(max(-1.0, min(1.0, math.sin(d0) * math.sin(math.radians(m[6]))
+                       + math.cos(d0) * math.cos(math.radians(m[6])) * math.cos(a0 - math.radians(m[5]))))))
+                       for m in members)
         rows = []
         for observation, folds in by_observation.items():
             folds.sort()
@@ -856,12 +870,13 @@ class Indexer:
                 beams = {m[2] for m in members}
                 dms = [m[3] for m in members if m[3] is not None]
                 family = f'{observation}|{members[0][0]:.9g}'
+                spread = radius(members)
                 rows.extend((m[1], family, len(beams), len({b[0] for b in beams}),
-                             min(dms, default=None), max(dms, default=None)) for m in members)
+                             min(dms, default=None), max(dms, default=None), spread) for m in members)
                 start = end
         with self.db:
             self.db.execute('DELETE FROM periodic_families')
-            self.db.executemany('INSERT OR REPLACE INTO periodic_families VALUES (?,?,?,?,?,?)', rows)
+            self.db.executemany('INSERT OR REPLACE INTO periodic_families VALUES (?,?,?,?,?,?,?)', rows)
 
     def derive_moments(self):
         """Single-pulse events at one moment in other beams of the candidate's observation.

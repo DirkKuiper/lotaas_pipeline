@@ -74,6 +74,54 @@ def save_fold(directory, name, period=3.03179, amplitude=4.0, catalogue=False):
     np.savez(folder / f'{name}.npz', **diagnostic(amplitude=amplitude))
 
 
+def save_low_dm_fold(directory, name, period, statistic=20.0):
+    folder = directory / 'periodicity_plots'
+    folder.mkdir(exist_ok=True)
+    row = fold_record(dm=1.4, period_seconds=period, refined_period_seconds=period, statistic=statistic,
+                      plot=f'periodicity_plots/{name}.png', fold_data=f'periodicity_plots/{name}.npz')
+    with (directory / 'periodicity_folded_candidates.jsonl').open('a') as stream:
+        stream.write(json.dumps(row) + '\n')
+    data = diagnostic()
+    data['dm_curve'] = np.array([[1.2, 14], [1.3, 18], [1.4, 24], [1.5, 18], [1.6, 14]])
+    np.savez(folder / f'{name}.npz', **data)
+
+
+def other_beam(directory, beam, declination):
+    other = directory.parents[1] / ITEM.replace('BEAM025', f'BEAM{beam:03d}') / directory.name
+    other.mkdir(parents=True, exist_ok=True)
+    metadata = json.loads((directory / 'metadata.json').read_text())
+    metadata['observation_info']['DEC (J2000)'] = declination
+    (other / 'metadata.json').write_text(json.dumps(metadata))
+    return other
+
+
+def test_low_dm_period_in_a_beam_and_its_neighbours_reaches_the_queue(cfg, campaign):
+    # As PSR J0311+1402 at DM 1.4 in L606916 SAP001 beam 53 and three neighbours: a source on the sky, while
+    # the same period in four beams 2 deg apart stays interference.
+    directory = campaign['beam_dir']
+    save_low_dm_fold(directory, 'local', 13.6358, statistic=85.0)
+    save_low_dm_fold(directory, 'spread', 7.77123, statistic=85.0)
+    for beam, declination in ((26, '+68:39:23.00'), (27, '+68:10:35.00'), (28, '+68:39:23.00')):
+        save_low_dm_fold(other_beam(directory, beam, declination), 'local', 13.6358)
+    for beam, declination in ((40, '+70:24:59.00'), (41, '+66:24:59.00'), (42, '+70:24:59.00')):
+        save_low_dm_fold(other_beam(directory, beam, declination), 'spread', 7.77123)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    families = dict(indexer.db.execute('SELECT c.period, MAX(f.radius) FROM candidates c '
+                                       'JOIN periodic_families f USING(key) GROUP BY c.period'))
+    assert abs(families[13.6358] - 0.24) < 0.01 and families[7.77123] > 1.9
+    states = {}
+    for period, status, reasons in indexer.db.execute('SELECT c.period, t.status, t.reasons FROM candidates c '
+                                                      'JOIN periodic_triage t USING(key)'):
+        states.setdefault(period, []).append((status, json.loads(reasons)))
+    assert sorted(s for s, _ in states[13.6358]) == ['related', 'related', 'related', 'strong']
+    assert sorted(s for s, _ in states[7.77123]) == ['deferred', 'related', 'related', 'related']
+    assert all('Period is flagged as interference' in r and 'Best DM is close to zero' in r
+               for _, r in states[7.77123])
+    assert '13.635800' in client_for(cfg).get('/periodic').text
+    indexer.db.close()
+
+
 def test_default_queue_groups_strong_folds_and_keeps_deferred_accessible(cfg, campaign):
     directory = campaign['beam_dir']
     save_fold(directory, 'real', catalogue=True)

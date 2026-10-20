@@ -26,6 +26,19 @@ ROW_TOLERANCE = 0.003
 # freedom: below this (the 99th percentile of noise) it holds nothing but a sinusoid.
 SINUSOID_CHI2 = 16.81
 ROW_HARMONIC_CHI2 = 50.0
+# A family in one beam and its neighbours (the first ring of tied-array beams sits 0.24-0.25 deg out), in one
+# SAP, is a source on the sky: interference reaches beams all over the observation. Such a family is not
+# interference and not deferred for a low DM. The 41 s PSR J0311+1402 (DM 1.4 at 135 MHz) was found at
+# statistic 85 in L606916 SAP001 beam 53 and three neighbours, and deferred for both (20 October 2026).
+# Across all 95,511 families this lets 3 more folds reach the queue.
+LOCAL_RADIUS_DEG = 0.35
+LOCAL_BEAMS = 7
+LOW_DM_REASONS = ('Best DM is close to zero', 'Search response remains strong close to DM zero')
+
+
+def localised(beams, saps, radius):
+    """Whether a periodic family lies in one beam and its neighbours, in more than one beam."""
+    return saps == 1 and 2 <= (beams or 0) <= LOCAL_BEAMS and radius is not None and radius <= LOCAL_RADIUS_DEG
 
 
 def normalise_rows(values):
@@ -165,7 +178,7 @@ def sync(db):
     """Cache numerical diagnostics; regroup current candidates every index pass."""
     cached = {r['key']: dict(r) for r in db.execute('SELECT * FROM periodic_triage')}
     candidates = []
-    for row in db.execute('''SELECT p.*, c.id, f.beams, f.saps, f.dm_min, f.dm_max
+    for row in db.execute('''SELECT p.*, c.id, f.beams, f.saps, f.dm_min, f.dm_max, f.radius
             FROM periodic p JOIN candidates c ON c.key=p.key
             LEFT JOIN periodic_families f ON f.key=p.key'''):
         row = dict(row)
@@ -180,13 +193,14 @@ def sync(db):
         old = cached.get(row['key'])
         quality = json.loads(old['evidence']) if old and old['signature'] == signature else measure(fold, path)
         # Compute family flags afresh: evidence can change as other beams arrive.
-        reasons = list(quality['reasons'])
+        local = localised(row['beams'], row['saps'], row['radius'])
+        reasons = [r for r in quality['reasons'] if not (local and r in LOW_DM_REASONS)]
         multibeam = ((row['beams'] or 0) >= 4 or (row['saps'] or 0) >= 2) and not (
-            (row['dm_min'] or 0) >= 2 and row['dm_max'] - row['dm_min'] <= max(2, 0.1 * row['dm_max']))
+            (row['dm_min'] or 0) >= 2 and row['dm_max'] - row['dm_min'] <= max(2, 0.1 * row['dm_max'])) and not local
         if multibeam or row['rfi_like']:
             reasons.append('Period is flagged as interference')
         candidates.append(dict(row, fold=fold, quality=quality, signature=signature,
-                               strong=quality['strong'] and not multibeam and not row['rfi_like'], reasons=reasons))
+                               strong=not reasons, reasons=reasons))
 
     groups = {}
     for candidate in sorted(candidates, key=lambda c: (-int(c['strong']), -int(bool(c['catalogue'])),
