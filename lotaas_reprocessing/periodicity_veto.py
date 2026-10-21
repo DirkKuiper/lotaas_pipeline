@@ -28,6 +28,7 @@ container.
 """
 import bisect
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -51,6 +52,53 @@ NEAR_ZERO = (1.0, 1 / 4)
 # A peak this many times the median statistic of the same period in the other
 # beams is where the signal is, not interference spread over the array.
 DOMINANCE = 5.0
+# A family in one beam and the beams beside it is a source on the sky, whatever its DM: interference reaches
+# beams all over the observation. The first ring of tied-array beams sits 0.24-0.25 deg out. PSR J0311+1402
+# (40.9 s, DM 1.4) is seen in its beam and three neighbours at DM 0.25-2.5; the slow-pulsar pass vetoed its
+# fundamental there (statistic 344) as interference, before it could be folded (21 October 2026). The review
+# page applies the same rule to folds (web.periodic_quality.localised).
+LOCAL_DEG = 0.35
+LOCAL_BEAMS = 7
+
+
+def separation(a, b):
+    """Angle between two (ra, dec) positions in degrees."""
+    ra1, dec1, ra2, dec2 = map(math.radians, (*a, *b))
+    h = math.sin((dec2 - dec1) / 2) ** 2 + math.cos(dec1) * math.cos(dec2) * math.sin((ra2 - ra1) / 2) ** 2
+    return math.degrees(2 * math.asin(min(1.0, math.sqrt(h))))
+
+
+def localised(family, positions):
+    """Whether peaks of one SAP, in at most LOCAL_BEAMS beams, all lie within LOCAL_DEG of the strongest's beam."""
+    beams = {(p['sap'], p['beam']) for p in family}
+    if len({sap for sap, _ in beams}) != 1 or len(beams) > LOCAL_BEAMS or not positions:
+        return False
+    if any(b not in positions for b in beams):
+        return False
+    strongest = max(family, key=lambda p: p.get('statistic') or 0)
+    centre = positions[(strongest['sap'], strongest['beam'])]
+    return all(separation(centre, positions[b]) <= LOCAL_DEG for b in beams)
+
+
+def _degrees(text, hours=False):
+    """A sexagesimal 'dd:mm:ss.s' (or hours) as degrees; None when it cannot be read."""
+    try:
+        sign = -1.0 if str(text).strip().startswith('-') else 1.0
+        d, m, s = (abs(float(x)) for x in str(text).strip().lstrip('+-').split(':'))
+    except (ValueError, TypeError):
+        return None
+    value = sign * (d + m / 60 + s / 3600)
+    return value * 15 if hours else value
+
+
+def position(directory):
+    """(ra, dec) in degrees of a beam, from its metadata.json; None when unknown."""
+    try:
+        info = json.loads((Path(directory) / 'metadata.json').read_text()).get('observation_info') or {}
+    except (OSError, ValueError):
+        return None
+    ra, dec = _degrees(info.get('RA (J2000)'), hours=True), _degrees(info.get('DEC (J2000)'))
+    return None if ra is None or dec is None else (ra, dec)
 
 
 def best_peaks(directory, prefix=''):
@@ -129,11 +177,12 @@ def chance_count(peaks, frequencies, f, tolerance, home):
     return statistics.median(counts)
 
 
-def decide(peaks, veto_bins=1.1, veto_beams=4):
+def decide(peaks, veto_bins=1.1, veto_beams=4, positions=None):
     """Veto decisions for the peaks of one observation.
 
     `peaks` holds dicts with frequency_hz, frequency_resolution_hz, dm, sap,
-    beam, key and optionally statistic. Returns {key: evidence} for the vetoed ones.
+    beam, key and optionally statistic. `positions` maps (sap, beam) to (ra, dec)
+    degrees, for the localised exemption. Returns {key: evidence} for the vetoed ones.
     """
     peaks = sorted(peaks, key=lambda p: p['frequency_hz'])
     frequencies = [p['frequency_hz'] for p in peaks]
@@ -169,6 +218,8 @@ def decide(peaks, veto_bins=1.1, veto_beams=4):
             continue
         if peak['dm'] >= 2 and dominant(peak.get('statistic'), [p.get('statistic') for p in matches]):
             continue
+        if localised([peak] + matches, positions):
+            continue
         vetoed[peak['key']] = {'frequency_hz': f, 'dm': peak['dm'], 'beams': len(others) + 1,
                                'saps': len(saps), 'expected_beams': round(expected, 3),
                                'dm_min': min(dms), 'dm_max': max(dms)}
@@ -199,6 +250,8 @@ def apply(directories, veto_bins=1.1, veto_beams=4, write=None, prefix=''):
     written = {}
     targets = set(map(Path, write)) if write is not None else None
     for observation, members in groups.items():
+        positions = {(sap, beam): where for directory, sap, beam in members
+                     for where in [position(directory)] if where is not None}
         peaks = []
         for directory, sap, beam in members:
             for index, row in best_peaks(directory, prefix):
@@ -206,7 +259,7 @@ def apply(directories, veto_bins=1.1, veto_beams=4, write=None, prefix=''):
                               'frequency_resolution_hz': row['frequency_resolution_hz'],
                               'dm': row['dm'], 'sap': sap, 'beam': beam, 'key': (str(directory), index),
                               'statistic': row.get('statistic')})
-        vetoed = decide(peaks, veto_bins, veto_beams)
+        vetoed = decide(peaks, veto_bins, veto_beams, positions)
         rule = {'veto_bins': veto_bins, 'veto_beams': veto_beams, 'neighbourhood_windows': NEIGHBOURHOOD,
                 'chance_floor': '3 x median other-beam peaks per neighbouring window + 1',
                 'dm_consistent': f'the peak and {DM_AGREEMENT:.2f} of the family within max({DM_TOLERANCE[0]:g}, '

@@ -467,3 +467,17 @@ def test_every_node_of_a_run_receives_the_source_as_it_was_when_the_run_started(
     image.write_bytes(b'another image')
     with pytest.raises(RuntimeError, match='changed after the run started'):
         cluster.upload('efc-cpu-01', source, str(tmp_path/'later'))
+
+
+def test_a_low_dm_family_in_a_beam_and_its_neighbours_is_not_vetoed():
+    # As PSR J0311+1402 (DM 1.4) in L606916 SAP001 beam 53 and three neighbours: a source on the sky, while the
+    # same family in beams 2 degrees apart is interference. Its neighbours are bright enough that beam 53 does not
+    # dominate them.
+    family = [dict(peak(0.0244454, dm, 1, beam, key=beam), statistic=s)
+              for beam, dm, s in ((53, 2.25, 344.0), (34, 1.5, 120.0), (35, 0.25, 100.0), (52, 1.0, 90.0))]
+    near = {(1, 53): (47.80, 14.04), (1, 34): (47.80, 14.28), (1, 35): (48.04, 14.12), (1, 52): (47.56, 13.96)}
+    far = {(1, 53): (47.80, 14.04), (1, 34): (47.80, 16.04), (1, 35): (50.00, 14.12), (1, 52): (45.60, 13.96)}
+    assert V.decide(family) and len(V.decide(family, positions=far)) == 4
+    assert not V.decide(family, positions=near)
+    assert V.position(Path('/nonexistent')) is None
+    assert V._degrees('03:11:12.0', hours=True) == 47.8 and V._degrees('-00:30:00') == -0.5
