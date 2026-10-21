@@ -381,3 +381,15 @@ def test_the_review_page_counts_as_absent_while_its_triage_is_empty(tmp_path):
         db.execute("INSERT INTO periodic_triage VALUES ('periodicity|x', 'strong')")
     page = findings.ReviewPage(path)
     assert page.triage == {'periodicity|x': 'strong'} and page.read('beam', 'run') and not page.read('beam', 'other')
+
+
+def test_a_slow_pass_fold_is_a_fold_of_its_beam(tmp_path):
+    # The slow-pulsar pass (slow_periodicity) writes its folds and veto apart; the keep rule reads both.
+    item = beam(tmp_path/'results', 'run-s', 'L606916', 1, 53)
+    output = next((tmp_path/'results').glob(f'run-s/*/processed/{item}/*'))
+    slow = fold(0.0244454, 1.4, 40.0, plot='periodicity_plots/slow_periodic_001_DM1.400_P40.907340000.png')
+    (output/'slow_periodicity_folded_candidates.jsonl').write_text(json.dumps(slow) + '\n')
+    (output/'slow_periodicity_veto.json').write_text(json.dumps({'vetoed': [{'frequency_hz': 0.5, 'dm': 3.0, 'index': 0}]}))
+    entry = findings.beam_summary(output, 'run-s')
+    assert [f['plot'] for f in entry['folds']] == [slow['plot']]
+    assert entry['vetoed'] == [{'f': 0.5, 'dm': 3.0}]
