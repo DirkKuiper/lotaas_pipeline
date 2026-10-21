@@ -86,6 +86,12 @@ def periodicity(output, metadata):
     if config.get('catalogue_fold', True):
         catalogue_fold(output, metadata)
     prune_trials(output)
+    if metadata.get('slow_periodicity_enabled'):
+        # The slow-pulsar pass on its own trials, without the zero-DM filter (slow_periodicity).
+        from lotaas_reprocessing import slow_periodicity as slow
+        view = slow.metadata_view(metadata)
+        search_periodicity(output/slow.TRIALS, output, view, periodic_config(view), prefix=slow.PREFIX)
+        prune_trials(output, slow.PREFIX, slow.TRIALS)
 
 
 def catalogue_fold(output, metadata):
@@ -103,16 +109,18 @@ def catalogue_fold(output, metadata):
         print(f'Catalogue folds failed: {type(error).__name__}: {error}', flush=True)
 
 
-def prune_trials(output):
-    """Keep only the periodic trials a fold could read: those of the sifted-best peaks.
+def prune_trials(output, prefix='', trials='Periodic_DM_trials'):
+    """Keep only the periodic trials a fold could read: those of the sifted-best peaks (prefix and trials: of
+    a second search, slow_periodicity).
 
     A fold reads the trial of its peak and nothing else, so the other ~4 GB
     of a beam can go as soon as it is searched, rather than waiting for the
     cross-beam veto of the whole batch.
     """
     from lotaas_reprocessing.periodicity import read_jsonl
-    keep = {row['trial_file'] for row in read_jsonl(output/'periodicity_candidates.jsonl') if row.get('is_sifted_best')}
-    for path in (output/'Periodic_DM_trials').glob('*'):
+    keep = {row['trial_file'] for row in read_jsonl(output/(prefix + 'periodicity_candidates.jsonl'))
+            if row.get('is_sifted_best')}
+    for path in (output/trials).glob('*'):
         if path.suffix in ('.dat', '.inf') and path.with_suffix('.dat').name not in keep:
             path.unlink(missing_ok=True)
 
@@ -120,6 +128,10 @@ def prune_trials(output):
 def periodicity_fold(output, metadata):
     from lotaas_reprocessing.periodicity import fold_periodicity
     fold_periodicity(output/'Periodic_DM_trials', output, metadata, periodic_config(metadata))
+    if metadata.get('slow_periodicity_enabled'):
+        from lotaas_reprocessing import slow_periodicity as slow
+        view = slow.metadata_view(metadata)
+        fold_periodicity(output/slow.TRIALS, output, view, periodic_config(view), prefix=slow.PREFIX)
 
 
 def finalize(output, metadata):
@@ -128,10 +140,13 @@ def finalize(output, metadata):
         product_outputs(output, 'sp_classify_summary.json')
     if metadata.get('periodicity_enabled', False):
         product_outputs(output, 'periodicity_summary.json')
+    if metadata.get('slow_periodicity_enabled', False):
+        product_outputs(output, 'slow_periodicity_summary.json')
     # Every manifest and all its products are complete before any cleanup.
     shutil.rmtree(output/'DM_trials', ignore_errors=True)
     if metadata.get('periodicity_enabled', False):
         shutil.rmtree(output/'Periodic_DM_trials', ignore_errors=True)
+    shutil.rmtree(output/'Slow_DM_trials', ignore_errors=True)
 
 
 STAGES = {'single-pulse': single_pulse, 'sp-classify': sp_classify, 'periodicity': periodicity,

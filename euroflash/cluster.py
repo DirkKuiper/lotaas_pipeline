@@ -458,7 +458,7 @@ def main():
         if not tiered:
             code=run_remote(node,runner_command('all'),log)
             # Trials of a failed beam are ~4.7 GB and regenerate in seconds on a GPU.
-            collect_node(node,['--exclude=DM_trials','--exclude=Periodic_DM_trials'] if a.skip_trials else [])
+            collect_node(node,['--exclude=DM_trials','--exclude=Periodic_DM_trials','--exclude=Slow_DM_trials'] if a.skip_trials else [])
             cleanup(node)
             return code==0
         return tiered_body(node,log)
@@ -483,7 +483,7 @@ def main():
                     except Exception as error:
                         # Record what the CPU node did and leave it empty before its slot is released.
                         try:
-                            collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                            collect_node(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials','--exclude=Slow_DM_trials'])
                         except Exception as failure:
                             note(f'CPU node {cpu} could not be collected: {failure}')
                         try:
@@ -509,7 +509,7 @@ def main():
             # Whatever happened, leave the GPU node recorded and empty before it takes another batch.
             try:
                 if not state['collected']:
-                    collect_node(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+                    collect_node(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials','--exclude=Slow_DM_trials'])
             except Exception as error:
                 note(f'GPU node {node} could not be collected: {error}')
             # Clean even when the collect failed: a full disk is what makes it fail, and a node left full
@@ -578,7 +578,7 @@ def main():
                                        capture_output=True,text=True).stdout or '{}')
         put_text(cpu,f'{work}/handoff/.done',json.dumps(dict(done,relay_failed=sorted(failed_relays))),a.control_dir)
         # The GPU node's own stages are over: record them and free it for the next batch.
-        collect_retrying(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+        collect_retrying(node,['--exclude=processed','--exclude=DM_trials','--exclude=Periodic_DM_trials','--exclude=Slow_DM_trials'])
         state['collected']=True
         (a.work/f'{node}.gpu-done').write_text(json.dumps({'exit':state['gpu'],'relayed':len(relayed)}))
         cleanup(node)
@@ -590,7 +590,7 @@ def main():
                     collect_live(cpu)
                 except Exception as error:
                     note(f'Live ledger update deferred for {cpu}: {error}')
-        collect_retrying(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials'])
+        collect_retrying(cpu,['--exclude=DM_trials','--exclude=Periodic_DM_trials','--exclude=Slow_DM_trials'])
         cleanup(cpu)
         return state['gpu']==0 and cpu_state.get('code')==0 and not failed_relays
 

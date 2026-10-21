@@ -165,7 +165,7 @@ def plot_fold(path,fold,candidate,metadata,dm_curve,subbands=None,band_limits=No
     partial=path.with_name(path.stem+'.partial.png');fig.savefig(partial,dpi=140);plt.close(fig);os.replace(partial,path)
 
 
-def fold_candidates(candidates,trial_dir,output_dir,metadata,config):
+def fold_candidates(candidates,trial_dir,output_dir,metadata,config,prefix=''):
     from .periodicity import valid_trial
     # Peaks the cross-beam veto found in many beams never take a fold slot.
     best=sorted((r for r in candidates if r['is_sifted_best'] and not r.get('multibeam_rfi')),
@@ -191,7 +191,7 @@ def fold_candidates(candidates,trial_dir,output_dir,metadata,config):
         if rank==0 and not row['rfi_like'] and Path(metadata['filename']).is_file():
             subbands,limits=fold_subbands(metadata['filename'],row['dm'],fold['frequency'],fold['bins'],
                                          row['observation_seconds'],metadata.get('bad_channels',[]))
-        stem=f"periodic_{rank+1:03d}_DM{row['dm']:.3f}_P{fold['period']:.9f}"
+        stem=f"{prefix}periodic_{rank+1:03d}_DM{row['dm']:.3f}_P{fold['period']:.9f}"
         plot=directory/(stem+'.png'); data=directory/(stem+'.npz')
         with data.with_suffix('.npz.partial').open('wb') as stream:
             np.savez_compressed(stream,profile=fold['profile'],errors=fold['errors'],

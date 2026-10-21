@@ -168,6 +168,19 @@ if __name__ == "__main__":
         print("Capping slow per-channel excesses...")
         cap_slow(masked_data, preprocessing["slow_cap"])
 
+    # The slow-pulsar pass (lotaas_reprocessing.slow_periodicity) searches the data as they are up to here,
+    # filtered only if it asks: a pulse longer than its sweep across the band goes with the zero-DM filter.
+    from lotaas_reprocessing import slow_periodicity
+    slow = slow_periodicity.settings_of(settings)
+    slow_source = None
+    if slow["enabled"]:
+        if bool(preprocessing.get("zero_dm")) == bool(slow["zero_dm"]):
+            slow_source = masked_data
+        elif not slow["zero_dm"]:
+            slow_source = masked_data.copy()
+        else:
+            slow_source = zero_dm(masked_data.copy())
+
     if preprocessing.get("zero_dm"):
         # Broadband interference and a tied-array beam's slow broadband wander arrive at every
         # frequency at once: subtract the mean over channels at each sample.
@@ -200,6 +213,11 @@ if __name__ == "__main__":
         from lotaas_reprocessing.periodicity import resolved_config
         periodicity = resolved_config(periodicity)
         trial_specs(trial_metadata, periodicity_plan)
+    slow_config = None
+    if slow["enabled"]:
+        from lotaas_reprocessing.periodicity import resolved_config
+        slow_config = resolved_config(slow_periodicity.periodicity_config(settings.get("periodicity"), slow))
+        trial_specs(trial_metadata, slow["dm_plan"])
 
     # Refuse a beam that cannot fit rather than filling the disk part way
     # through. Trials are only removed when the CPU stage succeeds, so failed
@@ -212,6 +230,8 @@ if __name__ == "__main__":
                      for plan, _ in plans_to_write for entry in plan
                      for dm in dm_values(entry)}
     planned_bytes = 4 * sum(nsamp // downsample for _, downsample in unique_trials)
+    if slow["enabled"]:
+        planned_bytes += 4 * sum(nsamp // int(entry["downsample"]) for entry in slow["dm_plan"] for _ in dm_values(entry))
     free_bytes = shutil.disk_usage(output_dir).free
     if free_bytes < planned_bytes * 1.1:
         raise RuntimeError(
@@ -244,7 +264,11 @@ if __name__ == "__main__":
             inf_file.write(f" Channel bandwidth (MHz)                =  {np.abs(fil.header['foff']):.6f}\n")
         return dm_filename + ".dat"
 
-    def write_plan(plan, directory_name):
+    def write_plan(plan, directory_name, source=None, cache=None):
+      # source: the data to dedisperse (the main search's by default); cache: trials already written from
+      # the same data, which an exact (DM, downsample) repeat links to.
+      source = masked_data if source is None else source
+      cache = trial_cache if cache is None else cache
       plan_started = time.monotonic()
       computed_trials = 0
       linked_trials = 0
@@ -265,10 +289,10 @@ if __name__ == "__main__":
         print(f"Dedispersing DM range {low_dm} to {high_dm} (step {ddm}, downsample {downsample})")
         dm_trials_dir = os.path.join(output_dir, directory_name)
         os.makedirs(dm_trials_dir, exist_ok=True)
-        missing = [dm for dm in dms if (dm, downsample) not in trial_cache]
-        for dm, trial in (iter_dedispersed(masked_data, tsamp, nu, missing, downsample, xp) if missing else ()):
+        missing = [dm for dm in dms if (dm, downsample) not in cache]
+        for dm, trial in (iter_dedispersed(source, tsamp, nu, missing, downsample, xp) if missing else ()):
             trial_cpu = xp.asnumpy(trial) if use_gpu else trial
-            trial_cache[(dm, downsample)] = write_trial(dm, trial_cpu, directory_name, entry)
+            cache[(dm, downsample)] = write_trial(dm, trial_cpu, directory_name, entry)
             computed_trials += 1
             if use_gpu:
                 gpu_memory_peak = max(gpu_memory_peak, xp.get_default_memory_pool().used_bytes())
@@ -278,8 +302,8 @@ if __name__ == "__main__":
         for dm in dms:
             key = (dm, downsample)
             target = os.path.join(output_dir, directory_name, f"{base_fname}_DM{dm_label(dm)}.dat")
-            if trial_cache[key] != target:
-                link_trial(trial_cache[key], target)
+            if cache[key] != target:
+                link_trial(cache[key], target)
                 linked_trials += 1
       return {"elapsed_seconds": time.monotonic() - plan_started,
               "computed_trials": computed_trials, "linked_trials": linked_trials,
@@ -289,10 +313,16 @@ if __name__ == "__main__":
     periodicity_timing = None
     if periodicity_enabled:
         periodicity_timing = write_plan(periodicity_plan, "Periodic_DM_trials")
+    slow_timing = None
+    if slow["enabled"]:
+        # Never linked to the main search's trials unless the data are the same.
+        slow_timing = write_plan(slow["dm_plan"], slow_periodicity.TRIALS, slow_source,
+                                 trial_cache if slow_source is masked_data else {})
+        del slow_source
 
     # Save metadata to a YAML file
     metadata_file = os.path.join(output_dir, "metadata.yaml")
-    metadata = {"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "periodicity": periodicity, "periodicity_enabled": periodicity_enabled, "periodicity_dm_plan": periodicity_plan if periodicity_enabled else [], "classification": settings.get("classification") or {}, "preprocessing": preprocessing, "stage_timings": {"dedispersion": dedispersion_timing, "periodicity_dedispersion": periodicity_timing}, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
+    metadata = {"tsamp": tsamp, "observation_info": observation_info, "dedispersion_plan": dedispersion_plan, "periodicity": periodicity, "periodicity_enabled": periodicity_enabled, "periodicity_dm_plan": periodicity_plan if periodicity_enabled else [], "classification": settings.get("classification") or {}, "preprocessing": preprocessing, "stage_timings": {"dedispersion": dedispersion_timing, "periodicity_dedispersion": periodicity_timing, "slow_periodicity_dedispersion": slow_timing}, "slow_periodicity_enabled": bool(slow["enabled"]), "slow_periodicity": slow if slow["enabled"] else None, "slow_periodicity_config": slow_config, "slow_preprocessing": slow_periodicity.preprocessing_of(preprocessing, slow) if slow["enabled"] else None, "filename": str(Path(fname).resolve()), "backend": "gpu" if use_gpu else "cpu", "samples_processed": nsamp, "pilot": args.pilot or args.max_samples is not None, "seed": args.seed,
                    # Band limits, so the search can size the tail that circular
                    # dedispersion pollutes at each DM.
                    "nu_min": float(np.min(nu)), "nu_max": float(np.max(nu)),

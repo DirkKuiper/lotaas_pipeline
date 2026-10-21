@@ -60,7 +60,7 @@ def link_trial(source,target):
 def write_manifest(output):
     from .periodicity import atomic_json
     output=Path(output)
-    paths=list((output/'DM_trials').glob('*.dat'))+list((output/'Periodic_DM_trials').glob('*.dat'))
+    paths=[p for name in ('DM_trials','Periodic_DM_trials','Slow_DM_trials') for p in (output/name).glob('*.dat')]
     by_inode={}; files={}
     for path in sorted(paths):
         stat=path.stat(); key=(stat.st_dev,stat.st_ino)
@@ -80,6 +80,11 @@ def validate_products(output):
         plan=metadata['periodicity_dm_plan']
         validate_trials(metadata,output/'Periodic_DM_trials',plan)
         expected|={'Periodic_DM_trials/'+name for name in trial_specs(metadata,plan)}
+    if metadata.get('slow_periodicity_enabled'):
+        # The slow-pulsar pass's own trials (slow_periodicity).
+        plan=metadata['slow_periodicity']['dm_plan']
+        validate_trials(metadata,output/'Slow_DM_trials',plan)
+        expected|={'Slow_DM_trials/'+name for name in trial_specs(metadata,plan)}
     files=json.loads((output/'trial_manifest.json').read_text())['files']
     if set(files)!=expected:
         raise ValueError('Trial manifest does not match the enabled DM plans')

@@ -74,6 +74,8 @@ def survey(work, ledger, retention_seconds, now=None):
         candidates |= set(Path(work).glob('*/processed/*/*/DM_trials'))
         candidates |= set(Path(work).glob('processed/*/*/Periodic_DM_trials'))
         candidates |= set(Path(work).glob('*/processed/*/*/Periodic_DM_trials'))
+        candidates |= set(Path(work).glob('processed/*/*/Slow_DM_trials'))
+        candidates |= set(Path(work).glob('*/processed/*/*/Slow_DM_trials'))
         for trials in sorted(candidates):
             if not trials.is_dir():
                 continue

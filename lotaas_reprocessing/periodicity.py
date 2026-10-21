@@ -435,12 +435,13 @@ def _configured(metadata, config):
     return resolved_config(config if config is not None else metadata.get("periodicity", {}))
 
 
-def search_periodicity(trial_dir, output_dir, metadata, config=None):
+def search_periodicity(trial_dir, output_dir, metadata, config=None, prefix=""):
     """Search every trial and sift the peaks; folding is a separate step.
 
     Folding waits for the cross-beam veto, which needs the sifted peaks of
     every beam in a batch. The search summary carries what the fold step
-    needs to complete the beam's periodicity summary.
+    needs to complete the beam's periodicity summary. prefix names a second
+    search's products apart (slow_periodicity.PREFIX, with its metadata_view).
     """
     from .preprocess import searchable
     from .trials import trial_specs, validate_trials
@@ -449,13 +450,13 @@ def search_periodicity(trial_dir, output_dir, metadata, config=None):
     output_dir.mkdir(parents=True,exist_ok=True)
     # A previous success must not survive a failed rerun.
     for name in ("periodicity_search_summary.json","periodicity_summary.json"):
-        (output_dir/name).unlink(missing_ok=True)
+        (output_dir/(prefix+name)).unlink(missing_ok=True)
     plan=metadata.get("periodicity_dm_plan") or metadata["dedispersion_plan"]
     validate_trials(metadata,trial_dir,plan)
     specs=trial_specs(metadata,plan)
     started=time.perf_counter(); cpu_started=time.process_time()
     candidates=[]; coverage=[]
-    raw_path=output_dir/"periodicity_raw_candidates.jsonl"
+    raw_path=output_dir/(prefix+"periodicity_raw_candidates.jsonl")
     partial=raw_path.with_name(raw_path.name+".partial")
     with partial.open("w") as raw:
         for name,spec in specs.items():
@@ -483,9 +484,9 @@ def search_periodicity(trial_dir, output_dir, metadata, config=None):
     sift_start=time.perf_counter()
     sifted,sift_limit=sift_bounded(candidates,config)
     sift_seconds=time.perf_counter()-sift_start
-    _write_jsonl(output_dir/"periodicity_candidates.jsonl",sifted)
-    atomic_json(output_dir/"periodicity_coverage.json",coverage)
-    files=[raw_path,output_dir/"periodicity_candidates.jsonl",output_dir/"periodicity_coverage.json"]
+    _write_jsonl(output_dir/(prefix+"periodicity_candidates.jsonl"),sifted)
+    atomic_json(output_dir/(prefix+"periodicity_coverage.json"),coverage)
+    files=[raw_path,output_dir/(prefix+"periodicity_candidates.jsonl"),output_dir/(prefix+"periodicity_coverage.json")]
     summary={"schema":"lotaas.periodicity.search.v1","complete":True,
         "algorithm":"fractional_fft_harmonic_sum_zero_acceleration",
         "configuration":config,"trials_searched":len(coverage),"raw_candidates":len(candidates),
@@ -501,7 +502,7 @@ def search_periodicity(trial_dir, output_dir, metadata, config=None):
         "stage_seconds":{"search":search_seconds,"sift":sift_seconds},
         "process_peak_rss_bytes":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
         "outputs":{str(p.relative_to(output_dir)):p.stat().st_size for p in files}}
-    atomic_json(output_dir/"periodicity_search_summary.json",summary)
+    atomic_json(output_dir/(prefix+"periodicity_search_summary.json"),summary)
     return summary
 
 
@@ -509,7 +510,7 @@ def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
-def fold_periodicity(trial_dir, output_dir, metadata, config=None):
+def fold_periodicity(trial_dir, output_dir, metadata, config=None, prefix=""):
     """Fold the strongest sifted peaks the cross-beam veto left, then summarise.
 
     Reads periodicity_veto.json when the batch step wrote one. Vetoed peaks
@@ -518,23 +519,23 @@ def fold_periodicity(trial_dir, output_dir, metadata, config=None):
     """
     config=_configured(metadata, config)
     trial_dir,output_dir=Path(trial_dir),Path(output_dir)
-    summary_path=output_dir/"periodicity_summary.json"
+    summary_path=output_dir/(prefix+"periodicity_summary.json")
     summary_path.unlink(missing_ok=True)
     started=time.perf_counter()
-    search=json.loads((output_dir/"periodicity_search_summary.json").read_text())
+    search=json.loads((output_dir/(prefix+"periodicity_search_summary.json")).read_text())
     if search.get("complete") is not True:
         raise ValueError("Periodicity search incomplete; fold refused")
-    sifted=read_jsonl(output_dir/"periodicity_candidates.jsonl")
-    veto_path=output_dir/"periodicity_veto.json"
+    sifted=read_jsonl(output_dir/(prefix+"periodicity_candidates.jsonl"))
+    veto_path=output_dir/(prefix+"periodicity_veto.json")
     veto=json.loads(veto_path.read_text()) if veto_path.is_file() else None
     vetoed=set(veto.get("vetoed_indices",[])) if veto else set()
     for index,row in enumerate(sifted):
         row["multibeam_rfi"]=index in vetoed
     from .periodicity_folding import fold_candidates
-    folds=fold_candidates(sifted,trial_dir,output_dir,metadata,config)
-    _write_jsonl(output_dir/"periodicity_folded_candidates.jsonl",folds)
+    folds=fold_candidates(sifted,trial_dir,output_dir,metadata,config,prefix)
+    _write_jsonl(output_dir/(prefix+"periodicity_folded_candidates.jsonl"),folds)
     files=[output_dir/name for name in search["outputs"]]
-    files+=[output_dir/"periodicity_search_summary.json",output_dir/"periodicity_folded_candidates.jsonl"]
+    files+=[output_dir/(prefix+"periodicity_search_summary.json"),output_dir/(prefix+"periodicity_folded_candidates.jsonl")]
     if veto is not None:
         files.append(veto_path)
     for fold in folds:

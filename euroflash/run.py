@@ -365,6 +365,15 @@ class Runner:
                         config.get('veto_beams', 4), write=pending)
         print(f'Cross-beam veto over {len(searched)} beams: {sum(written.values())} sifted peaks vetoed',
               flush=True)
+        # The slow-pulsar pass's peaks against each other (lotaas_reprocessing.slow_periodicity).
+        slow = [output for _, output in searched if (output/'slow_periodicity_search_summary.json').is_file()]
+        if slow:
+            slow_config = json.loads((slow[0]/'metadata.json').read_text()).get('slow_periodicity_config') or {}
+            if slow_config.get('multibeam_veto', False):
+                vetoed = apply(slow, slow_config.get('veto_bins', 1.1), slow_config.get('veto_beams', 4),
+                               write=[o for o in pending if o in slow], prefix='slow_')
+                print(f'Cross-beam veto of the slow pass over {len(slow)} beams: {sum(vetoed.values())} vetoed',
+                      flush=True)
         return written
 
     def fold_and_finish(self, item, output, errors):

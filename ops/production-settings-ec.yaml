@@ -111,6 +111,21 @@ periodicity:
   veto_bins: 1.1
   veto_beams: 4
 
+# A second periodicity search for slow pulsars on the data before the zero-DM filter, which removes a pulse
+# longer than its own sweep across the band: PSR J0311+1402 (40.9 s, DM 1.43) is found at statistic 325
+# without it and not at all with it. 40 injected slow pulsars: FFT 21 found against 14, with as many chance
+# folds (benchmarks/j0311-2026-10-20/zerodm; lotaas_reprocessing.slow_periodicity). Its own trials (DM 0-100,
+# 31 ms), folds and cross-beam veto; products slow_periodicity_*.
+slow_periodicity:
+  enabled: false
+  zero_dm: false
+  dm_plan:
+    - {low_dm: 0.0, high_dm: 100.0, ddm: 0.25, downsample: 4}
+  period_min_seconds: 1.0
+  period_max_seconds: 300.0
+  harmonics: [1, 2, 4, 8, 16, 32]
+  max_folds: 16
+
 # Single-pulse review: one-second templates, local noise check, then FETCH.
 classification:
   # B0950+08 (DM 2.97) and 17 other LOTAAS pulsars sit below DM 10; from DM 2

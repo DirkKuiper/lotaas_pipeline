@@ -53,10 +53,11 @@ NEAR_ZERO = (1.0, 1 / 4)
 DOMINANCE = 5.0
 
 
-def best_peaks(directory):
-    """(index in periodicity_candidates.jsonl, row) of the sifted-best peaks of one beam."""
+def best_peaks(directory, prefix=''):
+    """(index in periodicity_candidates.jsonl, row) of the sifted-best peaks of one beam (prefix: of a second
+    search's, slow_periodicity)."""
     rows = []
-    path = Path(directory) / 'periodicity_candidates.jsonl'
+    path = Path(directory) / (prefix + 'periodicity_candidates.jsonl')
     for index, line in enumerate(path.read_text().splitlines()):
         if line.strip():
             row = json.loads(line)
@@ -181,7 +182,7 @@ def atomic_json(path, value):
     os.replace(partial, path)
 
 
-def apply(directories, veto_bins=1.1, veto_beams=4, write=None):
+def apply(directories, veto_bins=1.1, veto_beams=4, write=None, prefix=''):
     """Decide the veto for a batch and write periodicity_veto.json beside each beam's peaks.
 
     `directories` are beam output directories whose periodicity search is
@@ -200,7 +201,7 @@ def apply(directories, veto_bins=1.1, veto_beams=4, write=None):
     for observation, members in groups.items():
         peaks = []
         for directory, sap, beam in members:
-            for index, row in best_peaks(directory):
+            for index, row in best_peaks(directory, prefix):
                 peaks.append({'frequency_hz': row['frequency_hz'],
                               'frequency_resolution_hz': row['frequency_resolution_hz'],
                               'dm': row['dm'], 'sap': sap, 'beam': beam, 'key': (str(directory), index),
@@ -216,7 +217,7 @@ def apply(directories, veto_bins=1.1, veto_beams=4, write=None):
             if targets is not None and directory not in targets:
                 continue
             mine = sorted(((key[1], evidence) for key, evidence in vetoed.items() if key[0] == str(directory)))
-            atomic_json(directory / 'periodicity_veto.json', {
+            atomic_json(directory / (prefix + 'periodicity_veto.json'), {
                 'schema': 1, 'observation': observation, 'compared_beams': len(members),
                 'compared_peaks': len(peaks), 'rule': rule,
                 'vetoed_indices': [index for index, _ in mine],
