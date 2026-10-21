@@ -74,12 +74,12 @@ def save_fold(directory, name, period=3.03179, amplitude=4.0, catalogue=False):
     np.savez(folder / f'{name}.npz', **diagnostic(amplitude=amplitude))
 
 
-def save_low_dm_fold(directory, name, period, statistic=20.0):
+def save_low_dm_fold(directory, name, period, statistic=20.0, folds='periodicity_folded_candidates.jsonl'):
     folder = directory / 'periodicity_plots'
     folder.mkdir(exist_ok=True)
     row = fold_record(dm=1.4, period_seconds=period, refined_period_seconds=period, statistic=statistic,
                       plot=f'periodicity_plots/{name}.png', fold_data=f'periodicity_plots/{name}.npz')
-    with (directory / 'periodicity_folded_candidates.jsonl').open('a') as stream:
+    with (directory / folds).open('a') as stream:
         stream.write(json.dumps(row) + '\n')
     data = diagnostic()
     data['dm_curve'] = np.array([[1.2, 14], [1.3, 18], [1.4, 24], [1.5, 18], [1.6, 14]])
@@ -119,6 +119,23 @@ def test_low_dm_period_in_a_beam_and_its_neighbours_reaches_the_queue(cfg, campa
     assert all('Period is flagged as interference' in r and 'Best DM is close to zero' in r
                for _, r in states[7.77123])
     assert '13.635800' in client_for(cfg).get('/periodic').text
+    indexer.db.close()
+
+
+def test_a_slow_pass_fold_joins_the_beams_folds_and_its_family(cfg, campaign):
+    # The slow-pulsar pass (lotaas_reprocessing.slow_periodicity) writes slow_periodicity_folded_candidates.jsonl:
+    # J0311+1402's fundamental there, in its beam and three neighbours, is one source with them.
+    directory = campaign['beam_dir']
+    slow = 'slow_periodicity_folded_candidates.jsonl'
+    save_low_dm_fold(directory, 'slow_periodic_001', 40.9073, statistic=325.0, folds=slow)
+    for beam, declination in ((26, '+68:39:23.00'), (27, '+68:10:35.00'), (28, '+68:39:23.00')):
+        save_low_dm_fold(other_beam(directory, beam, declination), 'slow_periodic_001', 40.9073, folds=slow)
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    rows = indexer.db.execute("SELECT c.period, t.status FROM candidates c JOIN periodic_triage t USING(key) "
+                              "WHERE c.kind='periodic'").fetchall()
+    assert sorted(status for _, status in rows) == ['related', 'related', 'related', 'strong']
+    assert '40.907300' in client_for(cfg).get('/periodic').text
     indexer.db.close()
 
 

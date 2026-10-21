@@ -627,11 +627,15 @@ class Indexer:
             except (OSError, ValueError):
                 summary[name] = {}
         periodic_rows = []
-        try:
-            lines = (path / 'periodicity_folded_candidates.jsonl').read_text().splitlines()
-        except OSError:
-            lines = []
-        for rank, line in enumerate(lines, 1):
+        lines = []
+        # The slow-pulsar pass's folds (lotaas_reprocessing.slow_periodicity, plots slow_periodic_*) join the
+        # beam's folds; each file ranks its own.
+        for name in ('periodicity_folded_candidates.jsonl', 'slow_periodicity_folded_candidates.jsonl'):
+            try:
+                lines += list(enumerate((path / name).read_text().splitlines(), 1))
+            except OSError:
+                pass
+        for rank, line in lines:
             try:
                 row = json.loads(line)
             except ValueError:
