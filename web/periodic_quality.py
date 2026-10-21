@@ -64,6 +64,8 @@ PULSE_MIN_SNR = 6.0
 PULSE_DISPERSED_DM = 1.0
 PULSE_MERGE_SECONDS = 1.0
 PULSES_PER_PASS = 20000
+# Measured on folds at P >= 5 s only (the archive's 20,000 sampled); faster folds keep the time splits.
+PULSE_MIN_PERIOD = 5.0
 
 
 def log10_binomial_tail(k, n, p):
@@ -312,7 +314,8 @@ def sync(db):
         reasons = [r for r in quality['reasons'] if not (local and r in LOW_DM_REASONS)]
         multibeam = ((row['beams'] or 0) >= 4 or (row['saps'] or 0) >= 2) and not (
             (row['dm_min'] or 0) >= 2 and row['dm_max'] - row['dm_min'] <= max(2, 0.1 * row['dm_max'])) and not local
-        if reasons and set(reasons) <= set(SPLIT_REASONS) | set(LOW_DM_REASONS) and not (multibeam or row['rfi_like']):
+        if (reasons and set(reasons) <= set(SPLIT_REASONS) | set(LOW_DM_REASONS) and not (multibeam or row['rfi_like'])
+                and (row['period'] or 0) >= PULSE_MIN_PERIOD):
             pulses = quality.get('pulses')
             if pulses is None and pulse_budget > 0:
                 if quality.get('peak_phase') is None:          # measured before the phase was kept

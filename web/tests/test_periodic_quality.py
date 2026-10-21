@@ -220,11 +220,11 @@ def test_pulses_on_its_phase_show_a_fold_the_time_splits_defer(cfg, campaign):
     # fold's phase in several turns are independent evidence (J0311+1402: 18 of 19 on phase).
     from web.periodic_quality import pulse_phase
     directory = campaign['beam_dir']
-    save_fold(directory, 'flicker', amplitude=50)
+    save_fold(directory, 'flicker', period=20.74, amplitude=50)
     data = diagnostic(amplitude=50, intermittent=True)
     np.savez(directory / 'periodicity_plots' / 'flicker.npz', **data)
     phase, _ = pulse_phase(np.asarray(data['subintegration_sums'], float), np.asarray(data['subintegration_counts'], float))
-    pulses_at(directory, 3.03179, phase)
+    pulses_at(directory, 20.74, phase, turns=(10, 61, 102, 150))
     [(status, reasons, evidence)] = triage_of(cfg)
     assert status == 'strong' and not reasons
     assert evidence['pulses']['on'] == 4 and evidence['pulses']['log10p'] <= -4
@@ -235,10 +235,10 @@ def test_pulses_on_its_phase_show_a_fold_the_time_splits_defer(cfg, campaign):
 def test_pulses_off_its_phase_leave_the_fold_deferred(cfg, campaign):
     from web.periodic_quality import pulse_phase
     directory = campaign['beam_dir']
-    save_fold(directory, 'flicker', amplitude=50)
+    save_fold(directory, 'flicker', period=20.74, amplitude=50)
     data = diagnostic(amplitude=50, intermittent=True)
     np.savez(directory / 'periodicity_plots' / 'flicker.npz', **data)
     phase, _ = pulse_phase(np.asarray(data['subintegration_sums'], float), np.asarray(data['subintegration_counts'], float))
-    pulses_at(directory, 3.03179, (phase + 0.5) % 1)
+    pulses_at(directory, 20.74, (phase + 0.5) % 1, turns=(10, 61, 102, 150))
     [(status, reasons, evidence)] = triage_of(cfg)
     assert status == 'deferred' and evidence['pulses']['on'] == 0
