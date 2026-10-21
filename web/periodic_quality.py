@@ -60,14 +60,22 @@ REMEASURE_PER_PASS = 50000
 # by those objections only, none had it (benchmarks/slow-pass-pilot-2026-10-21/fold_pulses.py).
 SPLIT_REASONS = ('Pulse window does not repeat strongly in every time split',
                  'Pulse phase is not supported in enough time intervals')
-PULSE_RESCUE_LOG10P = -4.0
+# -5, not -4: live, two folds rescued at -4.1 to -6 (17.66 s at DM 640 in an interference beam, 17.15 s at
+# DM 13 on the requantiser's blocks); the pilot's pulsars sat at -7 to -174, J0311+1402 at -11 to -24.
+PULSE_RESCUE_LOG10P = -5.0
 PULSE_TURNS = 3
 PULSE_WINDOW_TURNS = 0.02
 PULSE_DM_TOLERANCE = (1.0, 0.03)
 PULSE_MIN_SNR = 6.0
 PULSE_DISPERSED_DM = 1.0
 PULSE_MERGE_SECONDS = 1.0
-PULSES_PER_PASS = 20000
+PULSES_PER_PASS = 5000
+# The 2-bit data's level steps fire the single-pulse search at low DM on the requantiser's 24.16 s blocks and
+# their 4.03 s rows: a fold at a simple fraction or multiple of either (6.0406 s = a quarter block at DM 3.0,
+# 15 pulses on phase), or whose pulses keep a block's phase (17.15 s at DM 12.9), is not rescued by them.
+BLOCK_SECONDS = 3072 * 0.007864319719374176
+STEP_RATIOS = sorted({m / n for n in range(1, 9) for m in range(1, 17)})
+STEP_TOLERANCE = 1e-3
 # Measured on folds at P >= 5 s only (the archive's 20,000 sampled); faster folds keep the time splits.
 PULSE_MIN_PERIOD = 5.0
 
@@ -101,6 +109,16 @@ def pulse_phase(sums, counts):
     return (peak + 0.5) / nbins, width / nbins
 
 
+def on_steps(period, times, early_cycle=False):
+    """Whether a period is a simple fraction or multiple of the 2-bit blocks or rows, or pulses keep their phase."""
+    from web import repeats
+    for step in (BLOCK_SECONDS, ROW_SECONDS):
+        ratio = period / step
+        if any(abs(ratio / r - 1) <= STEP_TOLERANCE for r in STEP_RATIOS):
+            return True
+    return len(times) >= 3 and repeats.instrumental(times, early_cycle)
+
+
 def pulse_evidence(fold, quality, events):
     """The beam's single pulses on the fold's pulse phase: {at_dm, on (turns), dm_median, log10p}.
 
@@ -120,7 +138,7 @@ def pulse_evidence(fold, quality, events):
     turns = len(np.unique(np.floor(on[:, 2] / period + 0.5 - phi)))  # one per rotation
     log10p = log10_binomial_tail(turns, len(ev), min(1.0, 2 * window)) if turns >= PULSE_TURNS else 0.0
     return {'at_dm': int(len(ev)), 'on': int(turns), 'dm_median': float(np.median(on[:, 0])) if len(on) else None,
-            'log10p': round(float(log10p), 2)}
+            'log10p': round(float(log10p), 2), 'steps': bool(on_steps(period, on[:, 2]))}
 
 
 def localised(beams, saps, radius):
@@ -332,7 +350,10 @@ def sync(db):
                     clusters[row['dir']] = events
                 pulses = quality['pulses'] = pulse_evidence(fold, quality, clusters[row['dir']])
                 pulse_budget -= 1
-            if pulses and pulses['log10p'] <= PULSE_RESCUE_LOG10P:
+            if pulses and 'steps' not in pulses:          # judged before the step test: judged again
+                pulses = None
+                quality.pop('pulses', None)
+            if pulses and pulses['log10p'] <= PULSE_RESCUE_LOG10P and not pulses['steps']:
                 dispersed = (pulses['dm_median'] or 0) >= PULSE_DISPERSED_DM
                 reasons = [r for r in reasons if r not in SPLIT_REASONS and not (dispersed and r in LOW_DM_REASONS)]
         if multibeam or row['rfi_like']:

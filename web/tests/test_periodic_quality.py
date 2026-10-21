@@ -246,3 +246,12 @@ def test_pulses_off_its_phase_leave_the_fold_deferred(cfg, campaign):
     pulses_at(directory, 20.74, (phase + 0.5) % 1, turns=(10, 61, 102, 150))
     [(status, reasons, evidence)] = triage_of(cfg)
     assert status == 'deferred' and evidence['pulses']['on'] == 0
+
+
+def test_pulses_on_the_requantisers_steps_rescue_nothing():
+    from web.periodic_quality import BLOCK_SECONDS, on_steps
+    assert on_steps(BLOCK_SECONDS / 4, [])                                     # 6.0406 s: a quarter block
+    assert on_steps(2 * 512 * 0.007864319719374176, [])                        # two rows
+    assert not on_steps(20.74, [10.3, 1265.1, 2115.4, 3111.8])
+    block_locked = [100.0 + n * BLOCK_SECONDS for n in (3, 40, 91, 120)]
+    assert on_steps(17.15, block_locked)
