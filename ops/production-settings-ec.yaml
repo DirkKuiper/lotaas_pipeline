@@ -117,7 +117,8 @@ periodicity:
 # folds (benchmarks/j0311-2026-10-20/zerodm; lotaas_reprocessing.slow_periodicity). Its own trials (DM 0-100,
 # 31 ms), folds and cross-beam veto; products slow_periodicity_*.
 slow_periodicity:
-  enabled: false
+  # On since 21 October 2026 (pilot: benchmarks/slow-pass-pilot-2026-10-21).
+  enabled: true
   zero_dm: false
   dm_plan:
     - {low_dm: 0.0, high_dm: 100.0, ddm: 0.25, downsample: 4}
