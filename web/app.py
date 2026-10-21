@@ -56,8 +56,9 @@ FILE_ORDER = ['not_queued', 'pending', 'requested', 'online', 'working', 'conver
 # 2026), or not asked (early-cycle clusters wider than 0.15 s), but its own data show a dispersed pulse.
 # What the classifier turned down (rejected, unconfirmed, unclassified) is not listed: the index keeps those as
 # the other events at a candidate's moment (sp_events), and the campaign ledger keeps each one.
-KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar'),
-                'queue': ('candidate', 'dispersed', 'known_pulsar'),
+# 'repeat': pulses at one DM at distinct moments of one beam that nothing explains (web.repeats), as an RRAT's.
+KINDS = {'sp': {'types': ('candidate', 'dispersed', 'known_pulsar', 'repeat'),
+                'queue': ('candidate', 'dispersed', 'known_pulsar', 'repeat'),
                 'page': '/single-pulse', 'sort': 'recent'},
          'periodic': {'types': ('periodic', 'periodic_rfi'), 'queue': ('periodic',),
                       'page': '/periodic', 'sort': 'evidence'}}
@@ -434,6 +435,7 @@ def create_app(cfg, run_background=True):
     env = templates.env
     env.filters.update(ago=ago, duration=duration, when=when, size=size, beam=beam_label, fromjson=json.loads,
                        kind=lambda t: {'candidate': 'FETCH positive', 'known_pulsar': 'known pulsar',
+                                       'repeat': 'same-DM repeat',
                                        'dispersed': 'dispersed, FETCH split',
                                        'rejected': 'FETCH reject', 'periodic': 'periodic',
                                        'unclassified': 'not sent to FETCH',
@@ -1041,6 +1043,8 @@ def create_app(cfg, run_background=True):
             sweep = dict(sweep) if sweep else None
             known = db.execute('SELECT * FROM sp_known WHERE key=?', (candidate['key'],)).fetchone()
             known = dict(known) if known else None
+            repeat = db.execute('SELECT * FROM sp_repeats WHERE key=?', (candidate['key'],)).fetchone()
+            repeat = dict(repeat, pulses=json.loads(repeat['pulses'])) if repeat else None
             if known:
                 known['evidence'] = ', '.join(KNOWN_ROUTES[r] for r in known['route'].split('+') if r in KNOWN_ROUTES)
             others = rows(db, """SELECT id, type, dm, snr, time FROM candidates WHERE item=? AND id<>?
@@ -1080,7 +1084,7 @@ def create_app(cfg, run_background=True):
                        observed=beam_run['observation_date'] if beam_run else None,
                        labels=LABELS, kept=kept, initial=initial, display=display,
                        section=params['kind'], back=KINDS[params['kind']]['page'], coincidence=coincidence,
-                       known=known, sweep=sweep, cited=cited, compared=compared, claims=findings_mod.CLAIMS,
+                       known=known, repeat=repeat, sweep=sweep, cited=cited, compared=compared, claims=findings_mod.CLAIMS,
                        statuses=findings_mod.STATUSES,
                        finding_source=candidate.get('pulsar') or (known or {}).get('name') or '')
         if candidate['kind'] == 'periodic':

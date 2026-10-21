@@ -339,7 +339,9 @@ def test_published_lotaas_sources_are_set_against_what_the_campaign_found(cfg, c
     assert 'discovery' in row and 'flag ok">both' in row and '(1/2)' in row and 'best S/N 14.0' in row
     # The link opens the redetection, not whichever event of the beam has the lowest id.
     redetection = Indexer(cfg).db.execute("SELECT id FROM candidates WHERE type='known_pulsar'").fetchone()[0]
-    assert f'href="/verify/{redetection}">1, best S/N 14.0' in row
+    # Its pulses at its DM count as its own (a same-DM repeat, web.repeats): the crowd's 6 and the beam's S/N 12,
+    # counted as (S/N, beam) pairs, so the redetection at 14.0 and the crowd's 14.0 and 12.0 are one each.
+    assert f'href="/verify/{redetection}">6, best S/N 14.0' in row
     row = page.split('J0850+6800')[1].split('</tr>')[0]
     assert 'RRAT' in row and 'single pulse' in row and 'not found' in row
     everything = client.get('/lotaas?show=all').text

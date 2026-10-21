@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS sp_coincidence (key TEXT PRIMARY KEY, beams INTEGER, 
 CREATE TABLE IF NOT EXISTS sp_low_dm (dir TEXT, item TEXT, dm REAL, snr REAL, time REAL, width INTEGER);
 CREATE INDEX IF NOT EXISTS sp_low_dm_dir ON sp_low_dm(dir);
 CREATE TABLE IF NOT EXISTS sp_low_dm_read (dir TEXT PRIMARY KEY);
+-- Same-DM repeats (web.repeats): a beam's pulses at one DM at distinct moments, from its clustered_candidates.txt,
+-- and what they were judged to be (indexer.judge_repeats): a catalogued pulsar's, the data's level steps,
+-- interference at one moment in many beams, or a source nothing explains (class 'one beam' or 'localised').
+CREATE TABLE IF NOT EXISTS sp_repeats (key TEXT PRIMARY KEY, dir TEXT, item TEXT, dm REAL, tol REAL, k INTEGER,
+    log10fap REAL, adjacent INTEGER, side INTEGER, snr REAL, time REAL, width INTEGER, pulses TEXT, class TEXT,
+    pulsar TEXT, separation_deg REAL, beams INTEGER, max_sep_deg REAL, moment_beams INTEGER);
+CREATE INDEX IF NOT EXISTS sp_repeats_dir ON sp_repeats(dir);
+CREATE TABLE IF NOT EXISTS sp_repeats_read (dir TEXT PRIMARY KEY);
 -- A single-pulse event among a burst of events of its own beam at one moment at scattered DMs,
 -- none standing out (indexer.derive_moments): an undispersed burst seen in one beam.
 CREATE TABLE IF NOT EXISTS sp_sweep (key TEXT PRIMARY KEY, events INTEGER, expected REAL, dm_min REAL,

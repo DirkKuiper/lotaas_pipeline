@@ -80,6 +80,13 @@
   </aside>
 </div>
 {% else %}
+{% if repeat %}<div class="card">
+  <h2>{{ repeat.k }} pulses at DM {{ '%.2f'|format(repeat.dm) }}</h2>
+  <div class="muted small">At distinct moments of this beam, within ±{{ '%.2f'|format(repeat.tol) }} of one DM, where the rest of the beam's clusters are spread out: an RRAT's few pulses an hour would look like this. Chance log10 FAP {{ '%.1f'|format(repeat.log10fap) }} against this beam's own clusters near that DM. {% if repeat['class'] == 'localised' %}The same pulses reach {{ repeat.beams }} beam(s) beside it, up to {{ '%.2f'|format(repeat.max_sep_deg) }}° away.{% else %}No other beam of the observation holds a pulse at these moments and DM.{% endif %} The plot below shows the beam's clusters in DM and time.</div>
+  <table><thead><tr><th class="num">Time (s)</th><th class="num">DM</th><th class="num">S/N</th><th class="num">Width (samples)</th></tr></thead><tbody>
+  {% for p in repeat.pulses %}<tr><td class="num">{{ '%.3f'|format(p[0]) }}</td><td class="num">{{ '%.2f'|format(p[1]) }}</td><td class="num">{{ '%.2f'|format(p[2]) }}</td><td class="num">{{ p[3] }}</td></tr>{% endfor %}
+  </tbody></table>
+</div>{% endif %}
 <div class="notice warn">No data was kept for this candidate: its beam's filterbank was deleted after the search and no copy was found on disk. Only the pipeline's plot below can be inspected. Candidates found from now on keep a snippet automatically.</div>
 <div class="grid cols-main">
   <div>{% set open_plots = True %}{% include '_plots.html' %}</div>

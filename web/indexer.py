@@ -61,6 +61,8 @@ KINDS_QUEUED = ('candidate', 'dispersed', 'known_pulsar')
 HALO_DM = 50.0
 K_DM = 4148.808
 COINCIDENT_BEAMS = 5      # as web.app: this many beams at scattered DMs is interference
+# Beams indexed before same-DM repeats were kept are read for them this many a pass (sync_repeats).
+REPEATS_BATCH = 10000
 # Detection types nobody reviews: kept as events (sp_events), not as candidates.
 TURNED_DOWN = ('rejected', 'unconfirmed', 'unclassified')
 # The classifier records nothing below its min_dm, so an undispersed burst leaves only
@@ -214,9 +216,11 @@ def sexagesimal(text, hours=False):
         return None
 
 
-def read_clusters(path):
+def read_clusters(path, events=None):
     """(cluster count, highest S/N, [(dm, snr, time, width)] below LOW_DM) of a beam's
-    clustered_candidates.txt; (None, None, []) when it cannot be read."""
+    clustered_candidates.txt; (None, None, []) when it cannot be read. events, a list, receives every
+    cluster at S/N >= repeats.MIN_SNR as (dm, snr, time, width), for the same-DM repeats."""
+    from web.repeats import MIN_SNR
     clusters, max_snr, low = 0, None, []
     try:
         for line in (Path(path) / 'clustered_candidates.txt').read_text().splitlines()[1:]:
@@ -224,9 +228,15 @@ def read_clusters(path):
             if len(fields) > 1:
                 clusters += 1
                 max_snr = max(max_snr or float('-inf'), float(fields[1]))
-                if len(fields) > 4 and float(fields[0]) < LOW_DM:
-                    low.append((float(fields[0]), float(fields[1]), float(fields[2]), int(float(fields[4]))))
+                if len(fields) > 4:
+                    row = (float(fields[0]), float(fields[1]), float(fields[2]), int(float(fields[4])))
+                    if row[0] < LOW_DM:
+                        low.append(row)
+                    if events is not None and row[1] >= MIN_SNR:
+                        events.append(row)
     except (OSError, ValueError):
+        if events is not None:
+            events.clear()
         return None, None, []
     return clusters, max_snr, low
 
@@ -608,7 +618,8 @@ class Indexer:
         info = meta.get('observation_info') or {}
         parsed = parse_item(item) or (None, None, None)
         pointing = POINTING.search(str(info.get('Object', '')))
-        clusters, max_snr, low = read_clusters(path)
+        events = []
+        clusters, max_snr, low = read_clusters(path, events)
         summary = {}
         for name in ('single_pulse_summary.json', 'periodicity_summary.json'):
             try:
@@ -670,12 +681,129 @@ class Indexer:
             self.db.executemany('INSERT OR REPLACE INTO periodic VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                 periodic_rows)
             self.store_low_dm(str(path), item, low)
+            self.store_repeats(str(path), item, events)
 
     def store_low_dm(self, directory, item, low):
         self.db.execute('DELETE FROM sp_low_dm WHERE dir=?', (directory,))
         self.db.executemany('INSERT INTO sp_low_dm VALUES (?,?,?,?,?,?)',
                             [(directory, item) + row for row in low])
         self.db.execute('INSERT OR REPLACE INTO sp_low_dm_read VALUES (?)', (directory,))
+
+    def store_repeats(self, directory, item, events):
+        """The beam's same-DM repeat groups (web.repeats), to be judged by judge_repeats."""
+        from web.repeats import groups
+        self.db.execute('DELETE FROM sp_repeats WHERE dir=?', (directory,))
+        rows = []
+        for g in groups(events):
+            brightest = max(g['pulses'], key=lambda p: p[2])
+            key = sp_key('repeat', item, g['dm'], brightest[3], brightest[2]) + f"|K{g['k']}"
+            rows.append((key, directory, item, g['dm'], g['tol'], g['k'], g['log10fap'], g['adjacent'], g['side'],
+                         brightest[2], brightest[0], brightest[3], json.dumps(g['pulses'])))
+        self.db.executemany('INSERT OR REPLACE INTO sp_repeats(key,dir,item,dm,tol,k,log10fap,adjacent,side,snr,time,'
+                            'width,pulses) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
+        self.db.execute('INSERT OR REPLACE INTO sp_repeats_read VALUES (?)', (directory,))
+
+    def sync_repeats(self, batch=REPEATS_BATCH):
+        """Same-DM repeats of beams indexed before index_beam kept them, a batch a pass, then judge_repeats."""
+        missing = [(r['dir'], r['item']) for r in self.db.execute(
+            'SELECT dir, item FROM beams WHERE dir NOT IN (SELECT dir FROM sp_repeats_read) LIMIT ?', (batch,))]
+        for start in range(0, len(missing), 200):
+            read = []
+            for directory, item in missing[start:start + 200]:
+                events = []
+                read_clusters(directory, events)
+                read.append((directory, item, events))
+            with self.db:
+                for directory, item, events in read:
+                    self.store_repeats(directory, item, events)
+        self.judge_repeats()
+        return len(missing)
+
+    def judge_repeats(self):
+        """What each unjudged repeat group is: class, and the pulsar, beams and moments that decided it.
+
+        - 'known': a catalogued pulsar within repeats.NEAR_DEG at the group's DM (within
+          max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION) of its DM, as known_in), or further, to known_radius, with
+          every pulse within repeats.PHASE_TOLERANCE turns of one phase of its rotation;
+        - 'instrumental': the pulses keep the phase of the data's level steps (repeats.instrumental);
+        - 'weak': log10 FAP above repeats.QUEUE_LOG10FAP, kept as evidence only;
+        - 'interference': most pulses at a moment when COINCIDENT_BEAMS or more other beams of the observation
+          hold a cluster (any DM);
+        - 'widespread': the same pulse (moment and DM) in more than repeats.LOCAL_BEAMS other beams or further
+          than repeats.LOCAL_DEG: a bright source far off the beam, or interference at one DM;
+        - 'localised': the same pulse in beams beside it only; 'one beam': in none.
+        The other beams' clusters are read only for groups that reach the last four classes.
+        """
+        import numpy as np
+        from euroflash import psrcat
+        from web import repeats
+        rows = self.db.execute("""SELECT r.key, r.dir, r.item, r.dm, r.tol, r.k, r.log10fap, r.pulses, b.ra_deg,
+                b.dec_deg, b.observation, b.tsamp FROM sp_repeats r JOIN beams b ON b.dir=r.dir
+                WHERE r.class IS NULL""").fetchall()
+        if not rows:
+            return 0
+        pulsars = psrcat.load()
+        others = {}
+
+        def observation_events(observation, directory):
+            if observation not in others:
+                found = []
+                for r in self.db.execute('SELECT dir, ra_deg, dec_deg FROM beams WHERE observation=? '
+                                         'AND COALESCE(pilot, 0)=0', (observation,)):
+                    events = []
+                    read_clusters(r['dir'], events)
+                    found.append((r['dir'], r['ra_deg'], r['dec_deg'],
+                                  np.array([(e[2], e[0]) for e in events]).reshape(-1, 2)))
+                others[observation] = found
+            return [o for o in others[observation] if o[0] != directory]
+
+        judged = []
+        for r in rows:
+            pulses = json.loads(r['pulses'])
+            times = [p[0] for p in pulses]
+            verdict = (None, None, None, None, None, None)
+            if r['ra_deg'] is not None:
+                for p in psrcat.cone(pulsars, r['ra_deg'], r['dec_deg'], KNOWN_BRIGHT_RADIUS_DEG):
+                    if abs(p['dm'] - r['dm']) > max(KNOWN_DM_TOLERANCE, KNOWN_DM_FRACTION * p['dm']):
+                        continue
+                    if p['separation_deg'] <= repeats.NEAR_DEG:
+                        verdict = ('known', p['name'], p['separation_deg'], None, None, None)
+                        break
+                    period = psrcat.period_at(p) if p.get('f0') else None
+                    if (p['separation_deg'] <= known_radius(p) and period and period >= KNOWN_MIN_PERIOD
+                            and repeats.phase_spread(times, period) <= repeats.PHASE_TOLERANCE):
+                        verdict = ('known', p['name'], p['separation_deg'], None, None, None)
+                        break
+            early = r['tsamp'] is not None and abs(float(r['tsamp']) - 0.00786432) < 1e-12
+            if verdict[0] is None and repeats.instrumental(times, early):
+                verdict = ('instrumental',) + verdict[1:]
+            if verdict[0] is None and r['log10fap'] > repeats.QUEUE_LOG10FAP:
+                verdict = ('weak',) + verdict[1:]
+            if verdict[0] is None:
+                same, busy = set(), 0
+                for t in times:
+                    beams_now = 0
+                    for directory, ra, dec, ev in observation_events(r['observation'], r['dir']):
+                        near = np.abs(ev[:, 0] - t) <= repeats.MOMENT_SECONDS if len(ev) else np.zeros(0, bool)
+                        if near.any():
+                            beams_now += 1
+                            if (np.abs(ev[near, 1] - r['dm']) <= r['tol']).any():
+                                same.add((directory, ra, dec))
+                    busy += beams_now >= COINCIDENT_BEAMS
+                far = [psrcat.separation(r['ra_deg'], r['dec_deg'], ra, dec) for _, ra, dec in same
+                       if ra is not None and r['ra_deg'] is not None]
+                if busy > len(times) / 2:
+                    cls = 'interference'
+                elif same and (len(same) > repeats.LOCAL_BEAMS or max(far, default=0) > repeats.LOCAL_DEG):
+                    cls = 'widespread'
+                else:
+                    cls = 'localised' if same else 'one beam'
+                verdict = (cls, None, None, len(same), max(far, default=None), busy)
+            judged.append(verdict + (r['key'],))
+        with self.db:
+            self.db.executemany('UPDATE sp_repeats SET class=?, pulsar=?, separation_deg=?, beams=?, max_sep_deg=?, '
+                                'moment_beams=? WHERE key=?', judged)
+        return len(judged)
 
     def sync_low_dm(self, batch=200):
         """Read the low-DM cluster centres of beams indexed before index_beam kept them."""
@@ -804,6 +932,17 @@ class Indexer:
                        CASE WHEN p.rfi_like THEN 'periodic_rfi' ELSE 'periodic' END,
                        p.item, p.dm, p.statistic, p.period, p.statistic, p.fp16, b.run_name, p.pilot, p.dir, 1
                 FROM periodic p LEFT JOIN beams b ON b.dir=p.dir""")
+            # Same-DM repeats nothing explains (judge_repeats), as single-pulse candidates of their own type: one
+            # row for the group, at its brightest pulse, from the latest non-pilot search of the beam.
+            from web.repeats import QUEUE_LOG10FAP
+            db.execute("""INSERT OR REPLACE INTO candidates(key,id,kind,type,item,dm,snr,width,time,fp16,run_name,pilot,
+                    dir,detections,found)
+                SELECT r.key, candidate_id(r.key), 'sp', 'repeat', r.item, r.dm, r.snr, r.width, r.time, b.fp16,
+                       b.run_name, 0, r.dir, r.k, strftime('%Y-%m-%dT%H:%M:%S', b.mtime, 'unixepoch')
+                FROM sp_repeats r JOIN beams b ON b.dir=r.dir
+                WHERE r.class IN ('one beam', 'localised') AND r.log10fap <= ? AND COALESCE(b.pilot, 0)=0
+                AND b.mtime=(SELECT MAX(x.mtime) FROM beams x WHERE x.item=b.item AND COALESCE(x.pilot, 0)=0)""",
+                       (QUEUE_LOG10FAP,))
             # The retained folds still provide cross-beam evidence, but explicitly
             # removed candidates must not return to the dashboard after a refresh.
             db.execute('DELETE FROM candidates WHERE key IN (SELECT key FROM review_state.candidate_removals)')
@@ -818,6 +957,9 @@ class Indexer:
                     WHERE plots.key='candidate|' || substr(candidates.key, instr(candidates.key, '|') + 1)
                     ORDER BY id DESC LIMIT 1)""")
             db.execute('UPDATE candidates SET snippet=(SELECT path FROM snippets WHERE snippets.key=candidates.key)')
+            # A repeat group has no pulse plot of its own: the beam's clusters in DM and time show it.
+            db.execute("""UPDATE candidates SET plot_id=(SELECT id FROM plots WHERE plots.dir=candidates.dir
+                    AND plots.kind='clusters' ORDER BY id DESC LIMIT 1) WHERE type='repeat'""")
             db.execute("""UPDATE candidates SET sap_key=(SELECT key FROM obs_sap o
                     WHERE o.observation=observation_of(candidates.item) AND o.sap=sap_of(candidates.item))""")
             self.derive_saps()
@@ -1178,6 +1320,15 @@ class Indexer:
             parsed = parse_item(r['item'])
             if parsed:
                 known.setdefault((parsed[0], r['pulsar']), []).append((r['snr'], r['item']))
+        # A catalogued pulsar's same-DM repeat group (judge_repeats): an RRAT's few pulses an hour, each too
+        # faint alone (J2033+0042's six in L565971 SAP001 B007, S/N 6.5-8.3).
+        from web.repeats import QUEUE_LOG10FAP
+        for r in self.db.execute("""SELECT r.item, r.pulsar, r.pulses FROM sp_repeats r JOIN beams b ON b.dir=r.dir
+                WHERE r.class='known' AND r.log10fap <= ? AND COALESCE(b.pilot, 0)=0""", (QUEUE_LOG10FAP,)):
+            parsed = parse_item(r['item'])
+            if parsed:
+                known.setdefault((parsed[0], r['pulsar']), []).extend(
+                    (pulse[2], r['item']) for pulse in json.loads(r['pulses']))
         person = "(SELECT reviewer FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)"
         note = "(SELECT note FROM review_state.reviews v WHERE v.key=c.key ORDER BY created DESC LIMIT 1)"
         for r in self.db.execute(f"""SELECT c.item, c.snr, {note} AS note FROM candidates c WHERE c.kind='sp'
@@ -1688,6 +1839,7 @@ class Indexer:
         timings = {}
         for name, step in (('state', self.sync_state), ('ledger', self.sync_ledger),
                            ('results', lambda: self.scan_results(full)), ('low_dm', self.sync_low_dm),
+                           ('repeats', self.sync_repeats),
                            ('snippets', self.sync_snippets), ('positions', self.repair_positions),
                            ('derive', self.derive), ('findings', self.derive_findings), ('local', self.measure_local),
                            ('dispersion', self.measure_dispersion), ('triage', self.triage),
