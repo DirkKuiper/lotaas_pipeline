@@ -43,6 +43,10 @@ LOW_DM_REASONS = ('Best DM is close to zero', 'Search response remains strong cl
 # or 75.6 s: the 2-bit requantiser's 24.16 s blocks. J0311+1402 and the pulsars' subharmonics passed as before.
 MIN_TURNS = 8
 MIN_ROWS = 8
+# Off since 21 October 2026 ~11:40: in the live index the merged intervals let through dozens of high-DM families
+# (DM 500-1000, 46-100 s, five or more beams at one DM: the 'blob' class), which the 32 intervals had deferred.
+# The 20,000-fold sample had held one of them.
+MERGE_INTERVALS = False
 # Folds measured again per index pass after the checks change (their signature); the others keep their verdict
 # until their turn, so a change does not stall one pass on every fold of the archive.
 REMEASURE_PER_PASS = 50000
@@ -138,7 +142,8 @@ def merges(fold, rows=32):
     """Whether a fold of this many subintegrations has its intervals merged (merged_intervals)."""
     period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
     seconds = float(fold.get('observation_seconds') or 3600.0)
-    return period > 0 and seconds / rows / period < MIN_TURNS and max(MIN_ROWS, int(seconds / (MIN_TURNS * period))) < rows
+    return (MERGE_INTERVALS and period > 0 and seconds / rows / period < MIN_TURNS
+            and max(MIN_ROWS, int(seconds / (MIN_TURNS * period))) < rows)
 
 
 def merged_intervals(fold, sums, counts):
@@ -146,7 +151,7 @@ def merged_intervals(fold, sums, counts):
     period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
     seconds = float(fold.get('observation_seconds') or 3600.0)
     rows = sums.shape[0]
-    if period <= 0 or seconds / rows / period >= MIN_TURNS:
+    if not MERGE_INTERVALS or period <= 0 or seconds / rows / period >= MIN_TURNS:
         return sums, counts
     groups = max(MIN_ROWS, int(seconds / (MIN_TURNS * period)))
     if groups >= rows:

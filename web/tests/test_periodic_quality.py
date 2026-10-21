@@ -172,8 +172,10 @@ def test_default_queue_groups_strong_folds_and_keeps_deferred_accessible(cfg, ca
     indexer.db.close()
 
 
-def test_a_slow_folds_intervals_are_merged_to_hold_enough_turns():
+def test_a_slow_folds_intervals_are_merged_to_hold_enough_turns(monkeypatch):
+    from web import periodic_quality
     from web.periodic_quality import merged_intervals, merges
+    monkeypatch.setattr(periodic_quality, 'MERGE_INTERVALS', True)
     data = diagnostic()
     sums, counts = np.asarray(data['subintegration_sums'], float), np.asarray(data['subintegration_counts'], float)
     slow = fold_record(period_seconds=40.9073, refined_period_seconds=40.9073, observation_seconds=3600.0)
@@ -185,7 +187,9 @@ def test_a_slow_folds_intervals_are_merged_to_hold_enough_turns():
     assert assess(fold_record(), data) == assess(fold_record(observation_seconds=3600.0), data)
 
 
-def test_a_fold_longer_than_its_intervals_is_assessed_once_they_are_merged():
+def test_a_fold_longer_than_its_intervals_is_assessed_once_they_are_merged(monkeypatch):
+    from web import periodic_quality
+    monkeypatch.setattr(periodic_quality, 'MERGE_INTERVALS', True)
     # At 200 s each 112 s interval covers half the phase bins: 'Incomplete phase coverage' made such folds
     # unassessable (17,754 of 20,000 deferred archive folds at P >= 5 s).
     data = diagnostic(amplitude=6.0)
