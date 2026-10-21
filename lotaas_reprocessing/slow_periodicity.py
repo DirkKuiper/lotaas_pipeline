@@ -67,3 +67,4 @@ def metadata_view(metadata):
     slow = metadata['slow_periodicity']
     return dict(metadata, periodicity_dm_plan=slow['dm_plan'], periodicity=metadata['slow_periodicity_config'],
                 preprocessing=metadata['slow_preprocessing'])
+

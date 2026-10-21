@@ -91,7 +91,13 @@ def periodicity(output, metadata):
         from lotaas_reprocessing import slow_periodicity as slow
         view = slow.metadata_view(metadata)
         search_periodicity(output/slow.TRIALS, output, view, periodic_config(view), prefix=slow.PREFIX)
-        prune_trials(output, slow.PREFIX, slow.TRIALS)
+        prefixes = [slow.PREFIX]
+        if metadata.get('ffa_enabled'):
+            # The FFA for long periods on the same trials, before they are pruned (ffa_periodicity).
+            from lotaas_reprocessing import ffa_periodicity as ffa
+            ffa.search_ffa(output/slow.TRIALS, output, view)
+            prefixes.append(ffa.PREFIX)
+        prune_trials(output, prefixes, slow.TRIALS)
 
 
 def catalogue_fold(output, metadata):
@@ -118,7 +124,8 @@ def prune_trials(output, prefix='', trials='Periodic_DM_trials'):
     cross-beam veto of the whole batch.
     """
     from lotaas_reprocessing.periodicity import read_jsonl
-    keep = {row['trial_file'] for row in read_jsonl(output/(prefix + 'periodicity_candidates.jsonl'))
+    prefixes = [prefix] if isinstance(prefix, str) else list(prefix)
+    keep = {row['trial_file'] for p in prefixes for row in read_jsonl(output/(p + 'periodicity_candidates.jsonl'))
             if row.get('is_sifted_best')}
     for path in (output/trials).glob('*'):
         if path.suffix in ('.dat', '.inf') and path.with_suffix('.dat').name not in keep:
@@ -132,6 +139,9 @@ def periodicity_fold(output, metadata):
         from lotaas_reprocessing import slow_periodicity as slow
         view = slow.metadata_view(metadata)
         fold_periodicity(output/slow.TRIALS, output, view, periodic_config(view), prefix=slow.PREFIX)
+        if metadata.get('ffa_enabled'):
+            from lotaas_reprocessing import ffa_periodicity as ffa
+            fold_periodicity(output/slow.TRIALS, output, view, ffa.config_of(view), prefix=ffa.PREFIX)
 
 
 def finalize(output, metadata):
@@ -142,6 +152,8 @@ def finalize(output, metadata):
         product_outputs(output, 'periodicity_summary.json')
     if metadata.get('slow_periodicity_enabled', False):
         product_outputs(output, 'slow_periodicity_summary.json')
+    if metadata.get('ffa_enabled', False):
+        product_outputs(output, 'ffa_periodicity_summary.json')
     # Every manifest and all its products are complete before any cleanup.
     shutil.rmtree(output/'DM_trials', ignore_errors=True)
     if metadata.get('periodicity_enabled', False):

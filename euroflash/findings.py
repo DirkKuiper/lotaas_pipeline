@@ -112,7 +112,8 @@ def beam_summary(output, run_name):
     ra, dec = _position(metadata.get('observation_info') or {})
     folds = []
     # The slow-pulsar pass's folds (lotaas_reprocessing.slow_periodicity) are folds of the beam like the others.
-    for path in (output/'periodicity_folded_candidates.jsonl', output/'slow_periodicity_folded_candidates.jsonl'):
+    for path in (output/'periodicity_folded_candidates.jsonl', output/'slow_periodicity_folded_candidates.jsonl',
+                 output/'ffa_periodicity_folded_candidates.jsonl'):
         if not path.is_file():
             continue
         for line in path.read_text().splitlines():
@@ -128,7 +129,7 @@ def beam_summary(output, run_name):
                           'catalogue': [m.get('name') for m in r.get('catalogue_matches') or []],
                           'plot': r.get('plot')})
     vetoed = []
-    for path in (output/'periodicity_veto.json', output/'slow_periodicity_veto.json'):
+    for path in (output/'periodicity_veto.json', output/'slow_periodicity_veto.json', output/'ffa_periodicity_veto.json'):
         if not path.is_file():
             continue
         try:
