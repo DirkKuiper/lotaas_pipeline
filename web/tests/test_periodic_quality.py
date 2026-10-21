@@ -170,3 +170,30 @@ def test_default_queue_groups_strong_folds_and_keeps_deferred_accessible(cfg, ca
     assert indexer.db.execute('SELECT COUNT(*) FROM periodic_triage').fetchone()[0] == 5
     assert indexer.db.execute("SELECT COUNT(*) FROM periodic_triage WHERE status='strong'").fetchone()[0] == 3
     indexer.db.close()
+
+
+def test_a_slow_folds_intervals_are_merged_to_hold_enough_turns():
+    from web.periodic_quality import merged_intervals, merges
+    data = diagnostic()
+    sums, counts = np.asarray(data['subintegration_sums'], float), np.asarray(data['subintegration_counts'], float)
+    slow = fold_record(period_seconds=40.9073, refined_period_seconds=40.9073, observation_seconds=3600.0)
+    merged_sums, merged_counts = merged_intervals(slow, sums, counts)
+    assert merged_sums.shape == (11, 64) and np.allclose(merged_sums.sum(axis=0), sums.sum(axis=0))
+    assert merges(slow) and not merges(fold_record())
+    fast_sums, _ = merged_intervals(fold_record(), sums, counts)
+    assert fast_sums is sums
+    assert assess(fold_record(), data) == assess(fold_record(observation_seconds=3600.0), data)
+
+
+def test_a_fold_longer_than_its_intervals_is_assessed_once_they_are_merged():
+    # At 200 s each 112 s interval covers half the phase bins: 'Incomplete phase coverage' made such folds
+    # unassessable (17,754 of 20,000 deferred archive folds at P >= 5 s).
+    data = diagnostic(amplitude=6.0)
+    counts = np.full((32, 64), 100.0)
+    for row in range(32):
+        empty = slice(32, 64) if row % 2 else slice(0, 32)
+        counts[row, empty] = 0
+    sums = np.asarray(data['subintegration_sums'], float) * (counts > 0)
+    long = fold_record(period_seconds=200.0, refined_period_seconds=200.0, observation_seconds=3600.0)
+    quality = assess(long, dict(data, subintegration_sums=sums, subintegration_counts=counts))
+    assert 'Fold diagnostics unavailable or invalid' not in quality['reasons'] and quality['repeatability'] > 0

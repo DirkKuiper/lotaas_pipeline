@@ -15,7 +15,7 @@ import numpy as np
 
 from web.keys import parse_item
 
-VERSION = 2
+VERSION = 3
 MIN_REPEATABILITY = 5.0
 MIN_PERSISTENCE = 0.75
 # LOTAAS 2-bit rows: 512 samples of 7.864 ms. Their residual steps fold at whole numbers of rows: folds at
@@ -34,6 +34,18 @@ ROW_HARMONIC_CHI2 = 50.0
 LOCAL_RADIUS_DEG = 0.35
 LOCAL_BEAMS = 7
 LOW_DM_REASONS = ('Best DM is close to zero', 'Search response remains strong close to DM zero')
+# A fold's 32 subintegrations are 112 s each; at a period above 14 s they hold fewer than MIN_TURNS turns, one
+# null or weak spell leaves one empty, and above about 100 s some phase bins stay empty ('Incomplete phase
+# coverage', so the fold was never assessed). Such a fold's intervals are merged until each holds MIN_TURNS turns,
+# never into fewer than MIN_ROWS, before the time-split checks. Over 20,000 deferred folds at P >= 5 s of the
+# archive (benchmarks/slow-pass-pilot-2026-10-21/slow_triage.py) that let 1 more pass, made the 17,754 never
+# assessed assessable (none passed), and turned away 13 of the 55 that passed, every one at 23.7-25.3 s, 49-51 s
+# or 75.6 s: the 2-bit requantiser's 24.16 s blocks. J0311+1402 and the pulsars' subharmonics passed as before.
+MIN_TURNS = 8
+MIN_ROWS = 8
+# Folds measured again per index pass after the checks change (their signature); the others keep their verdict
+# until their turn, so a change does not stall one pass on every fold of the archive.
+REMEASURE_PER_PASS = 50000
 
 
 def localised(beams, saps, radius):
@@ -51,6 +63,27 @@ def normalise_rows(values):
     return (values - values.mean(axis=1, keepdims=True)) / scales
 
 
+def merges(fold, rows=32):
+    """Whether a fold of this many subintegrations has its intervals merged (merged_intervals)."""
+    period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
+    seconds = float(fold.get('observation_seconds') or 3600.0)
+    return period > 0 and seconds / rows / period < MIN_TURNS and max(MIN_ROWS, int(seconds / (MIN_TURNS * period))) < rows
+
+
+def merged_intervals(fold, sums, counts):
+    """(sums, counts) with the subintegrations merged so each holds MIN_TURNS turns of the fold's period."""
+    period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
+    seconds = float(fold.get('observation_seconds') or 3600.0)
+    rows = sums.shape[0]
+    if period <= 0 or seconds / rows / period >= MIN_TURNS:
+        return sums, counts
+    groups = max(MIN_ROWS, int(seconds / (MIN_TURNS * period)))
+    if groups >= rows:
+        return sums, counts
+    starts = np.unique(np.linspace(0, rows, groups + 1)[:-1].round().astype(int))
+    return np.add.reduceat(sums, starts, axis=0), np.add.reduceat(counts, starts, axis=0)
+
+
 def assess(fold, data):
     """Cross-check a pulse window chosen in different time subsets.
 
@@ -65,6 +98,7 @@ def assess(fold, data):
     counts = np.asarray(data['subintegration_counts'], dtype=float)
     if sums.shape != counts.shape or sums.ndim != 2 or sums.shape[0] < 16 or sums.shape[1] < 8:
         raise ValueError('Need at least 16 time intervals and 8 phase bins')
+    sums, counts = merged_intervals(fold, sums, counts)
     if not np.all(np.isfinite(sums)) or not np.all(np.isfinite(counts)) or np.any(counts <= 0):
         raise ValueError('Incomplete phase coverage')
     sampling_bins = float(fold['refined_period_seconds']) / float(fold['effective_sampling_seconds'])
@@ -178,6 +212,7 @@ def sync(db):
     """Cache numerical diagnostics; regroup current candidates every index pass."""
     cached = {r['key']: dict(r) for r in db.execute('SELECT * FROM periodic_triage')}
     candidates = []
+    budget = REMEASURE_PER_PASS
     for row in db.execute('''SELECT p.*, c.id, f.beams, f.saps, f.dm_min, f.dm_max, f.radius
             FROM periodic p JOIN candidates c ON c.key=p.key
             LEFT JOIN periodic_families f ON f.key=p.key'''):
@@ -189,9 +224,17 @@ def sync(db):
             stamp = [stat.st_mtime_ns, stat.st_size]
         except OSError:
             stamp = None
-        signature = hashlib.sha256(json.dumps([VERSION, row['row'], str(path), stamp]).encode()).hexdigest()
+        # Version 3 changed only folds whose intervals are merged: the others keep their version-2 verdicts.
+        version = VERSION if merges(fold) else 2
+        signature = hashlib.sha256(json.dumps([version, row['row'], str(path), stamp]).encode()).hexdigest()
         old = cached.get(row['key'])
-        quality = json.loads(old['evidence']) if old and old['signature'] == signature else measure(fold, path)
+        if old and old['signature'] == signature:
+            quality = json.loads(old['evidence'])
+        elif old and budget <= 0:
+            quality, signature = json.loads(old['evidence']), old['signature']      # measured again in a later pass
+        else:
+            quality = measure(fold, path)
+            budget -= bool(old)
         # Compute family flags afresh: evidence can change as other beams arrive.
         local = localised(row['beams'], row['saps'], row['radius'])
         reasons = [r for r in quality['reasons'] if not (local and r in LOW_DM_REASONS)]
