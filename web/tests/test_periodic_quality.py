@@ -197,3 +197,48 @@ def test_a_fold_longer_than_its_intervals_is_assessed_once_they_are_merged():
     long = fold_record(period_seconds=200.0, refined_period_seconds=200.0, observation_seconds=3600.0)
     quality = assess(long, dict(data, subintegration_sums=sums, subintegration_counts=counts))
     assert 'Fold diagnostics unavailable or invalid' not in quality['reasons'] and quality['repeatability'] > 0
+
+
+def pulses_at(directory, period, phase, dm=26.2, turns=(100, 420, 730, 1010)):
+    """Single-pulse clusters at this DM and rotational phase in these turns, beside the fixture's own."""
+    with (directory / 'clustered_candidates.txt').open('a') as stream:
+        for i, turn in enumerate(turns):
+            t = (turn + phase) * period
+            stream.write(f'{dm}\t8.0\t{t:.4f}\t{int(t / 0.00786)}\t3\t1\t{40 + i}\n')
+
+
+def triage_of(cfg):
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    rows = indexer.db.execute('SELECT t.status, t.reasons, t.evidence FROM periodic_triage t').fetchall()
+    indexer.db.close()
+    return [(status, json.loads(reasons), json.loads(evidence)) for status, reasons, evidence in rows]
+
+
+def test_pulses_on_its_phase_show_a_fold_the_time_splits_defer(cfg, campaign):
+    # A nulling or flickering pulsar fails the time splits however bright; its own single pulses arriving on the
+    # fold's phase in several turns are independent evidence (J0311+1402: 18 of 19 on phase).
+    from web.periodic_quality import pulse_phase
+    directory = campaign['beam_dir']
+    save_fold(directory, 'flicker', amplitude=50)
+    data = diagnostic(amplitude=50, intermittent=True)
+    np.savez(directory / 'periodicity_plots' / 'flicker.npz', **data)
+    phase, _ = pulse_phase(np.asarray(data['subintegration_sums'], float), np.asarray(data['subintegration_counts'], float))
+    pulses_at(directory, 3.03179, phase)
+    [(status, reasons, evidence)] = triage_of(cfg)
+    assert status == 'strong' and not reasons
+    assert evidence['pulses']['on'] == 4 and evidence['pulses']['log10p'] <= -4
+    assert set(evidence['reasons']) & {'Pulse window does not repeat strongly in every time split',
+                                       'Pulse phase is not supported in enough time intervals'}
+
+
+def test_pulses_off_its_phase_leave_the_fold_deferred(cfg, campaign):
+    from web.periodic_quality import pulse_phase
+    directory = campaign['beam_dir']
+    save_fold(directory, 'flicker', amplitude=50)
+    data = diagnostic(amplitude=50, intermittent=True)
+    np.savez(directory / 'periodicity_plots' / 'flicker.npz', **data)
+    phase, _ = pulse_phase(np.asarray(data['subintegration_sums'], float), np.asarray(data['subintegration_counts'], float))
+    pulses_at(directory, 3.03179, (phase + 0.5) % 1)
+    [(status, reasons, evidence)] = triage_of(cfg)
+    assert status == 'deferred' and evidence['pulses']['on'] == 0

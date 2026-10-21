@@ -46,6 +46,75 @@ MIN_ROWS = 8
 # Folds measured again per index pass after the checks change (their signature); the others keep their verdict
 # until their turn, so a change does not stall one pass on every fold of the archive.
 REMEASURE_PER_PASS = 50000
+# A slow pulsar that nulls or flickers fails the time splits however bright its pulses are, and one longer than
+# its sweep reads as low DM; its single pulses are independent evidence. A fold whose only objections are those
+# is shown when the beam's clusters at its DM (within max(PULSE_DM_TOLERANCE)) arrive on its pulse phase (within
+# max(PULSE_WINDOW_TURNS, the profile's half width)) in PULSE_TURNS or more turns, at binomial log10 p <=
+# PULSE_RESCUE_LOG10P against the clusters at that DM; a low DM only when those pulses are dispersed (median DM
+# >= PULSE_DISPERSED_DM). In the slow-pass pilot (21 October 2026) that showed J0311+1402 (18 of its 19 pulses on
+# phase, log10 p -23.9) and two injected pulsars the splits deferred (-50, -135); of 836 archive folds deferred
+# by those objections only, none had it (benchmarks/slow-pass-pilot-2026-10-21/fold_pulses.py).
+SPLIT_REASONS = ('Pulse window does not repeat strongly in every time split',
+                 'Pulse phase is not supported in enough time intervals')
+PULSE_RESCUE_LOG10P = -4.0
+PULSE_TURNS = 3
+PULSE_WINDOW_TURNS = 0.02
+PULSE_DM_TOLERANCE = (1.0, 0.03)
+PULSE_MIN_SNR = 6.0
+PULSE_DISPERSED_DM = 1.0
+PULSE_MERGE_SECONDS = 1.0
+PULSES_PER_PASS = 20000
+
+
+def log10_binomial_tail(k, n, p):
+    """log10 P(X >= k), X ~ Binomial(n, p)."""
+    import math
+    if k <= 0:
+        return 0.0
+    if k > n or p <= 0:
+        return -math.inf
+    if p >= 1:
+        return 0.0
+    terms = [math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * math.log(p)
+             + (n - i) * math.log1p(-p) for i in range(k, n + 1)]
+    top = max(terms)
+    return (top + math.log(sum(math.exp(t - top) for t in terms))) / math.log(10)
+
+
+def pulse_phase(sums, counts):
+    """(phase of the profile's peak, its half width at half maximum) in turns, from a fold's whole hour."""
+    with np.errstate(invalid='ignore', divide='ignore'):
+        profile = np.nansum(sums, axis=0) / np.nansum(counts, axis=0)
+    profile = np.nan_to_num(profile - np.nanmedian(profile))
+    nbins = len(profile)
+    peak = int(np.argmax(profile))
+    width = 1
+    while (width < nbins // 2 and profile[(peak + width) % nbins] > profile[peak] / 2
+           and profile[(peak - width) % nbins] > profile[peak] / 2):
+        width += 1
+    return (peak + 0.5) / nbins, width / nbins
+
+
+def pulse_evidence(fold, quality, events):
+    """The beam's single pulses on the fold's pulse phase: {at_dm, on (turns), dm_median, log10p}.
+
+    events: the beam's clusters (dm, snr, time, width); times and fold phases both count from the start of the
+    data at the top of the band, as the search dedisperses both."""
+    period, dm = float(fold.get('refined_period_seconds') or fold['period_seconds']), float(fold['dm'])
+    ev = np.asarray(events, dtype=float).reshape(-1, 4)
+    ev = ev[(np.abs(ev[:, 0] - dm) <= max(PULSE_DM_TOLERANCE[0], PULSE_DM_TOLERANCE[1] * dm)) & (ev[:, 1] >= PULSE_MIN_SNR)]
+    if not len(ev) or quality.get('peak_phase') is None:
+        return {'at_dm': int(len(ev)), 'on': 0, 'dm_median': None, 'log10p': 0.0}
+    ev = ev[np.argsort(ev[:, 2])]
+    ev = ev[np.r_[True, np.diff(ev[:, 2]) > PULSE_MERGE_SECONDS]]        # one cluster per moment
+    phi = float(quality['peak_phase'])
+    window = max(PULSE_WINDOW_TURNS, float(quality.get('pulse_half_width') or 0))
+    distance = np.abs(((ev[:, 2] / period) % 1.0 - phi + 0.5) % 1.0 - 0.5)
+    on = ev[distance <= window]
+    turns = len(np.unique(np.floor(on[:, 2] / period + 0.5 - phi)))  # one per rotation
+    log10p = log10_binomial_tail(turns, len(ev), min(1.0, 2 * window)) if turns >= PULSE_TURNS else 0.0
+    return {'at_dm': int(len(ev)), 'on': int(turns), 'dm_median': float(np.median(on[:, 0])) if len(on) else None,
+            'log10p': round(float(log10p), 2)}
 
 
 def localised(beams, saps, radius):
@@ -98,6 +167,7 @@ def assess(fold, data):
     counts = np.asarray(data['subintegration_counts'], dtype=float)
     if sums.shape != counts.shape or sums.ndim != 2 or sums.shape[0] < 16 or sums.shape[1] < 8:
         raise ValueError('Need at least 16 time intervals and 8 phase bins')
+    peak_phase, half_width = pulse_phase(sums, counts)
     sums, counts = merged_intervals(fold, sums, counts)
     if not np.all(np.isfinite(sums)) or not np.all(np.isfinite(counts)) or np.any(counts <= 0):
         raise ValueError('Incomplete phase coverage')
@@ -181,7 +251,7 @@ def assess(fold, data):
             'repeatability': repeatability, 'time_checks': checks, 'persistence': persistence,
             'dm_trials': dm_trials, 'zero_dm_ratio': zero_ratio, 'band_support': band_support,
             'harmonic_chi2': beyond,
-            'sampling_bins': sampling_bins, 'reasons': reasons}
+            'sampling_bins': sampling_bins, 'peak_phase': peak_phase, 'pulse_half_width': half_width, 'reasons': reasons}
 
 
 def measure(fold, path):
@@ -213,6 +283,8 @@ def sync(db):
     cached = {r['key']: dict(r) for r in db.execute('SELECT * FROM periodic_triage')}
     candidates = []
     budget = REMEASURE_PER_PASS
+    pulse_budget = PULSES_PER_PASS
+    clusters = {}
     for row in db.execute('''SELECT p.*, c.id, f.beams, f.saps, f.dm_min, f.dm_max, f.radius
             FROM periodic p JOIN candidates c ON c.key=p.key
             LEFT JOIN periodic_families f ON f.key=p.key'''):
@@ -240,6 +312,21 @@ def sync(db):
         reasons = [r for r in quality['reasons'] if not (local and r in LOW_DM_REASONS)]
         multibeam = ((row['beams'] or 0) >= 4 or (row['saps'] or 0) >= 2) and not (
             (row['dm_min'] or 0) >= 2 and row['dm_max'] - row['dm_min'] <= max(2, 0.1 * row['dm_max'])) and not local
+        if reasons and set(reasons) <= set(SPLIT_REASONS) | set(LOW_DM_REASONS) and not (multibeam or row['rfi_like']):
+            pulses = quality.get('pulses')
+            if pulses is None and pulse_budget > 0:
+                if quality.get('peak_phase') is None:          # measured before the phase was kept
+                    quality = measure(fold, path)
+                if row['dir'] not in clusters:
+                    from web.indexer import read_clusters
+                    events = []
+                    read_clusters(row['dir'], events)
+                    clusters[row['dir']] = events
+                pulses = quality['pulses'] = pulse_evidence(fold, quality, clusters[row['dir']])
+                pulse_budget -= 1
+            if pulses and pulses['log10p'] <= PULSE_RESCUE_LOG10P:
+                dispersed = (pulses['dm_median'] or 0) >= PULSE_DISPERSED_DM
+                reasons = [r for r in reasons if r not in SPLIT_REASONS and not (dispersed and r in LOW_DM_REASONS)]
         if multibeam or row['rfi_like']:
             reasons.append('Period is flagged as interference')
         candidates.append(dict(row, fold=fold, quality=quality, signature=signature,
