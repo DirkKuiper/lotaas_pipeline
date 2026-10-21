@@ -28,7 +28,18 @@ except ImportError:                  # the host's python has no numba; the searc
         return lambda f: f
 
 WIDTHS = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
-DETREND_TURNS = 4.0
+# The running median the series is freed of, in turns of the octave's longest period: narrow pulses (duty under
+# a tenth) pass a median over two turns untouched, and red noise slower than that goes.
+DETREND_TURNS = 2.0
+# Red noise and the 2-bit data's level steps raise the S/N of every long trial period, unevenly: in LT5 beams
+# periods of 90-250 s reached S/N 50-70 with no pulsar there. Each S/N is judged against the periodogram's own
+# floor around it: the median and the scatter below it of the best S/N of the trial periods in FLOOR_BINS bins per
+# octave of period. A peak needs both the white-noise threshold and FLOOR_SIGMA scatters above that floor.
+# Tuned on slow-pass trials of 16 LT5 beams (benchmarks/ffa-pilot-2026-10-21/tune): at 6 scatters 9 of 10
+# injected slow pulsars were found, 7 among a beam's 16 strongest peaks, and beams with no source gave 0-1 peaks
+# (interference-heavy ones up to ~24); at 5, 53-58 there.
+FLOOR_BINS = 16
+FLOOR_SIGMA = 6.0
 
 
 @njit(cache=True)
@@ -92,11 +103,12 @@ def downsample(x, factor):
     return x[:n * factor].reshape(n, factor).sum(axis=1)
 
 
-def search(series, dt, period_min=4.0, period_max=300.0, bins_min=128, threshold=7.0, widths=WIDTHS):
-    """Peaks of S/N >= threshold over trial periods: [{period_seconds, snr, width_bins, bins, turns, downsample}].
+def search(series, dt, period_min=4.0, period_max=300.0, bins_min=128, threshold=7.0, widths=WIDTHS,
+           floor_sigma=FLOOR_SIGMA):
+    """Peaks over trial periods: [{period_seconds, snr, excess, width_bins, bins, turns, downsample}].
 
-    Per octave, a peak is the best trial in each run of trials above threshold.
-    """
+    A trial is a peak at S/N >= threshold and an excess over the periodogram's floor (floor_sigma, in robust
+    scatters); per octave, the best trial of each run of such trials."""
     x = np.asarray(series, dtype=np.float64)
     peaks = []
     factor = 1
@@ -109,13 +121,13 @@ def search(series, dt, period_min=4.0, period_max=300.0, bins_min=128, threshold
             if scale > 0:
                 y = y / scale
                 peaks += _octave(y, dt * factor, factor, bins_min, max(lo, period_min), min(hi, period_max),
-                                 threshold, np.asarray(widths, dtype=np.int64))
+                                 threshold, np.asarray(widths, dtype=np.int64), floor_sigma)
         factor *= 2
     return peaks
 
 
-def _octave(y, dt, factor, bins_min, period_lo, period_hi, threshold, widths):
-    out = []
+def _octave(y, dt, factor, bins_min, period_lo, period_hi, threshold, widths, floor_sigma=FLOOR_SIGMA):
+    trials = []
     for p in range(bins_min, 2 * bins_min):
         m = len(y) // p
         if m < 2 or (p + 1) * dt <= period_lo or p * dt >= period_hi:
@@ -123,12 +135,47 @@ def _octave(y, dt, factor, bins_min, period_lo, period_hi, threshold, widths):
         profiles = _transform(y[:m * p].reshape(m, p).copy())
         snr, width = _boxcar_snr(profiles, m, widths)
         periods = (p + np.arange(m) / (m - 1)) * dt
-        above = np.flatnonzero((snr >= threshold) & (periods >= period_lo) & (periods < period_hi))
+        keep = (periods >= period_lo) & (periods < period_hi)
+        trials.append((periods[keep], snr[keep], width[keep], p, m))
+    if not trials:
+        return []
+    floor = noise_floor(np.concatenate([t[0] for t in trials]), np.concatenate([t[1] for t in trials]),
+                        period_lo, period_hi)
+    out = []
+    for periods_p, snr_p, width_p, p, m in trials:
+        ex = excess_over(floor, periods_p, snr_p)
+        above = np.flatnonzero((snr_p >= threshold) & (ex >= floor_sigma))
         if not len(above):
             continue
         runs = np.split(above, np.flatnonzero(np.diff(above) > 1) + 1)
         for run in runs:
-            k = run[np.argmax(snr[run])]
-            out.append({'period_seconds': float(periods[k]), 'snr': float(snr[k]), 'width_bins': int(width[k]),
-                        'bins': int(p), 'turns': int(m), 'downsample': int(factor)})
+            k = run[np.argmax(snr_p[run])]
+            out.append({'period_seconds': float(periods_p[k]), 'snr': float(snr_p[k]), 'excess': float(ex[k]),
+                        'width_bins': int(width_p[k]), 'bins': int(p), 'turns': int(m), 'downsample': int(factor)})
     return out
+
+
+def noise_floor(periods, snr, period_lo, period_hi):
+    """(log period centres, median S/N, robust scatter) of a periodogram in FLOOR_BINS log bins per octave."""
+    edges = np.geomspace(period_lo, period_hi, max(2, int(round(FLOOR_BINS * np.log2(period_hi / period_lo)))) + 1)
+    which = np.searchsorted(edges, periods, side='right') - 1
+    centres, medians, scatters = [], [], []
+    for i in range(len(edges) - 1):
+        inside = snr[which == i]
+        if len(inside) < 8:
+            continue
+        # The scatter from below the median only: a pulse lifts the trials around its own period, the upper tail.
+        median, low = np.percentile(inside, [50.0, 15.87])
+        centres.append(np.log(np.sqrt(edges[i] * edges[i + 1])))
+        medians.append(float(median))
+        scatters.append(max(1e-6, float(median - low)))
+    return np.array(centres), np.array(medians), np.array(scatters)
+
+
+def excess_over(floor, periods, snr):
+    """(snr - floor) / scatter at each period, the floor interpolated in log period (0 where there is none)."""
+    centres, medians, scatters = floor
+    if not len(centres):
+        return np.zeros_like(snr)
+    logp = np.log(periods)
+    return (snr - np.interp(logp, centres, medians)) / np.interp(logp, centres, scatters)

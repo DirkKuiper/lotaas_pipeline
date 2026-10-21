@@ -129,7 +129,7 @@ ffa:
   period_min_seconds: 4.0
   period_max_seconds: 300.0
   threshold: 7.0
-  max_folds: 8
+  max_folds: 16
 
 # Single-pulse review: one-second templates, local noise check, then FETCH.
 classification:

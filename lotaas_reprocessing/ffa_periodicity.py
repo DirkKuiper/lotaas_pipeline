@@ -25,7 +25,8 @@ DEFAULTS = {
     'threshold': 7.0,
     # A DM step d smears 0.109 s x d / 2 across 119-151 MHz at most: 27 ms at 0.5, 0.11 s at 2.
     'dm_steps': [[0.0, 10.0, 0.5], [10.0, 40.0, 1.0], [40.0, 100.0, 2.0]],
-    'max_folds': 8,
+    # The injected pulsars ranked up to 15th among an interference-heavy beam's peaks.
+    'max_folds': 16,
     # 225 s intervals: a fold up to that period covers every phase in each (the review page needs 16).
     'fold_subintegrations': 16,
 }
@@ -34,8 +35,18 @@ DEFAULTS = {
 # rfi_like, so they fold last.
 BLOCK_SECONDS = 3072 * 0.007864319719374176
 ROW_SECONDS = 512 * 0.007864319719374176
-STEP_RATIOS = sorted({m / n for n in range(1, 9) for m in range(1, 17)})
+# Simple fractions of a block (64.4 s = 8/3 of one folded across 30 DM trials of L455526 SAP000 B006), whole
+# rows: sparser than the review page's rescue rule, so fewer real periods fold last.
+BLOCK_RATIOS = sorted({m / n for n in range(1, 5) for m in range(1, 13)})
+ROW_RATIOS = [float(m) for m in range(1, 80)]
 STEP_TOLERANCE = 1e-3
+# A pulse w seconds wide loses S/N within about w / 0.109 s DM units of its DM (its sweep across 119-151 MHz);
+# a period kept at >= UNDISPERSED_FRACTION of its S/N over more than UNDISPERSED_FACTOR times that (and
+# UNDISPERSED_MIN_DM) is not dispersed: flagged rfi_like, folded last.
+SWEEP_PER_DM = 0.109
+UNDISPERSED_FRACTION = 0.6
+UNDISPERSED_FACTOR = 3.0
+UNDISPERSED_MIN_DM = 5.0
 
 
 def settings_of(settings):
@@ -45,7 +56,24 @@ def settings_of(settings):
 
 
 def on_steps(period):
-    return any(abs(period / step / r - 1) <= STEP_TOLERANCE for step in (BLOCK_SECONDS, ROW_SECONDS) for r in STEP_RATIOS)
+    return (any(abs(period / BLOCK_SECONDS / r - 1) <= STEP_TOLERANCE for r in BLOCK_RATIOS)
+            or any(abs(period / ROW_SECONDS / r - 1) <= STEP_TOLERANCE for r in ROW_RATIOS))
+
+
+def undispersed(row, rows, periods=None):
+    """Whether a peak's period holds its S/N over a wider span of DM than its pulse width allows.
+
+    periods: the sorted periods of rows (rows in that order), to look only at the peaks near this one."""
+    import bisect
+    p = row['period_seconds']
+    if periods is None:
+        rows = sorted(rows, key=lambda q: q['period_seconds'])
+        periods = [q['period_seconds'] for q in rows]
+    near = rows[bisect.bisect_left(periods, p * (1 - 2e-3)):bisect.bisect_right(periods, p * (1 + 2e-3))]
+    same = [q for q in near if q['statistic'] >= UNDISPERSED_FRACTION * row['statistic']]
+    span = max((abs(q['dm'] - row['dm']) for q in same), default=0.0)
+    width = row['width_bins'] * row['period_seconds'] / row['ffa_bins']
+    return span > max(UNDISPERSED_MIN_DM, UNDISPERSED_FACTOR * width / SWEEP_PER_DM)
 
 
 def selected(specs, steps):
@@ -103,7 +131,7 @@ def search_ffa(trial_dir, output_dir, metadata, config=None):
             rows = []
             for p in peaks:
                 rows.append({'frequency_hz': 1.0 / p['period_seconds'], 'period_seconds': p['period_seconds'],
-                             'frequency_resolution_hz': 1.0 / seconds, 'statistic': p['snr'],
+                             'frequency_resolution_hz': 1.0 / seconds, 'statistic': p['snr'], 'floor_excess': p['excess'],
                              'statistic_kind': 'ffa_boxcar_snr', 'harmonic_count': 1, 'width_bins': p['width_bins'],
                              'ffa_bins': p['bins'], 'ffa_downsample': p['downsample'], 'turns': p['turns'],
                              'observation_seconds': seconds, 'effective_sampling_seconds': dt,
@@ -116,6 +144,11 @@ def search_ffa(trial_dir, output_dir, metadata, config=None):
                              'effective_sampling_seconds': dt})
     os.replace(partial, raw_path)
     search_seconds = time.perf_counter() - started
+    ordered = sorted(candidates, key=lambda q: q['period_seconds'])
+    periods = [q['period_seconds'] for q in ordered]
+    for row in candidates:
+        row['undispersed'] = undispersed(row, ordered, periods)
+        row['rfi_like'] = row['rfi_like'] or row['undispersed']
     sifted, sift_limit = sift_bounded(candidates, config)
     _write_jsonl(output_dir / (PREFIX + 'periodicity_candidates.jsonl'), sifted)
     atomic_json(output_dir / (PREFIX + 'periodicity_coverage.json'), coverage)
