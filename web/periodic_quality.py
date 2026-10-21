@@ -156,6 +156,13 @@ def normalise_rows(values):
     return (values - values.mean(axis=1, keepdims=True)) / scales
 
 
+def slow_fold(fold, rows=32):
+    """Whether a fold's intervals hold fewer than MIN_TURNS turns (merged when MERGE_INTERVALS is on)."""
+    period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
+    seconds = float(fold.get('observation_seconds') or 3600.0)
+    return period > 0 and seconds / rows / period < MIN_TURNS and max(MIN_ROWS, int(seconds / (MIN_TURNS * period))) < rows
+
+
 def merges(fold, rows=32):
     """Whether a fold of this many subintegrations has its intervals merged (merged_intervals)."""
     period = float(fold.get('refined_period_seconds') or fold.get('period_seconds') or 0)
@@ -321,11 +328,13 @@ def sync(db):
             stamp = [stat.st_mtime_ns, stat.st_size]
         except OSError:
             stamp = None
-        # Version 3 changed only folds whose intervals are merged: the others keep their version-2 verdicts.
-        version = VERSION if merges(fold) else 2
-        signature = hashlib.sha256(json.dumps([version, row['row'], str(path), stamp]).encode()).hexdigest()
+        # Slow folds (fewer than MIN_TURNS turns an interval) are measured again once: from 11:15 to 11:40 on
+        # 21 October 2026 some were stored measured with merged intervals under their unmerged signature.
+        version = 'merged' if merges(fold) else 5 if slow_fold(fold) else 2
+        current = hashlib.sha256(json.dumps([version, row['row'], str(path), stamp]).encode()).hexdigest()
+        signature = current
         old = cached.get(row['key'])
-        if old and old['signature'] == signature:
+        if old and old['signature'] == current:
             quality = json.loads(old['evidence'])
         elif old and budget <= 0:
             quality, signature = json.loads(old['evidence']), old['signature']      # measured again in a later pass
@@ -340,9 +349,13 @@ def sync(db):
         if (reasons and set(reasons) <= set(SPLIT_REASONS) | set(LOW_DM_REASONS) and not (multibeam or row['rfi_like'])
                 and (row['period'] or 0) >= PULSE_MIN_PERIOD):
             pulses = quality.get('pulses')
+            if pulses is None and pulse_budget > 0 and quality.get('peak_phase') is None:
+                # Measured before the phase was kept: measured now, under the current signature.
+                quality, signature = measure(fold, path), current
+                reasons = [r for r in quality['reasons'] if not (local and r in LOW_DM_REASONS)]
+                if not (reasons and set(reasons) <= set(SPLIT_REASONS) | set(LOW_DM_REASONS)):
+                    pulses = False
             if pulses is None and pulse_budget > 0:
-                if quality.get('peak_phase') is None:          # measured before the phase was kept
-                    quality = measure(fold, path)
                 if row['dir'] not in clusters:
                     from web.indexer import read_clusters
                     events = []

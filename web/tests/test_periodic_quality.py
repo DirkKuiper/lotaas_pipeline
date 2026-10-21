@@ -255,3 +255,29 @@ def test_pulses_on_the_requantisers_steps_rescue_nothing():
     assert not on_steps(20.74, [10.3, 1265.1, 2115.4, 3111.8])
     block_locked = [100.0 + n * BLOCK_SECONDS for n in (3, 40, 91, 120)]
     assert on_steps(17.15, block_locked)
+
+
+def test_a_slow_folds_stale_verdict_under_its_old_signature_is_measured_again(cfg, campaign):
+    # From 11:15 to 11:40 on 21 October 2026 some slow folds were stored measured with merged intervals under
+    # their unmerged (version 2) signature, and passed as strong afterwards on that stale verdict.
+    import hashlib
+    from pathlib import Path
+    directory = campaign['beam_dir']
+    save_fold(directory, 'slow', period=74.738, amplitude=50)
+    np.savez(directory / 'periodicity_plots' / 'slow.npz', **diagnostic(amplitude=50, intermittent=True))
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    key, row, fold_data, status = indexer.db.execute(
+        'SELECT p.key, p.row, p.fold_data, t.status FROM periodic p JOIN periodic_triage t USING(key)').fetchone()
+    assert status == 'deferred'
+    path = Path(directory) / fold_data
+    stat = path.stat()
+    old = hashlib.sha256(json.dumps([2, row, str(path), [stat.st_mtime_ns, stat.st_size]]).encode()).hexdigest()
+    stale = {'version': 3, 'score': 12.0, 'strong': True, 'repeatability': 12.0, 'persistence': 1.0, 'reasons': [],
+             'peak_phase': 0.3, 'pulse_half_width': 0.02}
+    with indexer.db:
+        indexer.db.execute("UPDATE periodic_triage SET signature=?, evidence=?, status='strong', reasons='[]' WHERE key=?",
+                           (old, json.dumps(stale), key))
+    indexer.run_pass()
+    assert indexer.db.execute('SELECT status FROM periodic_triage WHERE key=?', (key,)).fetchone()[0] == 'deferred'
+    indexer.db.close()
