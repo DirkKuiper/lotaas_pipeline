@@ -139,6 +139,16 @@ def test_a_slow_pass_fold_joins_the_beams_folds_and_its_family(cfg, campaign):
     indexer.db.close()
 
 
+def test_an_ffa_fold_joins_the_beams_folds(cfg, campaign):
+    # The FFA's folds (lotaas_reprocessing.ffa_periodicity) are written to ffa_periodicity_folded_candidates.jsonl.
+    save_low_dm_fold(campaign['beam_dir'], 'ffa_periodic_001', 61.7, statistic=30.0,
+                     folds='ffa_periodicity_folded_candidates.jsonl')
+    indexer = Indexer(cfg)
+    indexer.run_pass()
+    assert indexer.db.execute("SELECT COUNT(*) FROM periodic WHERE plot LIKE '%ffa_periodic_001%'").fetchone()[0] == 1
+    indexer.db.close()
+
+
 def test_default_queue_groups_strong_folds_and_keeps_deferred_accessible(cfg, campaign):
     directory = campaign['beam_dir']
     save_fold(directory, 'real', catalogue=True)

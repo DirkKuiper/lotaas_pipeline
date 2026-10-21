@@ -628,9 +628,10 @@ class Indexer:
                 summary[name] = {}
         periodic_rows = []
         lines = []
-        # The slow-pulsar pass's folds (lotaas_reprocessing.slow_periodicity, plots slow_periodic_*) join the
-        # beam's folds; each file ranks its own.
-        for name in ('periodicity_folded_candidates.jsonl', 'slow_periodicity_folded_candidates.jsonl'):
+        # The slow-pulsar pass's folds (lotaas_reprocessing.slow_periodicity, plots slow_periodic_*) and the FFA's
+        # (ffa_periodicity, ffa_periodic_*) join the beam's folds; each file ranks its own.
+        for name in ('periodicity_folded_candidates.jsonl', 'slow_periodicity_folded_candidates.jsonl',
+                     'ffa_periodicity_folded_candidates.jsonl'):
             try:
                 lines += list(enumerate((path / name).read_text().splitlines(), 1))
             except OSError:
