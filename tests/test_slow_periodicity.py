@@ -40,6 +40,7 @@ def settings(tmp_path, enabled=True):
     values['dedispersion_plan'] = [{'low_dm': 0.0, 'high_dm': 2.0, 'ddm': 0.5, 'downsample': 1}]
     values['periodicity'].update(dm_plan=[{'low_dm': 0.0, 'high_dm': 2.0, 'ddm': 0.5, 'downsample': 1}],
                                  catalogue_match=False, catalogue_fold=False, multibeam_veto=False)
+    values['ffa'] = dict(values.get('ffa') or {}, enabled=False)          # the slow pass alone (FFA: test_ffa)
     values['slow_periodicity'].update(enabled=enabled,
                                       dm_plan=[{'low_dm': 0.0, 'high_dm': 2.0, 'ddm': 0.5, 'downsample': 4}])
     path = tmp_path / 'settings.yaml'

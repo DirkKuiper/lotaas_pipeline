@@ -130,7 +130,8 @@ slow_periodicity:
 # The FFA for long periods (4-300 s) on the slow pass's trials (lotaas_reprocessing.ffa_periodicity): the slow
 # pass's FFT found 4 of 15 slow pulsars injected at 60-200 s; the FFA recovers 75-90% of a pulse train's ideal S/N.
 ffa:
-  enabled: false
+  # On since 22 October 2026 (pilot: benchmarks/ffa-pilot-2026-10-21).
+  enabled: true
   period_min_seconds: 4.0
   period_max_seconds: 300.0
   threshold: 7.0
