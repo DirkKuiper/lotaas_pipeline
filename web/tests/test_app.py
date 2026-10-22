@@ -508,6 +508,25 @@ def test_a_fold_at_a_catalogued_pulsars_own_period_is_settled(cfg, campaign, mon
     assert 'B0823+26 (J0826+2637) at its own period and its DM, 2.51 deg' in notes[1]
 
 
+def test_a_fold_at_the_literatures_dm_of_a_catalogued_pulsar_is_settled(cfg, campaign, monkeypatch, tmp_path):
+    # J0104+6438 (22 October 2026): ATNF 2.8.1 gives DM 44.6, I-LOFAR timed it at 42.026; our fold was at 42.0.
+    from web import findings
+    catalogue = tmp_path / 'psrcat.db'
+    catalogue.write_text('PSRJ     J0840+66\nRAJ      08:40\nDECJ     +66\nDM       44.6\nP0       1.386\n@----\n')
+    monkeypatch.setenv('LOTAAS_PSRCAT', str(catalogue))
+    fold(campaign['beam_dir'], 42.0, 1.3861842, 120.0, 'psr')
+    Indexer(cfg).run_pass()
+    assert [v for v in verdicts(cfg) if v['label'] == 'known'] == []
+    literature = tmp_path / 'literature.tsv'
+    literature.write_text('name\taliases\treference\turl\tra\tdec\tpos_err_arcsec\tperiod_s\tperiod_err_s\tdm\tdm_err\t'
+                          'lofar\tnote\nJ0840+6600\t\tI-LOFAR 2026\t\t08:40:37.2\t+66:00:30.0\t5\t1.38618423347\t'
+                          '1e-9\t42.026\t\t1\t\n')
+    monkeypatch.setattr(findings, 'LITERATURE', literature)
+    Indexer(cfg).run_pass()
+    notes = [v['note'] for v in verdicts(cfg) if v['label'] == 'known']
+    assert len(notes) == 1 and 'J0840+6600 at its own period and its DM (DM 42.026, I-LOFAR 2026)' in notes[0]
+
+
 PER_DM = 4148.808 * (1 / (119.45 * 151.04) - 1 / 151.04 ** 2)   # s of band-averaged delay per unit DM
 
 

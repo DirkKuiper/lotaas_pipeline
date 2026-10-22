@@ -262,6 +262,24 @@ def literature(path=None):
     return out
 
 
+def known_pulsars(path=None):
+    """The pinned catalogue's pulsars (euroflash.psrcat.load), then the sources of data/literature.tsv with a
+    position, period and DM as records like them, for the matches that settle candidates as known.
+
+    The literature's periods and DMs are newer. The pinned ATNF 2.8.1 gives J0104+64 DM 44.6; I-LOFAR timed it
+    as J0104+6438 at DM 42.03 (2026), and our fold of it at DM 42.0 reached the review queue as uncatalogued on
+    22 October 2026. Both records stay: a match tries each, nearest first.
+    """
+    from euroflash import psrcat
+    pulsars = list(psrcat.load() or [])
+    for entry in literature(path):
+        if all(entry.get(k) is not None for k in ('ra', 'dec', 'period', 'dm')) and entry['period'] > 0:
+            pulsars.append({'name': entry['name'], 'bname': None, 'ra': entry['ra'], 'dec': entry['dec'],
+                            'dm': entry['dm'], 'f0': 1 / entry['period'], 'f1': None, 'pepoch': None,
+                            'reference': entry['reference']})
+    return pulsars
+
+
 # ------------------------------------------------------------------- helpers
 def separation(ra1, dec1, ra2, dec2):
     a1, d1, a2, d2 = map(math.radians, (ra1, dec1, ra2, dec2))

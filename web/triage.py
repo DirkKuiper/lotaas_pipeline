@@ -318,7 +318,8 @@ def _at_a_nearby_pulsars_dm(db, earlier):
     pulses of the Crab (DM 56.77) reached 22 beams of L549917, 4-4.8 degrees away, as sporadic single pulses
     that neither a fold nor a rotation sequence attributes (29 September 2026)."""
     from euroflash import psrcat
-    pulsars = psrcat.load()
+    from web.findings import known_pulsars
+    pulsars = known_pulsars()
     if not pulsars:
         return []
     out, cones = [], {}
@@ -336,7 +337,8 @@ def _at_a_nearby_pulsars_dm(db, earlier):
             if pulsar.get('dm') and abs(r['dm'] - pulsar['dm']) <= tolerance + slack:
                 name = pulsar.get('bname') or pulsar['name']
                 name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
-                out.append((r['key'], 'known', f"At the DM of {name} ({pulsar['dm']:g}), "
+                source = f", {pulsar['reference']}" if pulsar.get('reference') else ''
+                out.append((r['key'], 'known', f"At the DM of {name} ({pulsar['dm']:g}{source}), "
                             f"{pulsar['separation_deg']:.2f} deg from this beam: its pulses through the "
                             f"sidelobes.", r['dm'], r['earlier']))
                 break
@@ -377,9 +379,11 @@ PERIODIC_RADIUS_DEG = 5.0
 
 
 def periodic_settled(db):
-    """[(key, 'known', note, dm, earlier)] of open folds at a catalogued pulsar's own period and DM."""
+    """[(key, 'known', note, dm, earlier)] of open folds at a catalogued pulsar's own period and DM: the pinned
+    catalogue's or the literature's (web.findings.known_pulsars)."""
     from euroflash import psrcat
-    pulsars = psrcat.load()
+    from web.findings import known_pulsars
+    pulsars = known_pulsars()
     if not pulsars:
         return []
     out, cones = [], {}
@@ -397,7 +401,8 @@ def periodic_settled(db):
             name = pulsar.get('bname') or pulsar['name']
             name = name if name == pulsar['name'] else f"{name} ({pulsar['name']})"
             at = 'its own period' if relation == '1/1' else f'{relation} of its period'
-            out.append((r['key'], 'known', f"{name} at {at} and its DM, {pulsar['separation_deg']:.2f} deg "
+            source = f" (DM {pulsar['dm']:g}, {pulsar['reference']})" if pulsar.get('reference') else ''
+            out.append((r['key'], 'known', f"{name} at {at} and its DM{source}, {pulsar['separation_deg']:.2f} deg "
                         f"from this beam.", r['dm'], r['earlier']))
     return out
 

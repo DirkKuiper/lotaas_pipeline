@@ -44,8 +44,10 @@ def synthetic_filterbank(path, dm=30.0, t_pulse=15.0, amplitude=1.2, width=3, ns
 
 @pytest.fixture(autouse=True)
 def no_catalogue(tmp_path, monkeypatch):
-    """Tests bring their own pulsar catalogue, never the one psrqpy cached on the head."""
+    """Tests bring their own pulsar catalogue and literature, never the one psrqpy cached on the head or ours."""
+    from web import findings
     monkeypatch.setenv('LOTAAS_PSRCAT', str(tmp_path / 'no-psrcat.db'))
+    monkeypatch.setattr(findings, 'LITERATURE', tmp_path / 'no-literature.tsv')
 
 
 @pytest.fixture

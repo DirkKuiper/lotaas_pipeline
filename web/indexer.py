@@ -747,7 +747,8 @@ class Indexer:
                 WHERE r.class IS NULL""").fetchall()
         if not rows:
             return 0
-        pulsars = psrcat.load()
+        from web.findings import known_pulsars
+        pulsars = known_pulsars()
         others = {}
 
         def observation_events(observation, directory):
