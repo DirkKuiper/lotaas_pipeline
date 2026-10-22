@@ -68,16 +68,35 @@ def separation(a, b):
     return math.degrees(2 * math.asin(min(1.0, math.sqrt(h))))
 
 
+# Beyond them a bright source leaks into farther beams, weakly: J0311+1402 (339 in beam 53) was also found 1.07 deg
+# away in beam 25 at 24.5, a quarter of its amplitude, and the S/N 7 peaks of the FFA's busier periodogram sat 1.5 deg
+# away; either made its family no longer local, and both the slow pass and the FFA vetoed it (22 October 2026).
+# Interference is about as strong in every beam. A farther beam may hold the family at up to FAR_AMPLITUDE of the
+# strongest peak's amplitude; its own peak is still vetoed. Over the 22 October runs this kept only J0311+1402's peaks.
+FAR_AMPLITUDE = 0.5
+
+
+def amplitude(peak):
+    """A peak's strength as an amplitude: an FFA boxcar S/N as it is, the square root of an FFT statistic (-log10 p,
+    which grows with power)."""
+    value = max(float(peak.get('statistic') or 0.0), 0.0)
+    return value if peak.get('kind') == 'ffa_boxcar_snr' else math.sqrt(value)
+
+
 def localised(family, positions):
-    """Whether peaks of one SAP, in at most LOCAL_BEAMS beams, all lie within LOCAL_DEG of the strongest's beam."""
-    beams = {(p['sap'], p['beam']) for p in family}
-    if len({sap for sap, _ in beams}) != 1 or len(beams) > LOCAL_BEAMS or not positions:
+    """Whether the first peak of a family (it and the peaks matching it) is a source on the sky: the family lies in
+    one SAP, in 2 to LOCAL_BEAMS beams within LOCAL_DEG of its strongest peak's beam, the first among them, and any
+    farther beam holds it at no more than FAR_AMPLITUDE of the strongest's amplitude."""
+    if not positions or any((p['sap'], p['beam']) not in positions for p in family):
         return False
-    if any(b not in positions for b in beams):
+    if len({p['sap'] for p in family}) != 1:
         return False
-    strongest = max(family, key=lambda p: p.get('statistic') or 0)
+    strongest = max(family, key=amplitude)
     centre = positions[(strongest['sap'], strongest['beam'])]
-    return all(separation(centre, positions[b]) <= LOCAL_DEG for b in beams)
+    near = {(p['sap'], p['beam']) for p in family if separation(centre, positions[(p['sap'], p['beam'])]) <= LOCAL_DEG}
+    return ((family[0]['sap'], family[0]['beam']) in near and 2 <= len(near) <= LOCAL_BEAMS
+            and all(amplitude(p) <= FAR_AMPLITUDE * amplitude(strongest) for p in family
+                    if (p['sap'], p['beam']) not in near))
 
 
 def _degrees(text, hours=False):
@@ -258,7 +277,7 @@ def apply(directories, veto_bins=1.1, veto_beams=4, write=None, prefix=''):
                 peaks.append({'frequency_hz': row['frequency_hz'],
                               'frequency_resolution_hz': row['frequency_resolution_hz'],
                               'dm': row['dm'], 'sap': sap, 'beam': beam, 'key': (str(directory), index),
-                              'statistic': row.get('statistic')})
+                              'statistic': row.get('statistic'), 'kind': row.get('statistic_kind')})
         vetoed = decide(peaks, veto_bins, veto_beams, positions)
         rule = {'veto_bins': veto_bins, 'veto_beams': veto_beams, 'neighbourhood_windows': NEIGHBOURHOOD,
                 'chance_floor': '3 x median other-beam peaks per neighbouring window + 1',

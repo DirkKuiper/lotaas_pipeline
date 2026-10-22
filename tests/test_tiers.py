@@ -479,5 +479,15 @@ def test_a_low_dm_family_in_a_beam_and_its_neighbours_is_not_vetoed():
     far = {(1, 53): (47.80, 14.04), (1, 34): (47.80, 16.04), (1, 35): (50.00, 14.12), (1, 52): (45.60, 13.96)}
     assert V.decide(family) and len(V.decide(family, positions=far)) == 4
     assert not V.decide(family, positions=near)
+    # On 22 October it was also in beam 25, 1.07 deg away, at 24.5: its leak there stays vetoed, the rest not.
+    # Interference as strong there vetoes them all.
+    leak = family + [dict(peak(0.0244454, 1.0, 1, 25, key=25), statistic=24.5)]
+    with_25 = {**near, (1, 25): (47.80, 15.11)}
+    assert set(V.decide(leak, positions=with_25)) == {25}
+    loud = family + [dict(peak(0.0244454, 1.0, 1, 25, key=25), statistic=200.0)]
+    assert len(V.decide(loud, positions=with_25)) == 5
+    # The FFA's S/N is an amplitude: its far peaks at a third of the strongest's leave the family local.
+    ffa = [dict(p, kind='ffa_boxcar_snr', statistic=s) for p, s in zip(leak, (48.7, 31.2, 32.5, 25.2, 14.4))]
+    assert set(V.decide(ffa, positions=with_25)) == {25}
     assert V.position(Path('/nonexistent')) is None
     assert V._degrees('03:11:12.0', hours=True) == 47.8 and V._degrees('-00:30:00') == -0.5
