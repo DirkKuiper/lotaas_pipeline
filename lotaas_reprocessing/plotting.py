@@ -106,7 +106,16 @@ def rfi_diagnostic_plot(masked_data, original_data, mask, t, nu, factor, filenam
     colors = ['blue', 'orange', 'green', 'purple']
 
     # Calculate vmin and vmax for consistent dynamic spectrum display
-    vmin, vmax = np.nanpercentile(averaged_masked_data, [5, 99])
+    # A beam masked in every averaged cell (79% of L597867 SAP001 B037, 22 October 2026) has no unmasked range:
+    # the original data's is used then, and a fixed one when that has none either.
+    with np.errstate(all='ignore'):
+        vmin, vmax = (np.nanpercentile(averaged_masked_data, [5, 99]) if np.isfinite(averaged_masked_data).any()
+                      else (np.nan, np.nan))
+        if not (np.isfinite(vmin) and np.isfinite(vmax)):
+            vmin, vmax = (np.nanpercentile(averaged_data, [5, 99]) if np.isfinite(averaged_data).any()
+                          else (-1.0, 1.0))
+    if not (np.isfinite(vmin) and np.isfinite(vmax)) or vmin == vmax:
+        vmin, vmax = -1.0, 1.0
 
     # Start plotting
     fig = plt.figure(figsize=(18, 16))

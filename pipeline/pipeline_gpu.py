@@ -117,17 +117,24 @@ if __name__ == "__main__":
 
    # Save RFI diagnostic plot in the main output directory
     save_path = os.path.join(output_dir, f"{base_fname}_rfi_diagnostic_plot.png")
-    plotting.rfi_diagnostic_plot(
-        masked_data, 
-        data, 
-        mask, 
-        t, 
-        nu, 
-        rfi_averaging_factor, 
-        filename=fname,
-        save_path=save_path,
-        observation_info=observation_info
-    )
+    # A diagnostic plot never stops the search: 12 beams of 8 SAPs failed dedispersion on its axis limits alone
+    # (22 October 2026).
+    try:
+        plotting.rfi_diagnostic_plot(
+            masked_data,
+            data,
+            mask,
+            t,
+            nu,
+            rfi_averaging_factor,
+            filename=fname,
+            save_path=save_path,
+            observation_info=observation_info
+        )
+    except (ValueError, FloatingPointError, OverflowError) as error:
+        print(f"RFI diagnostic plot skipped: {error}")
+        import matplotlib.pyplot as plt
+        plt.close('all')
 
     # Masked cells filled (lotaas_reprocessing.preprocess): at the channel's own local level with
     # preprocessing.mask_fill 'local'; by default at the global mean, which leaves 7.9 s steps in
