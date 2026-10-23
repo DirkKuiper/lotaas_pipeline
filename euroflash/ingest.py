@@ -33,6 +33,8 @@ JOB_TIMEOUT = 2 * 3600
 # A node whose ssh failed takes no file for this long; the head converts locally while none is left.
 NODE_BACKOFF = 600
 RESULT_PREFIX = 'INGEST-RESULT '
+# Jobs at once on a node's ingest master, ingest and flatfield together: sshd allows 10 sessions a connection.
+MAX_JOBS_PER_NODE = 8
 
 
 class NodeUnavailable(RuntimeError):
@@ -182,20 +184,28 @@ class Ingest:
         self.scratch, self.shared, self.timeout = scratch, tuple(shared), timeout
         self.log_dir = Path(log_dir) if log_dir else None
         self.lock = threading.Lock()
+        self.max_jobs = MAX_JOBS_PER_NODE
         self.busy = {n: 0 for n in self.nodes}
         self.down_until = {n: 0. for n in self.nodes}
         self.ready = {}
         self.node_locks = {n: threading.Lock() for n in self.nodes}
         self.frozen = None
 
-    def acquire(self):
-        """The least busy node not backing off, now counted busy; None when every one is."""
+    def home(self, key):
+        """The node a SAP's archives and flatfield go to when it can take them, the same in every driver: its
+        flatfield then reads the beams from that node's own cache rather than over NFS."""
+        import zlib
+        return self.nodes[zlib.crc32(key.encode()) % len(self.nodes)]
+
+    def acquire(self, prefer=None):
+        """prefer when it is up and has room, else the least busy node that is, now counted busy; None when none
+        is (up to MAX_JOBS_PER_NODE each)."""
         with self.lock:
             now = time.time()
-            usable = [n for n in self.nodes if self.down_until[n] <= now]
+            usable = [n for n in self.nodes if self.down_until[n] <= now and self.busy[n] < self.max_jobs]
             if not usable:
                 return None
-            node = min(usable, key=lambda n: (self.busy[n], self.nodes.index(n)))
+            node = prefer if prefer in usable else min(usable, key=lambda n: (self.busy[n], self.nodes.index(n)))
             self.busy[node] += 1
             return node
 
@@ -274,15 +284,27 @@ class Ingest:
             self.ready[node] = destination
             return destination
 
-    def command(self, destination):
-        binds = [self.scratch, *self.shared]
-        container = ['apptainer', 'exec', '--cleanenv']
-        for path in binds:
-            container += ['--bind', path]
-        container += ['--env', 'PYTHONPATH=' + destination, destination + '/containers/runtime.sif',
-                      'python', '-m', 'euroflash.ingest', 'node']
+    def container(self, destination, *program):
+        command = ['apptainer', 'exec', '--cleanenv']
+        for path in (self.scratch, *self.shared):
+            command += ['--bind', path]
+        command += ['--env', 'PYTHONPATH=' + destination, destination + '/containers/runtime.sif', 'python', *program]
         return (f'mkdir -p {shlex.quote(self.scratch)} && cd {shlex.quote(destination)} && '
-                + shlex.join(container))
+                + shlex.join([str(p) for p in command]))
+
+    def command(self, destination):
+        return self.container(destination, '-m', 'euroflash.ingest', 'node')
+
+    def remote_command(self, node, script, arguments):
+        """The command running one of the repository's scripts on the node, in its image, from the frozen code."""
+        return self.ssh_args(node) + [self.container(self.prepare(node), script, *arguments)]
+
+    @staticmethod
+    def unreachable(error):
+        """Whether a failed remote step (euroflash.run.Runner.step) failed for ssh or the container, not the work."""
+        cause = error if isinstance(error, (NodeUnavailable, subprocess.CalledProcessError)) else error.__cause__
+        return isinstance(cause, NodeUnavailable) or (isinstance(cause, subprocess.CalledProcessError)
+                                                     and cause.returncode == 255)
 
     def run(self, node, spec, item):
         """One archive on one node. Raises NodeUnavailable (the node), PermissionError (the macaroons) or

@@ -581,7 +581,7 @@ class Campaign:
         if spider.is_spider(f['surl']):
             return self.process_spider(f)
         if self.ingest is not None:
-            node = self.ingest.acquire()
+            node = self.ingest.acquire(prefer=self.ingest.home(f['sap_key']))
             if node is not None:
                 try:
                     return self.process_remote(f, node)
@@ -773,7 +773,7 @@ class Campaign:
                 # waiting for beams keeps its flatfield for them.
                 present = {f['beam'] for f in files if f['state'] == 'converted'}
                 short = any(b not in present for b in CENTRAL)
-                job = functools.partial(self.runner.flatfield, sap_dir, allow_partial=short,
+                job = functools.partial(self.flatfield, sap['key'], sap_dir, allow_partial=short,
                                         save_mean=str(sap_dir/MEAN) if outstanding else None,
                                         **self.levelling(sap))
                 # Flatfielding reads the whole SAP (~4 min); keep downloading meanwhile.
@@ -792,6 +792,25 @@ class Campaign:
                 if self.finish_flatfield(key, sap_dir, job.exception()):
                     prepared.append(key)
         return prepared
+
+    def flatfield(self, key, sap_dir, **options):
+        """runner.flatfield on the SAP's ingest node (Ingest.home: where its beams were converted), else on any
+        ingest node with room, else here. On the head five flatfields at a time took 500-700 s a SAP by day and
+        2,000-2,900 s at night, and held the campaign to 5-7 SAPs an hour then (22-23 October 2026)."""
+        if self.ingest is not None:
+            node = self.ingest.acquire(prefer=self.ingest.home(key))
+            if node is not None:
+                try:
+                    return self.runner.flatfield(sap_dir, launcher=lambda script, arguments:
+                                                 self.ingest.remote_command(node, script, arguments), **options)
+                except Exception as error:
+                    if not self.ingest.unreachable(error):
+                        raise
+                    self.ingest.back_off(node)
+                    self.state.event('ingest_node_down', node, f'flatfield of {key}: {error}'[:2000])
+                finally:
+                    self.ingest.release(node)
+        return self.runner.flatfield(sap_dir, **options)
 
     @staticmethod
     def levelling(sap):
@@ -817,7 +836,7 @@ class Campaign:
         sap_dir = Path(sap['sap_dir'])
         late = [Path(p) for f in files if f['state'] == 'converted' for p in json.loads(f['fil']) if Path(p).is_file()]
         if late:
-            job = functools.partial(self.runner.flatfield, sap_dir, mean=str(sap_dir/MEAN), **self.levelling(sap))
+            job = functools.partial(self.flatfield, sap['key'], sap_dir, mean=str(sap_dir/MEAN), **self.levelling(sap))
             self.flatfield_jobs[sap['key']] = self.flatfield_pool.submit(job)
             self.state.set_sap(sap['key'], state='flatfielding')
         elif not any(f['state'] in OUTSTANDING for f in files) and not self.unsearched(sap['key']):

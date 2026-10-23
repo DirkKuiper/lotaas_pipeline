@@ -148,3 +148,31 @@ def test_ingest_runs_through_its_own_master_beside_the_search_tiers():
     ingest = I.Ingest(['efc-cpu-04'], '.', 's', 'i', control_dir=Path('/home/u/.ssh/control'))
     assert ingest.ssh_args('efc-cpu-04') == ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
                                              '-S', '/home/u/.ssh/control/ingest-cpu04', 'efc-cpu-04']
+
+
+def test_a_sap_has_one_home_node_and_a_full_node_sends_work_elsewhere():
+    ingest = I.Ingest(['efc-cpu-04', 'efc-cpu-05', 'efc-cpu-06'], '.', 's', 'i')
+    homes = {ingest.home(f'L{n}_SAP00{s}') for n in range(1000, 1060) for s in range(3)}
+    assert homes == set(ingest.nodes) and ingest.home('L1_SAP000') == ingest.home('L1_SAP000')
+    ingest.max_jobs = 2
+    assert [ingest.acquire(prefer='efc-cpu-06') for _ in range(3)] == ['efc-cpu-06', 'efc-cpu-06', 'efc-cpu-04']
+    ingest.back_off('efc-cpu-04')
+    assert ingest.acquire(prefer='efc-cpu-04') == 'efc-cpu-05'
+
+
+def test_only_ssh_or_the_container_failing_counts_as_the_node():
+    lost = subprocess.CalledProcessError(255, ['ssh'])
+    failed = subprocess.CalledProcessError(1, ['ssh'])
+    wrapped = RuntimeError('flatfield failed for x'); wrapped.__cause__ = lost
+    plain = RuntimeError('flatfield failed for x'); plain.__cause__ = failed
+    assert I.Ingest.unreachable(wrapped) and I.Ingest.unreachable(I.NodeUnavailable('x'))
+    assert not I.Ingest.unreachable(plain) and not I.Ingest.unreachable(ValueError('No converted beams'))
+
+
+def test_a_script_runs_on_the_node_in_its_image_from_the_frozen_code():
+    ingest = I.Ingest(['efc-cpu-04'], '.', 's', 'i', scratch='/tmp/lotaas-ingest', shared=('/shared/x',))
+    ingest.prepare = lambda node: '/home/u/lotaas-ingest/abc'
+    command = ingest.remote_command('efc-cpu-04', 'preproc/flatfield_fil.py', ['/shared/x/SAP000', '--allow-partial'])
+    assert command[:2] == ['ssh', '-o'] and command[-2] == 'efc-cpu-04'
+    assert command[-1].endswith('/home/u/lotaas-ingest/abc/containers/runtime.sif python preproc/flatfield_fil.py '
+                                '/shared/x/SAP000 --allow-partial')

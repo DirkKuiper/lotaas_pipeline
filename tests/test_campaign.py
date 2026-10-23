@@ -66,7 +66,9 @@ class FakeRunner:
             delete_converted(raw)
         return directory.parent, output
 
-    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None, level_rows=None):
+    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None, level_rows=None, launcher=None):
+        if launcher is not None:
+            self.launched = getattr(self, 'launched', []) + [launcher('preproc/flatfield_fil.py', [str(sap)])]
         paths = sorted(sap.glob('B*/*_32bit.fil'))
         central = {int(p.parent.name[1:]) for p in paths} & set(C.CENTRAL)
         if len(central) < len(C.CENTRAL) and not (allow_partial or mean):
@@ -310,6 +312,7 @@ def ingesting(tmp_path, monkeypatch, run):
     campaign.runner.image = tmp_path/'image.sif'
     campaign.runner.image.write_bytes(b'image')
     campaign.ingest.run = run
+    campaign.ingest.remote_command = lambda node, script, arguments: ['ssh', node, script, *arguments]
     campaign.tick()
     put_online(api, where, '1000001', 0, FULL)
     return campaign
@@ -358,24 +361,59 @@ def test_a_node_that_cannot_be_reached_rests_and_costs_its_file_no_strike(tmp_pa
     calls = []
     converts = node_converts(calls)
 
+    down = []
+
     def run(node, spec, item):
-        if node == 'efc-cpu-04':
-            raise NodeUnavailable('efc-cpu-04: ssh exited 255')
+        if node == down[0]:                                   # the SAP's own node is unreachable
+            raise NodeUnavailable(f'{node}: ssh exited 255')
         return converts(node, spec, item)
     campaign = ingesting(tmp_path, monkeypatch, run)
+    home = campaign.ingest.home('L1000001_SAP000')
+    other = next(n for n in campaign.ingest.nodes if n != home)
+    down.append(home)
     campaign.tick()
     settle(campaign)
-    assert campaign.ingest.down_until['efc-cpu-04'] > time.time()
-    assert {node for node, _ in calls} == {'efc-cpu-05'}
+    assert campaign.ingest.down_until[home] > time.time()
+    assert {node for node, _ in calls} == {other}
     assert all(r['failures'] == 0 for r in campaign.state.rows('SELECT failures FROM files'))
     # Jobs already on their way to it fail too, each file back in the queue.
-    assert {e['subject'] for e in campaign.state.rows("SELECT subject FROM events WHERE kind='ingest_node_down'")} == {'efc-cpu-04'}
+    assert {e['subject'] for e in campaign.state.rows("SELECT subject FROM events WHERE kind='ingest_node_down'")} == {home}
     # With every node resting the head ingests as before.
-    campaign.ingest.back_off('efc-cpu-05')
+    campaign.ingest.back_off(other)
     for _ in range(3):
         settle(campaign)
     assert not campaign.state.rows("SELECT 1 FROM files WHERE state IN ('online','working') LIMIT 1")
     assert campaign.state.rows("SELECT state FROM saps")[0]['state'] in ('flatfielding', 'prepared')
+
+
+def test_a_saps_flatfield_runs_on_its_ingest_node_and_here_when_that_node_is_unreachable(tmp_path, monkeypatch):
+    from euroflash.ingest import NodeUnavailable
+    calls = []
+    campaign = ingesting(tmp_path, monkeypatch, node_converts(calls))
+    home = campaign.ingest.home('L1000001_SAP000')
+    commands = []
+    campaign.ingest.remote_command = lambda node, script, arguments: commands.append(node) or ['ssh', node, script]
+    campaign.tick()
+    settle(campaign)
+    assert {node for node, _ in calls} == {home}              # the SAP's archives went to its node...
+    assert commands == [home]                                 # ...and so did its flatfield
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'prepared'
+    # A node ssh cannot reach: the head flatfields, and the node rests.
+    with campaign.state.db() as db:
+        db.execute("UPDATE saps SET state='staging'")
+    for path in Path(campaign.state.rows('SELECT sap_dir FROM saps')[0]['sap_dir']).glob('B*/*_ff.fil'):
+        path.with_name(path.name.replace('_ff.fil', '.fil')).write_bytes(b'fil')
+        path.unlink()
+
+    def unreachable(node, script, arguments):
+        raise NodeUnavailable(f'{node}: ssh failed')
+    campaign.ingest.remote_command = unreachable
+    launched = len(campaign.runner.flatfielded)
+    settle(campaign)
+    settle(campaign)
+    assert len(campaign.runner.flatfielded) == launched + 1
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'prepared'
+    assert campaign.ingest.down_until[home] > time.time()
 
 
 def test_an_empty_node_ledger_reads_as_nothing_searched_there(tmp_path, monkeypatch):

@@ -256,13 +256,15 @@ class Runner:
             delete_converted(raw)
         return sap, output
 
-    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None, level_rows=None):
+    def flatfield(self, sap, allow_partial=False, save_mean=None, mean=None, level_rows=None, launcher=None):
         """Flatfield every converted beam present in one SAP directory.
 
         allow_partial takes fewer than 61 central beams (pilots, SAPs whose
         archive lacks a few, SAPs searched before their last beams arrived);
         save_mean keeps the flatfield for beams that arrive later, and mean
         applies such a saved one to them, each late set a step of its own.
+        launcher(script, arguments) gives the command to run instead of this host's image (an ingest node's,
+        euroflash.ingest.Ingest.remote_command).
         """
         paths = sorted(sap.glob('B*/*_32bit.fil'))
         if not paths:
@@ -277,7 +279,7 @@ class Runner:
         if level_rows:
             # Level each 2-bit row (early-cycle beams) or block of rows (LT5_004) at its channel's level.
             arguments += ['--level-rows', level_rows]
-        self.step(item, 'flatfield', self.command('preproc/flatfield_fil.py', arguments),
+        self.step(item, 'flatfield', (launcher or self.command)('preproc/flatfield_fil.py', arguments),
                   [p.with_name(p.stem+'_ff.fil') for p in paths])
         return [p.with_name(p.stem+'_ff.fil') for p in paths]
 
