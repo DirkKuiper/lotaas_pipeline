@@ -223,9 +223,34 @@ class Ingest:
                 self.frozen = (files, digest.hexdigest()[:16])
             return self.frozen
 
+    def ssh_args(self, node):
+        """ssh through the node's own ingest master (ops/open-masters.sh opens ingest-<node>): the search tier's
+        master carries at most sshd's 10 sessions, and a node that ran out of them failed the tier's runs (11
+        October 2026). Without that master ssh tries the keys, fails, and the head ingests instead."""
+        args = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15']
+        if self.control_dir:
+            args += ['-S', str(self.control_dir/('ingest-' + node.removeprefix('efc-').replace('-', '')))]
+        return args + [node]
+
     def ssh(self, node, command, **kwargs):
-        from euroflash.cluster import ssh_args
-        return subprocess.run(ssh_args(node, self.control_dir) + [command], **kwargs)
+        return subprocess.run(self.ssh_args(node) + [command], **kwargs)
+
+    def upload(self, node, files, destination):
+        """The frozen files into destination on the node, as one tar stream over the ingest master."""
+        self.ssh(node, shlex.join(['mkdir', '-p', destination]), check=True, capture_output=True)
+        process = subprocess.Popen(self.ssh_args(node) + [shlex.join(['tar', 'xf', '-', '-C', destination])],
+                                   stdin=subprocess.PIPE)
+        try:
+            with tarfile.open(fileobj=process.stdin, mode='w|') as archive:
+                for frozen, name in files:
+                    frozen.add_to(archive, name)
+            process.stdin.close()
+            if process.wait():
+                raise RuntimeError(f'Transfer failed to {node}')
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
 
     def prepare(self, node):
         """The frozen code on the node (<remote_root>/<digest>), sent once; older copies removed after a day."""
@@ -239,10 +264,9 @@ class Ingest:
             if probe.returncode == 255:
                 raise NodeUnavailable(f'{node}: ssh failed: {probe.stderr.decode(errors="replace").strip()}')
             if probe.returncode != 0:
-                from euroflash.cluster import upload
                 try:
-                    upload(node, files, destination, self.control_dir)
-                except (RuntimeError, subprocess.CalledProcessError) as error:
+                    self.upload(node, files, destination)
+                except (RuntimeError, subprocess.CalledProcessError, OSError) as error:
                     raise NodeUnavailable(f'{node}: code transfer failed: {error}') from error
                 self.ssh(node, shlex.join(['touch', destination + '/.complete']), check=True, capture_output=True)
                 self.ssh(node, f'find {shlex.quote(self.remote_root)} -mindepth 1 -maxdepth 1 -type d '

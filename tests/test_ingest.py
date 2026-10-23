@@ -141,3 +141,10 @@ def test_the_job_runs_the_frozen_code_in_the_image_with_scratch_and_shared_bound
     assert command.startswith('mkdir -p /tmp/lotaas-ingest && cd /home/u/lotaas-ingest/abc && apptainer exec')
     assert '--bind /tmp/lotaas-ingest --bind /shared/results/dkuiper/lotaas' in command
     assert command.endswith('/home/u/lotaas-ingest/abc/containers/runtime.sif python -m euroflash.ingest node')
+
+
+def test_ingest_runs_through_its_own_master_beside_the_search_tiers():
+    from pathlib import Path
+    ingest = I.Ingest(['efc-cpu-04'], '.', 's', 'i', control_dir=Path('/home/u/.ssh/control'))
+    assert ingest.ssh_args('efc-cpu-04') == ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
+                                             '-S', '/home/u/.ssh/control/ingest-cpu04', 'efc-cpu-04']
