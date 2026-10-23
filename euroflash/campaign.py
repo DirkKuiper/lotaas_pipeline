@@ -309,6 +309,13 @@ class Campaign:
         self.dispatch_retry_after = {}
         self.window = (getattr(options, 'max_staging_saps', 8), None)
         self.stopping = False
+        self.ingest = None
+        if getattr(options, 'ingest_nodes', None):
+            from euroflash.ingest import Ingest
+            self.ingest = Ingest(options.ingest_nodes, REPO, options.settings, options.image,
+                                 control_dir=options.control_dir, remote_root=getattr(options, 'ingest_root', None),
+                                 scratch=getattr(options, 'ingest_scratch', '/tmp/lotaas-ingest'),
+                                 shared=(str(self.root.parent),), log_dir=self.root/'logs'/'ingest')
 
     def _runner(self):
         from euroflash.run import Runner, fingerprint
@@ -573,6 +580,14 @@ class Campaign:
         from euroflash import spider
         if spider.is_spider(f['surl']):
             return self.process_spider(f)
+        if self.ingest is not None:
+            node = self.ingest.acquire()
+            if node is not None:
+                try:
+                    return self.process_remote(f, node)
+                finally:
+                    self.ingest.release(node)
+            # No ingest node reachable: the head does it, as before ingest nodes.
         from euroflash.download import download, extract
         from euroflash.rawdata import delete_archive
         target = self.root/'downloads'/f['name']
@@ -613,29 +628,78 @@ class Campaign:
                 fils.append(str(fil))
             self.state.set_file(f['surl'], state='converted', fil=json.dumps(fils), detail=None)
             return 1
-        except PermissionError as error:
+        except Exception as error:
+            return self.retrieval_failed(f, attempt, error)
+
+    def retrieval_failed(self, f, attempt, error):
+        """Record a retrieval that ended in error, on the head or on an ingest node; returns 0 (nothing converted)."""
+        if attempt is not None:
+            self.ledger.finish(attempt, error=str(error))
+        if isinstance(error, PermissionError):
             # Every macaroon refused: the file fell back to tape, or the token expired.
-            if attempt is not None:
-                self.ledger.finish(attempt, error=str(error))
             self.state.set_file(f['surl'], state='requested', checked=None, detail=str(error))
             with self.manifest_lock:
                 self.manifests.pop(f['request_id'], None)
             self.state.event('refused', f['name'], error)
             return 0
-        except Exception as error:
+        if any(code in str(error) for code in ('HTTP Error 429', 'HTTP Error 503')):
+            # SURF is throttling us, not refusing the file: back off, no strike.
+            self.throttle_until = time.time() + self.o.throttle_seconds
+            self.state.set_file(f['surl'], state='online', detail=str(error))
+            self.state.event('throttled', f['name'], error)
+            return 0
+        failures = f['failures'] + 1
+        self.state.set_file(f['surl'], state='failed' if failures >= self.o.max_failures else 'online',
+                            failures=failures, detail=str(error)[:2000])
+        self.state.event('retrieve_failed', f['name'], error)
+        return 0
+
+    def process_remote(self, f, node):
+        """process_file on an ingest node (euroflash.ingest): only the filterbank reaches /shared."""
+        from euroflash.ingest import NodeUnavailable
+        from euroflash.run import CONVERSION_SCRIPT, conversion_fingerprint, conversion_target
+        item = Path(f['name']).stem
+        marker = self.root/'extracted'/(item + '.extracted.json')
+        attempt = None
+        try:
+            manifest = self.manifest(f['request_id'])
+            url, tokens = self._token(manifest, f['surl'])
+            attempt = self.ledger.start(item, 'retrieve', 'http-tar-stream-v1', marker,
+                                        ['StageIT', str(f['request_id']), url, node])
+            data_root = self.runner.root/'data'
+            result = self.ingest.run(node, {'url': url, 'tokens': tokens, 'item': item, 'max_bytes': 64 * 2**30,
+                                            'exclude_beams': list(self.o.exclude_beams), 'data_root': str(data_root)},
+                                     item)
+            fits = [m['path'] for m in result['fits']]
+            marker.write_text(json.dumps({'request_id': f['request_id'], 'archive': result['receipt'], 'fits': fits,
+                                          'node': node, 'raw_deleted': True, 'raw_deleted_unix': time.time()},
+                                         indent=2))
+            self.ledger.record_archive(f['surl'], f['request_id'], result['receipt'], fits, marker)
+            self.ledger.finish(attempt, [marker])
+            attempt = None
+            if result['excluded']:
+                self.state.set_file(f['surl'], state='excluded', detail='incoherent beam (archive layout)')
+                self.state.event('excluded', f['name'], 'incoherentstokes in the archive; not converted')
+                return 0
+            seconds = result.get('convert_seconds', 0) / max(1, len(result['outputs']))
+            for member, output in zip(result['fits'], result['outputs']):
+                self.ledger.record(conversion_target(member['name'], data_root)[0], 'downsample',
+                                   conversion_fingerprint(self.runner.settings, self.runner.image, member['name'],
+                                                          member['bytes']),
+                                   marker, [CONVERSION_SCRIPT, '-o', output, member['path']], [output], seconds,
+                                   result.get('host', node))
+            self.state.set_file(f['surl'], state='converted', fil=json.dumps(result['outputs']), detail=None)
+            return 1
+        except NodeUnavailable as error:
+            # The node, not the file: no strike, and that node rests while the others (or the head) go on.
             if attempt is not None:
                 self.ledger.finish(attempt, error=str(error))
-            if any(code in str(error) for code in ('HTTP Error 429', 'HTTP Error 503')):
-                # SURF is throttling us, not refusing the file: back off, no strike.
-                self.throttle_until = time.time() + self.o.throttle_seconds
-                self.state.set_file(f['surl'], state='online', detail=str(error))
-                self.state.event('throttled', f['name'], error)
-                return 0
-            failures = f['failures'] + 1
-            self.state.set_file(f['surl'], state='failed' if failures >= self.o.max_failures else 'online',
-                                failures=failures, detail=str(error)[:2000])
-            self.state.event('retrieve_failed', f['name'], error)
+            self.ingest.back_off(node)
+            self.state.set_file(f['surl'], state='online', detail=str(error)[:2000])
+            self.state.event('ingest_node_down', node, error)
             return 0
+        except Exception as error:
+            return self.retrieval_failed(f, attempt, error)
 
     def process_spider(self, f):
         """Stream one SPIDER beam into its SAP directory; it arrives converted."""
@@ -1286,6 +1350,13 @@ def parser():
     run.add_argument('--min-free-tb', type=float, default=5.0, help='Stop admitting SAPs below this free space')
     run.add_argument('--download-workers', type=int, default=4)
     run.add_argument('--files-per-worker', type=int, default=4, help='Files handed to each download worker at once')
+    run.add_argument('--ingest-nodes', nargs='+', default=[],
+                     help='Download, unpack and convert LTA archives on these CPU nodes (euroflash.ingest), the '
+                          'least busy first; on the head while none is reachable')
+    run.add_argument('--ingest-root', help='Directory on the ingest nodes for the frozen code '
+                                           '(default /home/<user>/lotaas-ingest)')
+    run.add_argument('--ingest-scratch', default='/tmp/lotaas-ingest',
+                     help="Scratch on the ingest nodes for an archive's FITS (their /tmp is RAM)")
     run.add_argument('--retrieve-wait', type=float, default=60,
                      help='Seconds a pass waits for downloads in hand before it flatfields and dispatches')
     run.add_argument('--poll-seconds', type=float, default=300)

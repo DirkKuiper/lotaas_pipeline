@@ -301,6 +301,83 @@ def test_a_beam_without_usable_data_is_excluded_and_its_sap_searched(tmp_path, m
     assert campaign.unusable_items(run_name) == {beams[0].stem}
 
 
+def ingesting(tmp_path, monkeypatch, run):
+    """A campaign whose archives go to ingest nodes, each job done by `run(node, spec, item)`."""
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)],
+                                 ingest_nodes=['efc-cpu-04', 'efc-cpu-05'])
+    campaign.runner.settings = tmp_path/'settings.yaml'
+    campaign.runner.settings.write_text('x: 1\n')
+    campaign.runner.image = tmp_path/'image.sif'
+    campaign.runner.image.write_bytes(b'image')
+    campaign.ingest.run = run
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    return campaign
+
+
+def node_converts(calls):
+    def run(node, spec, item):
+        calls.append((node, item))
+        beam = int(item.split('_B')[1][:3])
+        name = f'L400001_SAP0_BEAM{beam}_2bit.fits'
+        output = Path(spec['data_root'])/'L400001'/'SAP000'/f'B{beam:03d}'/f'downsampled_L400001_SAP000_BEAM{beam:03d}_32bit.fil'
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b'fil')
+        return {'ok': True, 'node': node, 'host': node, 'excluded': beam == 5, 'convert_seconds': 2.0,
+                'receipt': {'url': spec['url'], 'bytes': 10, 'transferred_bytes': 10, 'sha256': 'a' * 64, 'seconds': 1.0},
+                'fits': [{'path': f'/tmp/lotaas-ingest/{item}/stokes/{name}', 'name': name, 'bytes': 1234}],
+                'outputs': [] if beam == 5 else [str(output)]}
+    return run
+
+
+def test_archives_are_ingested_on_the_nodes_and_recorded_as_on_the_head(tmp_path, monkeypatch):
+    from euroflash.run import conversion_fingerprint
+    calls = []
+    campaign = ingesting(tmp_path, monkeypatch, node_converts(calls))
+    campaign.tick()
+    settle(campaign)
+    assert len(calls) == 73 and all(item.startswith('L1000001_SAP000_B') for _, item in calls)
+    assert campaign.state.rows("SELECT state FROM saps")[0]['state'] in ('flatfielding', 'prepared')
+    ledger = Ledger(tmp_path/'ledger.sqlite')
+    with ledger.connect() as db:
+        rows = db.execute("SELECT item,fingerprint,host,status FROM attempts WHERE stage='downsample'").fetchall()
+        retrieve = db.execute("SELECT COUNT(*) FROM attempts WHERE stage='retrieve' AND status='success' "
+                              "AND fingerprint='http-tar-stream-v1'").fetchone()[0]
+    assert retrieve == 73 and len(rows) == 72 and {r['host'] for r in rows} <= {'efc-cpu-04', 'efc-cpu-05'}
+    assert rows[0]['fingerprint'] == conversion_fingerprint(campaign.runner.settings, campaign.runner.image,
+                                                            'L400001_SAP0_BEAM{}_2bit.fits'.format(
+                                                                int(rows[0]['item'][-3:])), 1234)
+    marker = json.loads(next((tmp_path/'campaign'/'extracted').glob('*.extracted.json')).read_text())
+    assert marker['raw_deleted'] and marker['archive']['seconds'] == 1.0 and marker['node'] in ('efc-cpu-04', 'efc-cpu-05')
+    assert campaign.state.rows("SELECT state FROM files WHERE beam = 5")[0]['state'] == 'excluded'   # by archive layout
+    assert not any((tmp_path/'campaign'/'downloads').iterdir())                # nothing downloaded on the head
+
+
+def test_a_node_that_cannot_be_reached_rests_and_costs_its_file_no_strike(tmp_path, monkeypatch):
+    from euroflash.ingest import NodeUnavailable
+    calls = []
+    converts = node_converts(calls)
+
+    def run(node, spec, item):
+        if node == 'efc-cpu-04':
+            raise NodeUnavailable('efc-cpu-04: ssh exited 255')
+        return converts(node, spec, item)
+    campaign = ingesting(tmp_path, monkeypatch, run)
+    campaign.tick()
+    settle(campaign)
+    assert campaign.ingest.down_until['efc-cpu-04'] > time.time()
+    assert {node for node, _ in calls} == {'efc-cpu-05'}
+    assert all(r['failures'] == 0 for r in campaign.state.rows('SELECT failures FROM files'))
+    # Jobs already on their way to it fail too, each file back in the queue.
+    assert {e['subject'] for e in campaign.state.rows("SELECT subject FROM events WHERE kind='ingest_node_down'")} == {'efc-cpu-04'}
+    # With every node resting the head ingests as before.
+    campaign.ingest.back_off('efc-cpu-05')
+    for _ in range(3):
+        settle(campaign)
+    assert not campaign.state.rows("SELECT 1 FROM files WHERE state IN ('online','working') LIMIT 1")
+    assert campaign.state.rows("SELECT state FROM saps")[0]['state'] in ('flatfielding', 'prepared')
+
+
 def test_an_empty_node_ledger_reads_as_nothing_searched_there(tmp_path, monkeypatch):
     campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
     results = tmp_path/'campaign'/'results'

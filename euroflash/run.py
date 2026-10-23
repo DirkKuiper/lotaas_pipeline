@@ -42,6 +42,30 @@ def atomic_json(path, value):
     os.replace(partial, path)
 
 
+CONVERSION_SCRIPT = 'preproc/downsample_psrfits2fil_32bit.py'
+CONVERSION_CODE = (CONVERSION_SCRIPT, 'lotaas_reprocessing/filterbank.py', 'lotaas_reprocessing/sigproc.py')
+
+
+def conversion_target(name, data_root):
+    """(item, beam directory, output) of the 32-bit filterbank converted from the PSRFITS file `name`."""
+    import re
+    match = re.search(r'(L\d+)_SAP(\d+)_(?:BEAM|B)(\d+)', name)
+    if not match:
+        raise ValueError(f'Unknown PSRFITS filename: {name}')
+    obs, sap, beam = match[1], int(match[2]), int(match[3])
+    directory = Path(data_root)/obs/f'SAP{sap:03d}'/f'B{beam:03d}'
+    return (f'{obs}_SAP{sap:03d}_B{beam:03d}', directory,
+            directory/f'downsampled_{obs}_SAP{sap:03d}_BEAM{beam:03d}_32bit.fil')
+
+
+def conversion_fingerprint(settings, image, name, size):
+    """A conversion is keyed on the one file it reads, by name and size, so a re-extracted or truncated archive
+    member is converted again; on the head or on an ingest node (euroflash.ingest) alike."""
+    return fingerprint(settings, image, {'stage': 'downsample', 'fscrunch': 4, 'tscrunch': 16,
+                                         'source': name, 'source_bytes': size},
+                       [REPO/p for p in CONVERSION_CODE])
+
+
 class StageTimeout(RuntimeError):
     """A stage ran past its limit and was killed."""
 
@@ -217,22 +241,10 @@ class Runner:
 
     def conversion_job(self, raw):
         """The ledger step converting one PSRFITS into its SAP directory."""
-        import re
-        match = re.search(r'(L\d+)_SAP(\d+)_(?:BEAM|B)(\d+)', raw.name)
-        if not match:
-            raise ValueError(f'Unknown PSRFITS filename: {raw}')
-        obs, sap, beam = match[1], int(match[2]), int(match[3])
-        item = f'{obs}_SAP{sap:03d}_B{beam:03d}'
-        directory = self.root/'data'/obs/f'SAP{sap:03d}'/f'B{beam:03d}'
+        item, directory, output = conversion_target(raw.name, self.root/'data')
         directory.mkdir(parents=True, exist_ok=True)
-        output = directory/f'downsampled_{obs}_SAP{sap:03d}_BEAM{beam:03d}_32bit.fil'
-        command = self.command('preproc/downsample_psrfits2fil_32bit.py', ['-o', output, raw])
-        # Conversion is keyed on the one file it reads, by name and size,
-        # so a re-extracted or truncated archive member is converted again.
-        conversion_fp = fingerprint(self.settings, self.image,
-            {'stage': 'downsample', 'fscrunch': 4, 'tscrunch': 16,
-             'source': raw.name, 'source_bytes': raw.stat().st_size},
-            [REPO/'preproc/downsample_psrfits2fil_32bit.py', REPO/'lotaas_reprocessing/filterbank.py', REPO/'lotaas_reprocessing/sigproc.py'])
+        command = self.command(CONVERSION_SCRIPT, ['-o', output, raw])
+        conversion_fp = conversion_fingerprint(self.settings, self.image, raw.name, raw.stat().st_size)
         return item, directory.parent, output, (item, 'downsample', command, [output], None, conversion_fp)
 
     def convert(self, raw, delete_raw=False):

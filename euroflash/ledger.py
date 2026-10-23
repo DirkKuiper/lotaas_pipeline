@@ -92,6 +92,16 @@ class Ledger:
                              (item, stage, fingerprint, 'running', time.time(), socket.gethostname(), device, str(log), json.dumps(command)))
             return cur.lastrowid
 
+    def record(self, item, stage, fingerprint, log, command, outputs, seconds, host):
+        """A successful attempt that ran elsewhere and is known only once it ended (euroflash.ingest)."""
+        files = {str(p): Path(p).stat().st_size for p in outputs}
+        now = time.time()
+        with self.connect() as db:
+            db.execute('INSERT INTO attempts(item,stage,fingerprint,status,started,finished,seconds,host,log,command,'
+                       'outputs) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                       (item, stage, fingerprint, 'success', now - seconds, now, seconds, host, str(log),
+                        json.dumps([str(c) for c in command]), json.dumps(files)))
+
     def finish(self, attempt, outputs=(), error=None, status=None):
         """status: 'success' without an error, else 'failed', unless given ('unusable': nothing to search)."""
         files = {str(p): Path(p).stat().st_size for p in outputs} if error is None else {}
