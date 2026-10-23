@@ -1023,13 +1023,16 @@ class Campaign:
 
         settled: candidate keys whose latest verdict frees their beam (findings.SETTLED).
         """
-        from euroflash.findings import Index, Judge
+        from euroflash.findings import LINES_CACHE, Index, Judge, load_lines_cache, save_lines_cache
         if getattr(self, 'periodic_index', None) is None:
             self.periodic_index = Index(self.root)
         self.periodic_index.backfill(self.root/'results')
         if getattr(self, 'judge_lines', None) is None:
-            self.judge_lines = {}
-        return Judge(self.periodic_index, settled=settled, lines_cache=self.judge_lines)
+            self.judge_lines = load_lines_cache(self.root/LINES_CACHE)
+        judge = Judge(self.periodic_index, settled=settled, lines_cache=self.judge_lines)
+        if judge.recomputed:
+            save_lines_cache(self.root/LINES_CACHE, self.judge_lines)
+        return judge
 
     def findings(self, run_name, succeeded=()):
         """{beam stem: why} for the beams of one run worth keeping (euroflash.findings).

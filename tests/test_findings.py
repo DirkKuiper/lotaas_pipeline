@@ -103,6 +103,37 @@ def test_interference_lines_are_worked_out_again_only_for_an_observation_whose_p
     assert (1.0, 'L603690', RES) not in again.peaks and again.peaks == findings.Judge(index).peaks
 
 
+def test_interference_lines_outlive_the_driver_and_another_process_reuses_them(tmp_path):
+    # Worked out cold they held the first pass after each restart for 45 minutes (22 October 2026).
+    import subprocess, sys
+    results = tmp_path/'results'
+    run = 'campaign-20261023-010000-gpu00'
+    for obs in ('L603686', 'L603690'):
+        for number, dm in zip(range(13, 20), (8.1, 0.0, 0.7, 1.3, 3.0, 7.1, 0.3)):
+            beam(results, run, obs, 0, number, vetoed=[(0.29575 + 0.2 * RES, dm)])
+    index = findings.Index(tmp_path)
+    index.backfill(results)
+    cache = {}
+    cold = findings.Judge(index, lines_cache=cache)
+    assert sorted(cold.recomputed) == ['L603686', 'L603690'] and cold.peaks
+    path = tmp_path/findings.LINES_CACHE
+    findings.save_lines_cache(path, cache)
+    # Another process (another hash seed): the signatures still match, nothing is worked out again.
+    code = ("import sys; from pathlib import Path; from euroflash import findings; "
+            f"index = findings.Index(Path({str(tmp_path)!r})); "
+            f"judge = findings.Judge(index, lines_cache=findings.load_lines_cache(Path({str(path)!r}))); "
+            "print(len(judge.recomputed), len(judge.peaks))")
+    out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=True,
+                         env={'PYTHONHASHSEED': '12345', 'PYTHONPATH': str(Path(findings.__file__).parents[1])})
+    assert out.stdout.split() == ['0', str(len(cold.peaks))]
+    warm = findings.Judge(index, lines_cache=findings.load_lines_cache(path))
+    assert warm.recomputed == [] and warm.peaks == cold.peaks
+    path.write_text('{"version": [0], "observations": {}}')          # other rules: worked out afresh
+    assert findings.load_lines_cache(path) == {}
+    path.write_text('not json')
+    assert findings.load_lines_cache(path) == {}
+
+
 def test_a_fold_is_judged_against_its_whole_observation(tmp_path):
     results = tmp_path/'results'
     run = 'campaign-20260924-010000-gpu00'

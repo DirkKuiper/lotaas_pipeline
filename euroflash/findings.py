@@ -47,6 +47,7 @@ import bisect
 from contextlib import closing
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -54,6 +55,9 @@ import sqlite3
 from euroflash import psrcat
 
 INDEX = 'periodic-index.jsonl'
+# The Judge's interference lines per observation, kept across driver restarts: worked out cold for the whole
+# campaign they held the first pass after each restart for 45 minutes (08:05-08:50 on 22 October 2026).
+LINES_CACHE = 'judge-lines.json'
 # Latest verdicts under which a FETCH candidate no longer holds its beam's filterbank.
 SETTLED = ('rfi', 'noise', 'known')
 # Why a searched beam is kept while none of its run's periodic results can be read yet.
@@ -392,6 +396,33 @@ def reviewed_items(path, index, labels=('astro', 'unsure'), verdicts=None):
     return items
 
 
+def _lines_version():
+    import sys
+    return [1, FAMILY_BINS, LINE_BEAMS, list(sys.version_info[:2])]
+
+
+def load_lines_cache(path):
+    """Judge's lines_cache as save_lines_cache left it; {} when absent, unreadable or made under other rules."""
+    try:
+        data = json.loads(Path(path).read_text())
+        if data.get('version') != _lines_version():
+            return {}
+        return {observation: ((count, digest), {(observation, round(c / r)): (c, observation, r) for c, r in lines})
+                for observation, (count, digest, lines) in data['observations'].items()}
+    except (OSError, ValueError, TypeError, KeyError, ZeroDivisionError):
+        return {}
+
+
+def save_lines_cache(path, cache):
+    """Write Judge's lines_cache beside the index, whole or not at all."""
+    data = {'version': _lines_version(),
+            'observations': {observation: [signature[0], signature[1], [[v[0], v[2]] for v in found.values()]]
+                             for observation, (signature, found) in cache.items()}}
+    partial = Path(str(path) + '.partial')
+    partial.write_text(json.dumps(data))
+    os.replace(partial, path)
+
+
 class Judge:
     """Decides, fold by fold, what keeps a filterbank; built once per decision round."""
 
@@ -419,9 +450,11 @@ class Judge:
                 for p in b['folds'] + b['vetoed']:
                     by_observation.setdefault(b['observation'], []).append((p['f'], (b['sap'], b['beam']), p['dm'], resolution))
         lines = {}
+        self.recomputed = []
         for observation, peaks in by_observation.items():
             peaks.sort()
-            signature = (len(peaks), tuple(peaks))
+            # The hash of numbers is the same in every process (only str and bytes hashes are salted).
+            signature = (len(peaks), hash(tuple(peaks)))
             cached = lines_cache.get(observation) if lines_cache is not None else None
             if cached is not None and cached[0] == signature:
                 lines.update(cached[1])
@@ -436,6 +469,7 @@ class Judge:
                     found[(observation, round(centre / resolution))] = (centre, observation, resolution)
             if lines_cache is not None:
                 lines_cache[observation] = (signature, found)
+            self.recomputed.append(observation)
             lines.update(found)
         self.peaks = sorted(lines.values())
         self.frequencies = [p[0] for p in self.peaks]
