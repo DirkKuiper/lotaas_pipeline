@@ -867,6 +867,20 @@ class Campaign:
             succeeded |= {item for item, status in latest if status == 'success'}
         return succeeded, seen
 
+    def unusable_items(self, run_name):
+        """Beams in which a run found nothing to search (lotaas_reprocessing.outcomes.NO_USABLE_DATA)."""
+        items = set()
+        for snapshot in (self.root/'results'/run_name).glob('*/ledger-snapshot.sqlite'):
+            db = sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True)
+            try:
+                items |= {item for (item,) in db.execute('''SELECT item FROM attempts WHERE status='unusable'
+                    AND id IN (SELECT MAX(id) FROM attempts WHERE stage='dedisperse' GROUP BY item)''')}
+            except sqlite3.DatabaseError:
+                continue                        # searched_items has recorded the unreadable snapshot
+            finally:
+                db.close()
+        return items
+
     def finish_dispatch(self, process):
         self.dispatches.pop(process.run_name, None)
         run_name, node = process.run_name, getattr(process, 'node', None)
@@ -883,8 +897,9 @@ class Campaign:
         else:
             self.dispatch_failures[node] = 0
             found = self.findings(run_name, succeeded)
+            unusable = self.unusable_items(run_name) - succeeded
             for sap in saps:
-                done = kept = failed = late = 0
+                done = kept = failed = late = empty = 0
                 mean = Path(sap['sap_dir'])/MEAN if sap['sap_dir'] else None
                 for f in self.state.rows("SELECT * FROM files WHERE sap_key=? AND state='converted'", sap['key']):
                     raw = [Path(p) for p in json.loads(f['fil'] or '[]')]
@@ -892,6 +907,15 @@ class Campaign:
                     if mean and mean.is_file() and raw and all(p.is_file() for p in raw):
                         # Arrived during a search without it: flatfielded with the saved flatfield next.
                         late += 1
+                        continue
+                    if beams and all(b.stem in unusable for b in beams):
+                        # Nothing to search once masked: excluded like the incoherent beam, not retried.
+                        empty += 1
+                        for path in beams:
+                            path.unlink(missing_ok=True)
+                        self.state.set_file(f['surl'], state='excluded',
+                                            detail=f'no usable data in {run_name}: every sample masked')
+                        self.state.event('excluded', f['name'], f'no usable data in {run_name}')
                         continue
                     if not beams or any(b.stem not in succeeded for b in beams):
                         failed += 1
@@ -923,7 +947,8 @@ class Campaign:
                         (Path(sap['sap_dir'])/MEAN).unlink(missing_ok=True)
                     self.state.set_sap(sap['key'], state='searched', detail=None)
                 self.state.event('searched', sap['key'], f'{done}/{done + failed} beams in {run_name}; '
-                                                         f'{kept} kept for review')
+                                                         f'{kept} kept for review'
+                                                         + (f'; {empty} without usable data' if empty else ''))
             if not self.o.keep_prepared:
                 observations = {m[1] for sap in saps for m in [re.search(r'(L\d+)/SAP', sap['sap_dir'] or '')] if m}
                 self.release_kept(observations, run_name)

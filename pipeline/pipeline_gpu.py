@@ -145,7 +145,11 @@ if __name__ == "__main__":
     print(f"Filling masked data ({fill_mode})...")
     rng = np.random.default_rng(args.seed)
     if not np.isfinite(masked_data).any():
-        raise ValueError("All data were masked")
+        # A beam with nothing left to search is an outcome, not a failure (lotaas_reprocessing.outcomes).
+        from lotaas_reprocessing.outcomes import NO_USABLE_DATA
+        print(f"No usable data: every sample masked ({masked_frac * 100:.2f} % by the block mask, "
+              f"{len(masked_channels)} of {nchan} channels always masked)", flush=True)
+        sys.exit(NO_USABLE_DATA)
     fill_masked(masked_data, mask, block_size, rng, fill_mode)
 
     print(f"nu shape: {nu.shape}, range: {nu.min()} - {nu.max()}")

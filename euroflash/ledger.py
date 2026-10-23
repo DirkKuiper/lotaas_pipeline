@@ -92,12 +92,13 @@ class Ledger:
                              (item, stage, fingerprint, 'running', time.time(), socket.gethostname(), device, str(log), json.dumps(command)))
             return cur.lastrowid
 
-    def finish(self, attempt, outputs=(), error=None):
+    def finish(self, attempt, outputs=(), error=None, status=None):
+        """status: 'success' without an error, else 'failed', unless given ('unusable': nothing to search)."""
         files = {str(p): Path(p).stat().st_size for p in outputs} if error is None else {}
         now = time.time()
         with self.connect() as db:
             db.execute('UPDATE attempts SET status=?,finished=?,seconds=?-started,error=?,outputs=? WHERE id=?',
-                       ('failed' if error else 'success', now, now, error, json.dumps(files), attempt))
+                       (status or ('failed' if error else 'success'), now, now, error, json.dumps(files), attempt))
 
     def summary(self):
         with self.connect() as db:

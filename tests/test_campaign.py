@@ -278,6 +278,29 @@ def test_a_search_removes_prepared_beams_that_succeeded_and_keeps_failures(tmp_p
     assert after['state'] == 'attention' and after['detail'].startswith('1 beams')
 
 
+def test_a_beam_without_usable_data_is_excluded_and_its_sap_searched(tmp_path, monkeypatch):
+    # 12 beams of 8 SAPs (22 October 2026) were masked in every channel; each kept its SAP in attention.
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    campaign.tick()
+    put_online(api, where, '1000001', 0, FULL)
+    campaign.tick()
+    settle(campaign)
+    sap = campaign.state.rows('SELECT * FROM saps')[0]
+    beams = sorted(Path(sap['sap_dir']).glob('B*/*_ff.fil'))
+    run_name = 'campaign-test'
+    campaign.state.set_sap(sap['key'], state='dispatched', run_name=run_name)
+    ledger = tmp_path/'campaign'/'results'/run_name/'efc-gpu-01'/'ledger-snapshot.sqlite'
+    snapshot(ledger, {b.stem: 'success' for b in beams[1:]})
+    node = Ledger(ledger)
+    node.finish(node.start(beams[0].stem, 'dedisperse', 'fp', 'log', ['cmd']), error='no usable data', status='unusable')
+    campaign.finish_dispatch(Namespace(run_name=run_name, returncode=0, node='efc-gpu-01'))
+    assert not any(b.exists() for b in beams)
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'searched'
+    empty = campaign.state.rows("SELECT beam FROM files WHERE state='excluded' AND detail LIKE 'no usable data%'")
+    assert [r['beam'] for r in empty] == [int(beams[0].parent.name[1:])]
+    assert campaign.unusable_items(run_name) == {beams[0].stem}
+
+
 def test_an_empty_node_ledger_reads_as_nothing_searched_there(tmp_path, monkeypatch):
     campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
     results = tmp_path/'campaign'/'results'

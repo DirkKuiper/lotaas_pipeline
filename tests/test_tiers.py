@@ -234,6 +234,20 @@ def test_a_stage_past_its_limit_is_killed_with_its_children(tmp_path):
         assert db.execute("SELECT status FROM attempts").fetchone()[0] == 'failed'
 
 
+def test_a_beam_with_nothing_to_search_is_unusable_not_failed(tmp_path):
+    from euroflash.run import UnusableBeam
+    from lotaas_reprocessing.outcomes import NO_USABLE_DATA
+    run = runner(tmp_path)
+    run.fp = 'abc'
+    with pytest.raises(UnusableBeam, match='no usable data in beam'):
+        run.step('beam', 'dedisperse', [sys.executable, '-c', f'import sys; sys.exit({NO_USABLE_DATA})'], [])
+    with pytest.raises(RuntimeError, match='dedisperse failed for other') as failure:
+        run.step('other', 'dedisperse', [sys.executable, '-c', 'import sys; sys.exit(1)'], [])
+    assert not isinstance(failure.value, UnusableBeam)
+    with run.ledger.connect() as db:
+        assert dict(db.execute("SELECT item,status FROM attempts").fetchall()) == {'beam': 'unusable', 'other': 'failed'}
+
+
 def test_stage_limits_parse_and_reject_unknown_stages():
     from euroflash.run import parse_timeouts, TIMEOUTS
     assert parse_timeouts(['sp_classify=60'])['sp_classify'] == 60 and TIMEOUTS['sp_classify'] == 2700

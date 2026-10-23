@@ -46,6 +46,10 @@ class StageTimeout(RuntimeError):
     """A stage ran past its limit and was killed."""
 
 
+class UnusableBeam(RuntimeError):
+    """A stage found nothing to search in its beam (lotaas_reprocessing.outcomes.NO_USABLE_DATA)."""
+
+
 def parse_timeouts(values):
     timeouts = dict(TIMEOUTS)
     for value in values or ():
@@ -203,6 +207,10 @@ class Runner:
             self.ledger.finish(attempt, outputs)
             print('Success:', stage, item, flush=True)
         except Exception as error:
+            from lotaas_reprocessing.outcomes import NO_USABLE_DATA
+            if isinstance(error, subprocess.CalledProcessError) and error.returncode == NO_USABLE_DATA:
+                self.ledger.finish(attempt, error='no usable data: every sample masked', status='unusable')
+                raise UnusableBeam(f'{stage}: no usable data in {item}; log: {log}') from None
             self.ledger.finish(attempt, error=str(error))
             reason = f' ({error})' if isinstance(error, StageTimeout) else ''
             raise RuntimeError(f'{stage} failed for {item}{reason}; log: {log}') from error
@@ -469,6 +477,10 @@ class Runner:
                         future = cpu_pool.submit(lambda item=item, output=output: (item, output, self.search(item, output)))
                         future.add_done_callback(lambda _: inflight.release())
                         cpu_futures.append(future)
+                    except UnusableBeam as e:
+                        # Not an error of the run: the campaign excludes the beam from the ledger's 'unusable'.
+                        inflight.release()
+                        print('Unusable:', e, flush=True)
                     except Exception as e:
                         inflight.release()
                         errors.append(str(e))
