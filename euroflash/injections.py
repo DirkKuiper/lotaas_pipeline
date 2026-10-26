@@ -43,6 +43,16 @@ GPU_NODE = 'efc-gpu-00'
 CPU_NODES = ('efc-cpu-03', 'efc-cpu-04', 'efc-cpu-05', 'efc-cpu-06')
 EXCLUDE_BEAMS = (12,)
 SOURCES = ('lta', 'spider')
+# A trial of a change to production's settings beside production itself: every VARIANT_EVERY-th batch of a source the
+# variant lists is searched with production's settings so changed, its batch named after it, and its bursts and real
+# candidates are kept apart (variant_bursts, variant_others), where only `report --variant` reads them: the FRB rate and
+# limits read production's alone. 'gate7' lowers FETCH's S/N gate from 8 to 7 (26 October 2026): 3,211 of 31,370
+# injected LT5 bursts (10%) were found at search S/N 6-8 and never asked about, and a fluence threshold 8/7 lower is
+# (8/7)^1.5 = 1.22 times the FRBs; at S/N 7 the first night (27 September) gave ~60 FETCH positives a SAP. The variant
+# measures both: what it queues of the injected bursts, and the real candidates per twin it adds. VARIANT_EVERY 0 stops it.
+VARIANTS = {'gate7': {'sources': ('lta',), 'set': {('classification', 'min_snr'): 7.0,
+                                                   ('classification', 'dispersed', 'min_snr'): 7.0}}}
+VARIANT_EVERY = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (sap TEXT PRIMARY KEY, source TEXT, beam INTEGER, origin TEXT, link TEXT,
@@ -55,6 +65,11 @@ CREATE TABLE IF NOT EXISTS others (twin TEXT, batch TEXT, source TEXT, fingerpri
 CREATE TABLE IF NOT EXISTS bursts (twin TEXT, idx INTEGER, sap TEXT, batch TEXT, source TEXT, fingerprint TEXT,
     dm REAL, tau135 REAL, width REAL, snr_ideal REAL, spectrum TEXT, stage TEXT, search_snr REAL, own_snr REAL,
     dispersion_ratio REAL, fetch REAL, page REAL, queued INTEGER, record TEXT, PRIMARY KEY (twin, idx));
+CREATE TABLE IF NOT EXISTS variant_others (variant TEXT, twin TEXT, batch TEXT, source TEXT, fingerprint TEXT,
+    type TEXT, dm REAL, snr REAL, width INTEGER, time REAL);
+CREATE TABLE IF NOT EXISTS variant_bursts (variant TEXT, twin TEXT, idx INTEGER, sap TEXT, batch TEXT, source TEXT,
+    fingerprint TEXT, dm REAL, tau135 REAL, width REAL, snr_ideal REAL, spectrum TEXT, stage TEXT, search_snr REAL,
+    own_snr REAL, dispersion_ratio REAL, fetch REAL, page REAL, queued INTEGER, record TEXT, PRIMARY KEY (twin, idx));
 """
 
 
@@ -83,6 +98,24 @@ def campaign_options(path=CAMPAIGN_CONFIG):
 
 def run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+
+
+def variant_of(batch_name):
+    """The settings variant a batch was searched with (VARIANTS), from its name; None for production's."""
+    return next((v for v in VARIANTS if str(batch_name).endswith('-' + v)), None)
+
+
+def variant_settings(path, variant, out):
+    """Production's settings at `path` with VARIANTS[variant]'s changes, written to `out`."""
+    import yaml
+    settings = yaml.safe_load(Path(path).read_text())
+    for keys, value in VARIANTS[variant]['set'].items():
+        node = settings
+        for key in keys[:-1]:
+            node = node.setdefault(key, {})
+        node[keys[-1]] = value
+    Path(out).write_text(yaml.safe_dump(settings, sort_keys=False))
+    return Path(out)
 
 
 def levelled_rows(origin):
@@ -247,13 +280,16 @@ class Lane:
             if not ready or (len(ready) < BATCH and self.now() - ready[0]['made'] < MAX_WAIT):
                 continue
             ready = ready[:BATCH]
-            name = time.strftime('inject-%Y%m%d-%H%M%S-', time.gmtime(self.now())) + source
+            variant = self.next_variant(source)
+            name = time.strftime('inject-%Y%m%d-%H%M%S-', time.gmtime(self.now())) + source + (f'-{variant}' if variant else '')
             batch = self.root / 'batches' / name
             (batch / 'truth').mkdir(parents=True)
             for s in ready:
                 os.link(s['twin'], batch / Path(s['twin']).name)
                 shutil.copy(s['truth'], batch / 'truth' / f"{Path(s['twin']).stem}.json")
             settings = self.o['settings'][source]
+            if variant:
+                settings = variant_settings(settings, variant, batch / 'settings.yaml')
             _, commit, _ = self.code()                 # the checkout the run freezes when it starts
             command = [sys.executable, '-m', 'euroflash.cluster', '--input', str(batch), '--work',
                        str(self.root / 'results' / name), '--ledger', str(self.root / 'ledger.sqlite'),
@@ -277,6 +313,16 @@ class Lane:
             return name
         return None
 
+    def next_variant(self, source):
+        """The variant the next batch of this source is searched with, or None: every VARIANT_EVERY-th batch."""
+        if VARIANT_EVERY <= 0:
+            return None
+        for name, v in VARIANTS.items():
+            if source in v['sources']:
+                n = self.db.execute('SELECT COUNT(*) FROM batches WHERE source=?', (source,)).fetchone()[0]
+                return name if n % VARIANT_EVERY == VARIANT_EVERY - 1 else None
+        return None
+
     # ------------------------------------------------------------------ collect
     def collect(self):
         """Follow a finished batch's bursts to their fates, record them, and delete its twins."""
@@ -286,9 +332,11 @@ class Lane:
             fates = self.root / 'fates' / f"{b['name']}.json"
             if b['state'] == 'running' and Path(str(log) + '.exit').exists():
                 snapshot, _, image = self.code()
+                # A variant's fates by its own settings (its S/N gate): they lie beside its twins on the shared disk.
+                settings = (Path(b['settings']) if variant_of(b['name']) else self.settings(snapshot, b['source']))
                 command = self.container(snapshot, image, 'lotaas_reprocessing.injection_fates',
                                          self.root / 'results' / b['name'], self.root / 'batches' / b['name'] / 'truth',
-                                         self.settings(snapshot, b['source']), fates, self.root / 'batches' / b['name'])
+                                         settings, fates, self.root / 'batches' / b['name'])
                 analysis_log = self.root / 'logs' / f"{b['name']}.fates.log"
                 if self.remote(CPU_NODES[0], command, analysis_log):
                     self.set('batches', b['name'], state='analysing',
@@ -307,22 +355,25 @@ class Lane:
 
     def record(self, batch, result):
         samples = {Path(s['twin']).stem: s for s in self.rows('SELECT * FROM samples WHERE batch=?', batch['name'])}
+        variant = variant_of(batch['name'])
+        # A variant's results are kept apart: the FRB rate and limits read `bursts` as production's.
+        bursts, others, extra = ('variant_bursts', 'variant_others', (variant,)) if variant else ('bursts', 'others', ())
         with self.db:
             for r in result['bursts']:
                 s = samples.get(r['twin'], {})
                 c = r.get('cluster') or {}
                 page = r.get('page') if isinstance(r.get('page'), (int, float)) else None
-                self.db.execute('INSERT OR REPLACE INTO bursts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                                (r['twin'], r['index'], s.get('sap'), batch['name'], batch['source'],
-                                 batch['fingerprint'], r['dm'], r['tau135'], r['width'], r['snr_ideal'], r['spectrum'],
-                                 r['stage'], c.get('snr'), r.get('own_snr'), r.get('dispersion_ratio'), r.get('fetch'),
-                                 page, int(bool(r.get('queued'))), json.dumps(r)))
+                row = extra + (r['twin'], r['index'], s.get('sap'), batch['name'], batch['source'],
+                               batch['fingerprint'], r['dm'], r['tau135'], r['width'], r['snr_ideal'], r['spectrum'],
+                               r['stage'], c.get('snr'), r.get('own_snr'), r.get('dispersion_ratio'), r.get('fetch'),
+                               page, int(bool(r.get('queued'))), json.dumps(r))
+                self.db.execute(f"INSERT OR REPLACE INTO {bursts} VALUES ({','.join('?' * len(row))})", row)
             # What the twins' real data sent for review: the queue's cost per beam, across the survey.
             for o in result.get('others', []):
                 if o['type'] in ('candidate', 'dispersed'):
-                    self.db.execute('INSERT INTO others VALUES (?,?,?,?,?,?,?,?,?)',
-                                    (o['twin'], batch['name'], batch['source'], batch['fingerprint'], o['type'],
-                                     o['dm'], o['snr'], o['width'], o.get('time')))
+                    row = extra + (o['twin'], batch['name'], batch['source'], batch['fingerprint'], o['type'],
+                                   o['dm'], o['snr'], o['width'], o.get('time'))
+                    self.db.execute(f"INSERT INTO {others} VALUES ({','.join('?' * len(row))})", row)
 
     def finish(self, batch, state):
         for s in self.rows('SELECT * FROM samples WHERE batch=?', batch['name']):
@@ -354,8 +405,17 @@ def completeness(bursts, key, edges):
     return out
 
 
-def report(lane, source=None, fingerprint=None):
-    sql, args = 'SELECT * FROM bursts WHERE 1=1', []
+def report(lane, source=None, fingerprint=None, variant=None, since=None):
+    """Completeness of the lane's bursts, production's or a variant's (with the real candidates per twin each queued),
+    from batches started at or after `since` (unix time) when given, so a variant meets production on the same days."""
+    table = 'variant_bursts' if variant else 'bursts'
+    sql, args = f'SELECT * FROM {table} WHERE 1=1', []
+    if variant:
+        sql += ' AND variant=?'
+        args.append(variant)
+    if since:
+        sql += ' AND batch IN (SELECT name FROM batches WHERE started >= ?)'
+        args.append(since)
     if source:
         sql += ' AND source=?'
         args.append(source)
@@ -372,6 +432,15 @@ def report(lane, source=None, fingerprint=None):
     for b in bursts:
         stages[b['stage']] = stages.get(b['stage'], 0) + 1
     lines.append('  stages: ' + ', '.join(f'{k} {v}' for k, v in sorted(stages.items(), key=lambda kv: -kv[1])))
+    twins = {b['twin'] for b in bursts}
+    if twins:
+        others = 'variant_others' if variant else 'others'
+        counts = {}
+        for kind, twin in lane.db.execute(f'SELECT type, twin FROM {others}'):
+            if twin in twins:
+                counts[kind] = counts.get(kind, 0) + 1
+        lines.append(f'  real candidates per twin ({len(twins)} twins): '
+                     + (', '.join(f'{k} {v / len(twins):.2f}' for k, v in sorted(counts.items())) or 'none'))
     return '\n'.join(lines)
 
 
@@ -381,6 +450,8 @@ def main(argv=None):
     p.add_argument('--root', type=Path, default=ROOT)
     p.add_argument('--source', choices=SOURCES)
     p.add_argument('--fingerprint')
+    p.add_argument('--variant', choices=sorted(VARIANTS))
+    p.add_argument('--since', help='only batches started at or after this UTC date, YYYY-MM-DD[THH:MM]')
     a = p.parse_args(argv)
     lane = Lane(a.root)
     if a.command == 'tick':
@@ -388,7 +459,12 @@ def main(argv=None):
     elif a.command == 'status':
         print(json.dumps(lane.status(), indent=1))
     else:
-        print(report(lane, a.source, a.fingerprint))
+        since = None
+        if a.since:
+            import calendar
+            fmt = '%Y-%m-%dT%H:%M' if 'T' in a.since else '%Y-%m-%d'
+            since = calendar.timegm(time.strptime(a.since, fmt))
+        print(report(lane, a.source, a.fingerprint, a.variant, since))
 
 
 if __name__ == '__main__':

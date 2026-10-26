@@ -148,3 +148,48 @@ def test_a_finished_batch_is_followed_to_its_fates_and_its_twins_go(tmp_path):
     assert ln.rows('SELECT state FROM batches')[0]['state'] == 'done'
     assert 'reached the review queue' in injections.report(ln)
     assert ln.status()['real candidates per twin'] == {'dispersed': 1.0}
+
+
+def test_every_second_lt5_batch_tries_the_variant_and_keeps_its_results_apart(tmp_path):
+    import yaml
+    ln, o = lane(tmp_path)
+    o['settings']['lta'].write_text(yaml.safe_dump({'classification': {'min_snr': 8.0, 'dispersed': {'min_snr': 8.0,
+                                                    'min_votes': 1}}, 'dedispersion_plan': [{'low_dm': 0.0}]}))
+    ready_twins(ln, o, injections.BATCH)
+    first = ln.dispatch(popen=lambda *a, **k: None)
+    assert first.endswith('-lta') and injections.variant_of(first) is None
+    with ln.db:
+        ln.db.execute("UPDATE batches SET state='done'")
+    ready_twins(ln, o, injections.BATCH, start=injections.BATCH)
+    launched = []
+    second = ln.dispatch(popen=lambda *a, **k: launched.append(a))
+    assert second.endswith('-lta-gate7') and injections.variant_of(second) == 'gate7'
+    settings = ln.root / 'batches' / second / 'settings.yaml'
+    assert str(settings) in launched[0][0][2]
+    changed = yaml.safe_load(settings.read_text())
+    assert changed['classification']['min_snr'] == 7.0 and changed['classification']['dispersed'] == {
+        'min_snr': 7.0, 'min_votes': 1} and changed['dedispersion_plan'] == [{'low_dm': 0.0}]
+    # Its fates by its own gate, and its results in the variant's tables only.
+    (ln.root / 'logs' / f'{second}.log.exit').write_text('0\n')
+    ln.collect()
+    node, command, log = ln.started[-1]
+    assert str(settings) in command
+    twin = Path(ln.rows('SELECT twin FROM samples WHERE batch=? LIMIT 1', second)[0]['twin'])
+    burst = {'twin': twin.stem, 'index': 0, 'dm': 500.0, 'tau135': 0.01, 'width': 0.001, 'snr_ideal': 9.0,
+             'spectrum': 'flat', 'stage': 'candidate', 'cluster': {'snr': 7.4}, 'queued': True}
+    (ln.root / 'fates' / f'{second}.json').write_text(json.dumps({'bursts': [burst], 'others': [
+        {'twin': twin.stem, 'type': 'candidate', 'dm': 40.0, 'snr': 7.2, 'width': 9, 'time': 3.0}]}))
+    Path(str(log) + '.exit').write_text('0\n')
+    assert ln.collect() == [second]
+    assert ln.rows('SELECT * FROM bursts') == [] and ln.rows('SELECT * FROM others') == []
+    assert ln.rows('SELECT variant, queued FROM variant_bursts') == [{'variant': 'gate7', 'queued': 1}]
+    text = injections.report(ln, variant='gate7')
+    assert '1 injected bursts, 1 reached the review queue' in text and 'candidate 1.00' in text
+    assert injections.report(ln).startswith('0 injected bursts')
+    # Stopped by VARIANT_EVERY 0.
+    injections.VARIANT_EVERY, saved = 0, injections.VARIANT_EVERY
+    try:
+        assert ln.next_variant('lta') is None
+    finally:
+        injections.VARIANT_EVERY = saved
+    assert ln.next_variant('spider') is None
