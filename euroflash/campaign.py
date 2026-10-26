@@ -992,12 +992,12 @@ class Campaign:
                         late += 1
                         continue
                     if beams and all(b.stem in unusable for b in beams):
-                        # Nothing to search once masked: excluded like the incoherent beam, not retried.
+                        # Nothing to search (masked throughout, or a truncated recording): excluded like the incoherent beam, not retried.
                         empty += 1
                         for path in beams:
                             path.unlink(missing_ok=True)
                         self.state.set_file(f['surl'], state='excluded',
-                                            detail=f'no usable data in {run_name}: every sample masked')
+                                            detail=f'no usable data in {run_name}: masked throughout or too short to search')
                         self.state.event('excluded', f['name'], f'no usable data in {run_name}')
                         continue
                     if not beams or any(b.stem not in succeeded for b in beams):

@@ -193,6 +193,27 @@ def wrap_contaminated_samples(dm, nu_min, nu_max, tsamp, downsample=1):
     return int(np.ceil(delay / (tsamp * downsample)))
 
 
+def unsearchable_trial(plan, nsamp, tsamp, nu_min, nu_max):
+    """(dm, polluted, total) of the first trial of a DM plan whose dispersion sweep leaves fewer than two samples
+    of a beam this long (the condition on which run_all_matched_filtering gives up), or None when every trial fits.
+
+    A truncated recording cannot be searched with the survey's plan: six beams of L632735 and L632747, 448-1,664
+    samples long, failed the single-pulse search at DM 1000-1900 and left their SAPs for a person (25 October 2026).
+    """
+    from lotaas_reprocessing.dm_plan import dm_values
+    for entry in plan:
+        downsample = int(entry['downsample'])
+        total = nsamp // downsample
+        dms = dm_values(entry)
+        if not dms:
+            continue
+        dm = max(dms)
+        polluted = wrap_contaminated_samples(dm, nu_min, nu_max, tsamp, downsample)
+        if total - polluted < 2:
+            return dm, polluted, total
+    return None
+
+
 def run_matched_filtering(data_file, tsamp, dm, downsample=1, detection_threshold=5,
                           seed=0, valid_samples=None, max_duration=600,
                           baseline_seconds=None, baseline_widths=64, merge=False):

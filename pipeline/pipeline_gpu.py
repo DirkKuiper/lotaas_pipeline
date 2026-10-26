@@ -66,6 +66,15 @@ if __name__ == "__main__":
     t = np.arange(nsamp) * tsamp
     nu = np.flipud(fil.frequencies)
     print(f"Read {nsamp} samples, {nchan} channels of {fname}")
+    # Too short for the survey's DM plan (a truncated recording): an outcome, not a failure
+    # (lotaas_reprocessing.outcomes), found before any work is done on it.
+    from lotaas_reprocessing.matched_filter import unsearchable_trial
+    short = unsearchable_trial(settings["dedispersion_plan"], nsamp, tsamp, float(np.min(nu)), float(np.max(nu)))
+    if short:
+        from lotaas_reprocessing.outcomes import NO_USABLE_DATA
+        print(f"No usable data: {nsamp} samples ({nsamp * tsamp:.1f} s) are shorter than the dispersion sweep at "
+              f"DM {short[0]:g} ({short[1]} of {short[2]} samples at its resolution)", flush=True)
+        sys.exit(NO_USABLE_DATA)
 
     # RFI mask timeseries length
     block_size = settings["rfi_block_size"]

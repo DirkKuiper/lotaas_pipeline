@@ -707,3 +707,50 @@ def test_the_dm_zero_trial_is_not_searched_after_the_zero_dm_filter(tmp_path):
 
     assert {0.0, 5.0} <= found()
     assert found(preprocessing={'zero_dm': True}) == {5.0}
+
+
+def test_a_beam_shorter_than_the_dm_plans_sweep_is_found_unsearchable(tmp_path):
+    """A truncated recording cannot be searched with the survey's DM plan; the GPU stage reports it as unusable
+    before any work (L632735 SAP000 B027: 26,624 samples, 209 s, against a 330 s sweep at DM 3020)."""
+    import yaml
+    from lotaas_reprocessing.matched_filter import (
+        run_all_matched_filtering, unsearchable_trial, wrap_contaminated_samples)
+    plan = yaml.safe_load((Path(__file__).parents[1] / 'ops/production-settings.yaml').read_text())['dedispersion_plan']
+    tsamp, lo, hi = 0.00786432, 119.45, 151.04
+    assert unsearchable_trial(plan, 457000, tsamp, lo, hi) is None            # an hour
+    dm, polluted, total = unsearchable_trial(plan, 26624, tsamp, lo, hi)
+    assert dm >= 2000 and total - polluted < 2
+    # The same condition as the search's own: one sample more than the sweep at the plan's top fits.
+    small = [{'low_dm': 0., 'high_dm': 200., 'ddm': 50., 'downsample': 1}]
+    sweep = wrap_contaminated_samples(150., lo, hi, tsamp)
+    assert unsearchable_trial(small, sweep + 1, tsamp, lo, hi) is not None
+    assert unsearchable_trial(small, sweep + 2, tsamp, lo, hi) is None
+    trials = tmp_path / 'DM_trials'
+    trials.mkdir()
+    np.zeros(sweep + 1, dtype='float32').tofile(trials / 'beam_DM150.0.dat')
+    with pytest.raises(ValueError, match='exceeds the observation'):
+        run_all_matched_filtering(trials, tsamp, str(tmp_path), {}, small, nu_min=lo, nu_max=hi)
+
+
+def test_the_gpu_stage_exits_unusable_on_a_truncated_beam(tmp_path):
+    import subprocess, sys, yaml
+    from lotaas_reprocessing.outcomes import NO_USABLE_DATA
+    root = Path(__file__).parents[1]
+    nchan, nsamp, tsamp = 16, 2000, 0.00786432
+    fil = tmp_path / 'short.fil'
+    header = {'telescope_id': 11, 'machine_id': 11, 'data_type': 1, 'source_name': 'x', 'src_raj': 0.0, 'src_dej': 0.0,
+              'tstart': 58000.0, 'tsamp': tsamp, 'nbits': 32, 'fch1': 151.04, 'foff': -(151.04 - 119.45) / nchan,
+              'nchans': nchan, 'nifs': 1}
+    from lotaas_reprocessing.filterbank import create_filterbank_file
+    fb = create_filterbank_file(str(fil), header, nbits=32)
+    try:
+        fb.append_spectra(np.ones((nsamp, nchan), dtype='float32'))
+    finally:
+        fb.close()
+    settings = yaml.safe_load((root / 'ops/production-settings.yaml').read_text())
+    (tmp_path / 'settings.yaml').write_text(yaml.safe_dump(settings))
+    result = subprocess.run([sys.executable, str(root / 'pipeline/pipeline_gpu.py'), str(fil), str(tmp_path / 'out'),
+                             '--settings', str(tmp_path / 'settings.yaml'), '--backend', 'cpu'], capture_output=True, text=True,
+                            cwd=root, env={**os.environ, 'PYTHONPATH': str(root)})
+    assert result.returncode == NO_USABLE_DATA, result.stdout[-2000:] + result.stderr[-2000:]
+    assert 'shorter than the dispersion sweep' in result.stdout

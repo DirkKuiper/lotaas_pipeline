@@ -233,7 +233,8 @@ class Runner:
         except Exception as error:
             from lotaas_reprocessing.outcomes import NO_USABLE_DATA
             if isinstance(error, subprocess.CalledProcessError) and error.returncode == NO_USABLE_DATA:
-                self.ledger.finish(attempt, error='no usable data: every sample masked', status='unusable')
+                self.ledger.finish(attempt, error='no usable data: masked throughout or shorter than the DM sweep '
+                                   f'(see {log})', status='unusable')
                 raise UnusableBeam(f'{stage}: no usable data in {item}; log: {log}') from None
             self.ledger.finish(attempt, error=str(error))
             reason = f' ({error})' if isinstance(error, StageTimeout) else ''
