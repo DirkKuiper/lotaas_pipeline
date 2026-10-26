@@ -1363,3 +1363,14 @@ def test_an_archive_at_another_lta_site_is_taken_as_stageit_reports_it(tmp_path,
     states = [r['state'] for r in campaign.state.rows("SELECT state FROM files WHERE state!='excluded' ORDER BY beam")]
     assert asked == [] and states[:10] != ['requested'] * 10 and states[10:] == ['requested'] * (len(states) - 10)
     assert C.surf_dcache(surl('1000001', 0, 1)) and not C.surf_dcache(psnc + 'x.tar')
+
+
+def test_poznan_downloads_trust_the_polish_grid_ca_and_nothing_else_changes():
+    import ssl
+    from staging.grid_ca import context_for, POLISH_GRID_CA_2019
+    context = context_for('https://webdav.lofar.psnc.pl:8443/lt5_004/447296/x.tar')
+    assert isinstance(context, ssl.SSLContext) and context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert any('Polish Grid CA 2019' in str(c.get('subject')) for c in context.get_ca_certs())
+    assert context_for('https://webdav.grid.surfsara.nl:2882/lt5_004/x.tar') is None
+    assert context_for('https://lofar.psnc.pl.example.org/x') is None
+    assert POLISH_GRID_CA_2019.startswith('-----BEGIN CERTIFICATE-----')

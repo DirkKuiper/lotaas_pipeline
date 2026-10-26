@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from staging.client import tokens_for_url
+from staging.grid_ca import context_for
 
 
 def open_with_any(url, tokens, headers):
@@ -28,8 +29,11 @@ def open_with_any(url, tokens, headers):
     refusals = []
     for token in tokens:
         try:
+            # A site's grid CA only where its servers need it (staging.grid_ca): the default store elsewhere.
+            context = context_for(url)
+            extra = {'context': context} if context is not None else {}
             return urlopen(Request(url, headers=dict(headers, Authorization='Bearer ' + token)),
-                           timeout=120)
+                           timeout=120, **extra)
         except HTTPError as error:
             if error.code not in (401, 403):
                 raise
