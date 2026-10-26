@@ -276,6 +276,13 @@ def missing_central_beams(files):
     return [b for b in CENTRAL if b not in present]
 
 
+def surf_dcache(url):
+    """Whether SURF's dCache namespace API can say where this archive is (staging.dcache.locality)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ''
+    return '/pnfs/grid.sara.nl/' in parts.path and (host.endswith('grid.sara.nl') or host.endswith('surfsara.nl'))
+
+
 class Campaign:
     def __init__(self, options, api=None, locate=None, runner=None):
         self.o = options
@@ -481,8 +488,18 @@ class Campaign:
                     except (KeyError, ValueError) as error:
                         self.retry(f, error)
                         continue
-                    where = self.locate(f['surl'], tokens[0])
-                    if where in ('ONLINE', 'ONLINE_AND_NEARLINE'):
+                    if not surf_dcache(f['surl']):
+                        # Only SURF's dCache can be asked where a file is (staging.dcache). An archive at another
+                        # LTA site is taken as StageIT reports it: on 26 October 2026 the first Poznan ones
+                        # (L447288_SAP002; 888 LT5_004 archives are there) crashed the driver at each start for 2 h.
+                        where = 'STAGEIT_ONLINE' if f['name'] in online else 'STAGEIT_WAITING'
+                    else:
+                        try:
+                            where = self.locate(f['surl'], tokens[0])
+                        except ValueError as error:      # never let one URL stop the campaign
+                            self.state.event('locality_failed', f['name'], error)
+                            where = 'UNKNOWN'
+                    if where in ('ONLINE', 'ONLINE_AND_NEARLINE', 'STAGEIT_ONLINE'):
                         self.state.set_file(f['surl'], state='online', locality=where, checked=now)
                     else:
                         self.state.set_file(f['surl'], locality=where, checked=now)

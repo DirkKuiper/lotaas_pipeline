@@ -1338,3 +1338,28 @@ def test_stalled_missing_leaves_the_lost_beam_limit_alone(tmp_path, monkeypatch)
     settle(campaign)
     sap = campaign.state.rows('SELECT state,detail FROM saps')[0]
     assert sap == {'state': 'attention', 'detail': f'central beams not retrieved: {lost}'}
+
+
+def test_an_archive_at_another_lta_site_is_taken_as_stageit_reports_it(tmp_path, monkeypatch):
+    # 26 October 2026: L447288_SAP002's archives are at Poznan, where SURF's dCache cannot be asked; the real
+    # locality call raised ValueError on their URLs and crashed the driver at every start.
+    from staging.dcache import pnfs_path
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)])
+    asked = []
+
+    def locate(url, token):
+        asked.append(url)
+        pnfs_path(url)                          # raises for a URL outside SURF's namespace, as production's does
+        return where.get(C.basename(url), 'NEARLINE')
+    campaign.locate = locate
+    campaign.tick()
+    psnc = 'srm://lta-head.lofar.psnc.pl:8443/lofar/ops/projects/lt5_004/'
+    with campaign.state.db() as db:
+        for r in db.execute('SELECT surl FROM files').fetchall():
+            db.execute('UPDATE files SET surl=? WHERE surl=?', (psnc + r[0].split('/projects/lt5_004/')[1], r[0]))
+    for beam in FULL[:10]:
+        api.online.add(C.basename(surl('1000001', 0, beam)))
+    campaign.tick()
+    states = [r['state'] for r in campaign.state.rows("SELECT state FROM files WHERE state!='excluded' ORDER BY beam")]
+    assert asked == [] and states[:10] != ['requested'] * 10 and states[10:] == ['requested'] * (len(states) - 10)
+    assert C.surf_dcache(surl('1000001', 0, 1)) and not C.surf_dcache(psnc + 'x.tar')
