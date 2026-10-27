@@ -178,13 +178,16 @@ def test_every_second_lt5_batch_tries_the_variant_and_keeps_its_results_apart(tm
     burst = {'twin': twin.stem, 'index': 0, 'dm': 500.0, 'tau135': 0.01, 'width': 0.001, 'snr_ideal': 9.0,
              'spectrum': 'flat', 'stage': 'candidate', 'cluster': {'snr': 7.4}, 'queued': True}
     (ln.root / 'fates' / f'{second}.json').write_text(json.dumps({'bursts': [burst], 'others': [
-        {'twin': twin.stem, 'type': 'candidate', 'dm': 40.0, 'snr': 7.2, 'width': 9, 'time': 3.0}]}))
+        {'twin': twin.stem, 'type': 'candidate', 'dm': 40.0, 'snr': 7.2, 'width': 9, 'time': 3.0, 'page': 5.1,
+         'noise': True}]}))
     Path(str(log) + '.exit').write_text('0\n')
     assert ln.collect() == [second]
     assert ln.rows('SELECT * FROM bursts') == [] and ln.rows('SELECT * FROM others') == []
     assert ln.rows('SELECT variant, queued FROM variant_bursts') == [{'variant': 'gate7', 'queued': 1}]
     text = injections.report(ln, variant='gate7')
     assert '1 injected bursts, 1 reached the review queue' in text and 'candidate 1.00' in text
+    assert ln.rows('SELECT page, noise FROM variant_others') == [{'page': 5.1, 'noise': 1}]
+    assert 'left open by the web' in text and text.rstrip().endswith('none')
     assert injections.report(ln).startswith('0 injected bursts')
     # Stopped by VARIANT_EVERY 0.
     injections.VARIANT_EVERY, saved = 0, injections.VARIANT_EVERY
@@ -193,3 +196,13 @@ def test_every_second_lt5_batch_tries_the_variant_and_keeps_its_results_apart(tm
     finally:
         injections.VARIANT_EVERY = saved
     assert ln.next_variant('spider') is None
+
+
+def test_an_older_lane_gains_the_page_columns(tmp_path):
+    ln, o = lane(tmp_path)
+    with ln.db:
+        ln.db.execute('DROP TABLE others')
+        ln.db.execute('CREATE TABLE others (twin TEXT, batch TEXT, source TEXT, fingerprint TEXT, type TEXT, '
+                      'dm REAL, snr REAL, width INTEGER, time REAL)')
+    again = injections.Lane(ln.root, o)
+    assert {'page', 'noise'} <= {r[1] for r in again.db.execute('PRAGMA table_info(others)')}

@@ -22,6 +22,10 @@ from lotaas_reprocessing.own_data import measure
 
 # web.triage's noise rule on a queued candidate's page S/N (28 September 2026).
 LOCAL_MIN, LOCAL_FRACTION, LOCAL_CLEAR, SEARCH_MIN = 4.0, 0.6, 6.0, 7.0
+# web.triage's rule for FETCH positives below the S/N FETCH was asked about from 28 September 2026: under it, a
+# candidate whose page S/N is under LOCAL_CLEAR is noise. Production asks FETCH from S/N 8, so only a variant with a
+# lower gate (gate7) meets it; it is recorded beside the fates, not folded into 'queued'.
+FETCH_GATE = 8.0
 QUEUED = ('candidate', 'dispersed')
 TIME_SLACK, DM_SLACK, DM_FRACTION = 0.5, 10.0, 0.1
 
@@ -31,6 +35,13 @@ def noise_rule(page, search_snr):
     if not isinstance(page, (int, float)) or search_snr < SEARCH_MIN:
         return False
     return page < LOCAL_MIN or (page < LOCAL_FRACTION * search_snr and page < LOCAL_CLEAR)
+
+
+def gate_rule(kind, page, search_snr):
+    """True when web.triage's below-gate rule would call a queued candidate noise: a FETCH positive under FETCH_GATE
+    whose page S/N is under LOCAL_CLEAR."""
+    return (kind == 'candidate' and isinstance(page, (int, float)) and search_snr < FETCH_GATE
+            and page < LOCAL_CLEAR)
 
 
 def detections(run_dir):
@@ -110,6 +121,7 @@ def fates(run_dir, truth_dir, settings, sources=None):
                     if x['detection_type'] in QUEUED and source is not None:
                         rec['page'] = page_snr(source, c, meta, settings)
                         rec['noise'] = noise_rule(rec['page'], c['snr'])
+                        rec['gate_noise'] = gate_rule(x['detection_type'], rec['page'], c['snr'])
                 else:
                     rec['stage'] = 'below S/N gate' if c['snr'] <= gate else 'not classified'
             rec['queued'] = rec['stage'] in QUEUED and not rec.get('noise', False)
@@ -117,8 +129,15 @@ def fates(run_dir, truth_dir, settings, sources=None):
         for x in dets:
             if x['id'] not in used and not any(abs((x.get('time_seconds') or -1e9) - b['peak_time']) <= 2.0
                                                for b in truth['bursts']):
-                others.append({'twin': item, 'type': x['detection_type'], 'dm': x['candidate_dm'], 'snr': x['snr'],
-                               'width': x['width_samples'], 'time': x.get('time_seconds')})
+                o = {'twin': item, 'type': x['detection_type'], 'dm': x['candidate_dm'], 'snr': x['snr'],
+                     'width': x['width_samples'], 'time': x.get('time_seconds')}
+                # What the review page would show of it, and whether the web's rules would settle it there: the
+                # queue's cost per beam after triage, not only what the classifier passed on (27 October 2026).
+                if o['type'] in QUEUED and source is not None and o['time'] is not None:
+                    o['page'] = page_snr(source, {'dm': o['dm'], 'time': o['time'], 'width': o['width']}, meta,
+                                         settings)
+                    o['noise'] = noise_rule(o['page'], o['snr']) or gate_rule(o['type'], o['page'], o['snr'])
+                others.append(o)
     return bursts, others
 
 

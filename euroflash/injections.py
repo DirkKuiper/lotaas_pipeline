@@ -61,12 +61,12 @@ CREATE TABLE IF NOT EXISTS samples (sap TEXT PRIMARY KEY, source TEXT, beam INTE
 CREATE TABLE IF NOT EXISTS batches (name TEXT PRIMARY KEY, source TEXT, node TEXT, checkout TEXT, fingerprint TEXT,
     settings TEXT, started REAL, finished REAL, state TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS others (twin TEXT, batch TEXT, source TEXT, fingerprint TEXT, type TEXT, dm REAL,
-    snr REAL, width INTEGER, time REAL);
+    snr REAL, width INTEGER, time REAL, page REAL, noise INTEGER);
 CREATE TABLE IF NOT EXISTS bursts (twin TEXT, idx INTEGER, sap TEXT, batch TEXT, source TEXT, fingerprint TEXT,
     dm REAL, tau135 REAL, width REAL, snr_ideal REAL, spectrum TEXT, stage TEXT, search_snr REAL, own_snr REAL,
     dispersion_ratio REAL, fetch REAL, page REAL, queued INTEGER, record TEXT, PRIMARY KEY (twin, idx));
 CREATE TABLE IF NOT EXISTS variant_others (variant TEXT, twin TEXT, batch TEXT, source TEXT, fingerprint TEXT,
-    type TEXT, dm REAL, snr REAL, width INTEGER, time REAL);
+    type TEXT, dm REAL, snr REAL, width INTEGER, time REAL, page REAL, noise INTEGER);
 CREATE TABLE IF NOT EXISTS variant_bursts (variant TEXT, twin TEXT, idx INTEGER, sap TEXT, batch TEXT, source TEXT,
     fingerprint TEXT, dm REAL, tau135 REAL, width REAL, snr_ideal REAL, spectrum TEXT, stage TEXT, search_snr REAL,
     own_snr REAL, dispersion_ratio REAL, fetch REAL, page REAL, queued INTEGER, record TEXT, PRIMARY KEY (twin, idx));
@@ -139,6 +139,11 @@ class Lane:
         self.db.executescript(SCHEMA)
         if 'attempts' not in {r[1] for r in self.db.execute('PRAGMA table_info(samples)')}:
             self.db.execute('ALTER TABLE samples ADD COLUMN attempts INTEGER DEFAULT 0')
+        for table in ('others', 'variant_others'):          # page S/N and the web's verdict, from 27 October 2026
+            have = {r[1] for r in self.db.execute(f'PRAGMA table_info({table})')}
+            for column, kind in (('page', 'REAL'), ('noise', 'INTEGER')):
+                if column not in have:
+                    self.db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
     def rows(self, sql, *args):
         return [dict(r) for r in self.db.execute(sql, args)]
@@ -371,8 +376,10 @@ class Lane:
             # What the twins' real data sent for review: the queue's cost per beam, across the survey.
             for o in result.get('others', []):
                 if o['type'] in ('candidate', 'dispersed'):
+                    page = o.get('page') if isinstance(o.get('page'), (int, float)) else None
+                    noise = int(bool(o['noise'])) if page is not None and 'noise' in o else None
                     row = extra + (o['twin'], batch['name'], batch['source'], batch['fingerprint'], o['type'],
-                                   o['dm'], o['snr'], o['width'], o.get('time'))
+                                   o['dm'], o['snr'], o['width'], o.get('time'), page, noise)
                     self.db.execute(f"INSERT INTO {others} VALUES ({','.join('?' * len(row))})", row)
 
     def finish(self, batch, state):
@@ -432,15 +439,27 @@ def report(lane, source=None, fingerprint=None, variant=None, since=None):
     for b in bursts:
         stages[b['stage']] = stages.get(b['stage'], 0) + 1
     lines.append('  stages: ' + ', '.join(f'{k} {v}' for k, v in sorted(stages.items(), key=lambda kv: -kv[1])))
+    # The web's below-gate rule (injection_fates.gate_rule) would settle these of the queued, were the gate lower.
+    settled = sum(1 for b in bursts if b['queued'] and json.loads(b['record'] or '{}').get('gate_noise'))
+    if settled:
+        lines.append(f'  of the queued, {settled} the web\'s below-gate rule (search S/N < 8, page '
+                     f'S/N < 6) would call noise: lower it with the gate')
     twins = {b['twin'] for b in bursts}
     if twins:
         others = 'variant_others' if variant else 'others'
-        counts = {}
-        for kind, twin in lane.db.execute(f'SELECT type, twin FROM {others}'):
+        counts, left, measured = {}, {}, 0
+        for kind, twin, page, noise in lane.db.execute(f'SELECT type, twin, page, noise FROM {others}'):
             if twin in twins:
                 counts[kind] = counts.get(kind, 0) + 1
+                if noise is not None:
+                    measured += 1
+                    if not noise:
+                        left[kind] = left.get(kind, 0) + 1
         lines.append(f'  real candidates per twin ({len(twins)} twins): '
                      + (', '.join(f'{k} {v / len(twins):.2f}' for k, v in sorted(counts.items())) or 'none'))
+        if measured:
+            lines.append(f'  of them with a page S/N ({measured}), left open by the web\'s noise rules: '
+                         + (', '.join(f'{k} {v}' for k, v in sorted(left.items())) or 'none'))
     return '\n'.join(lines)
 
 

@@ -52,3 +52,20 @@ def test_the_noise_rule_is_the_web_triage_s():
     assert injection_fates.noise_rule(3.9, 10.0) and not injection_fates.noise_rule(6.5, 20.0)
     assert injection_fates.noise_rule(5.0, 10.0) and not injection_fates.noise_rule(6.1, 10.0)
     assert not injection_fates.noise_rule(3.0, 6.5)          # below the search S/N the rule looks at
+
+
+def test_a_queued_real_candidate_gets_its_page_snr_and_the_web_s_verdict(tmp_path):
+    root, burst = searched_twin(tmp_path, 'dispersed')
+    item = 'downsampled_L1_SAP000_BEAM001_32bit_ff'
+    with sqlite3.connect(root / 'run' / 'efc-cpu-00' / 'ledger-snapshot.sqlite') as db:
+        db.execute("UPDATE detections SET detection_type='candidate', snr=7.4 WHERE id=2")
+    bursts, others = injection_fates.fates(root / 'run', root / 'truth', {'dedispersion_plan': PLAN}, root / 'sources')
+    (o,) = others
+    assert o['type'] == 'candidate' and isinstance(o['page'], float) and o['page'] < 6 and o['noise']
+    assert not bursts[0]['gate_noise']                        # S/N 24: above any gate
+
+
+def test_the_below_gate_rule_is_the_web_triage_s():
+    assert injection_fates.gate_rule('candidate', 5.9, 7.5) and not injection_fates.gate_rule('candidate', 6.1, 7.5)
+    assert not injection_fates.gate_rule('candidate', 5.0, 8.0) and not injection_fates.gate_rule('dispersed', 5.0, 7.5)
+    assert not injection_fates.gate_rule('candidate', 'error: past the end', 7.5)
