@@ -53,7 +53,7 @@ periodicity:
   # its strongest distinct peaks and a crowded beam sifts its strongest; the
   # numbers dropped are recorded in the coverage report and summary.
   max_candidates_per_trial: 100
-  max_candidates_per_beam: 20000
+  max_candidates_per_beam: 400000
   max_sift_comparisons: 200000000
   max_folds: 16
   fold_bins: 64

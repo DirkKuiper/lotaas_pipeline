@@ -36,11 +36,22 @@ DEFAULTS = {
     # searched. A trial with more peaks keeps its strongest distinct ones, and
     # a beam with more sifts its strongest; both counts are recorded. Aborting
     # instead let one bright pulsar (J0323+3944, up to 1,190 peaks per trial)
-    # end the search at DM 25.7 with nothing above it covered.
+    # end the search at DM 25.7 with nothing above it covered. The beam limit
+    # covers every trial's peaks of a full plan (3,802 x 100); at 20,000 it cut
+    # pulsars from 16.6% of beams (27 October 2026).
     "max_candidates_per_trial": 100,
-    "max_candidates_per_beam": 20000,
+    "max_candidates_per_beam": 400000,
     "max_sift_comparisons": 200000000,
+    # Sifted-best signals per beam, strongest first (those flagged as interference last): the ones the cross-beam
+    # veto judges and the fold shortlist reads, so their trials are kept until the fold. A crowded beam holds
+    # hundreds to thousands of signals (5,444 at most in 8,043 replayed beams), and the veto over all of them took
+    # up to 124 s per observation on the head. At 256 the replay's folds reached rank 255, and a 128 limit lost
+    # J2337+6151 (catalogue fold log10 p -123, on-axis) in an interference-heavy beam.
+    "max_sifted_signals": 256,
     "max_folds": 16,
+    # Peaks below this DM fold after the rest (periodicity_folding.shortlist). The main search's data are
+    # zero-DM filtered, so what it finds below DM 1 is interference residue; the slow pass sets 0.
+    "fold_low_dm_last": 0.0,
     "fold_bins": 64,
     "fold_subintegrations": 32,
     "catalogue_match": True,
@@ -70,12 +81,14 @@ def resolved_config(config=None):
                 "sift_period_fraction", "rfi_tolerance_bins"):
         if not np.isfinite(result[key]) or result[key] <= 0:
             raise ValueError(f"periodicity.{key} must be finite and positive")
+    if not np.isfinite(result["fold_low_dm_last"]) or result["fold_low_dm_last"] < 0:
+        raise ValueError("periodicity.fold_low_dm_last must be finite and not negative")
     if result["period_max_seconds"] <= result["period_min_seconds"] or result["threshold"] > 100:
         raise ValueError("Invalid periodicity period limits or threshold (maximum 100)")
     if result["sift_period_fraction"] > .1:
         raise ValueError("sift_period_fraction must not exceed 0.1")
     for key in ("red_noise_window_bins", "max_candidates_per_trial", "max_candidates_per_beam",
-                "max_sift_comparisons", "fold_bins", "fold_subintegrations"):
+                "max_sift_comparisons", "max_sifted_signals", "fold_bins", "fold_subintegrations"):
         if int(result[key]) != result[key] or result[key] < 1:
             raise ValueError(f"periodicity.{key} must be a positive integer")
     if result["red_noise_window_bins"] < 31 or not 8 <= result["fold_bins"] <= 256:
@@ -286,13 +299,69 @@ def _harmonic_relation(a, b, tolerance):
     return 2 <= nearest <= 16 and abs(ratio - nearest) <= tolerance * nearest
 
 
+# A peak at a whole fraction 1/n of a signal's period (n up to this) sums that signal's own harmonics.
+HARMONIC_LIMIT = 16
+# A harmonic sum at T collects a source of period P wherever its j-th harmonic meets the source's i-th,
+# T = (j / i) P. Aliases from the source's strongest harmonics, i up to ALIAS_DENOMINATOR, count as the source:
+# with them the replay of 8,043 beams (27 October 2026) folded 13% fewer peaks for the same pulsars found.
+ALIAS_DENOMINATOR = 4
+
+
+@lru_cache(maxsize=8)
+def _alias_ratios(longest):
+    """Sorted period ratios row / source that fold the source again: m/n longer (m up to `longest`, the
+    highest harmonic sum) and n/m shorter (m up to HARMONIC_LIMIT), n up to ALIAS_DENOMINATOR."""
+    ratios = {m / n for n in range(1, ALIAS_DENOMINATOR + 1) for m in range(1, longest + 1)}
+    ratios |= {n / m for n in range(1, ALIAS_DENOMINATOR + 1) for m in range(1, HARMONIC_LIMIT + 1)}
+    return np.array(sorted(ratios))
+
+
+def _span(row):
+    return row.get("signal_dm_min", row["dm"]), row.get("signal_dm_max", row["dm"])
+
+
+def same_source(row, other, config):
+    """Whether folding `row` would show the source of the stronger peak `other` again.
+
+    Their DM spans (signal_dm_min/max, as sift_candidates writes them) overlap within the sift's DM tolerance,
+    and either their frequencies lie within 1.1 Fourier bins (at long periods a bin is far wider than
+    sift_period_fraction: 230-290 s red noise made a dozen 'signals'), or row's period is an alias of other's
+    (_alias_ratios: a whole multiple up to the highest harmonic sum, a whole fraction up to HARMONIC_LIMIT, and
+    those over 2-4), within sift_period_fraction.
+    """
+    tolerance = max(config["sift_dm_tolerance"], 1.01 * max(row.get("dm_step", 0.), other.get("dm_step", 0.)))
+    (low, high), (other_low, other_high) = _span(row), _span(other)
+    if low > other_high + tolerance or other_low > high + tolerance:
+        return False
+    resolution = max(row.get("frequency_resolution_hz") or 0., other.get("frequency_resolution_hz") or 0.)
+    if abs(1 / row["period_seconds"] - 1 / other["period_seconds"]) <= 1.1 * resolution:
+        return True
+    ratio = row["period_seconds"] / other["period_seconds"]
+    ratios = _alias_ratios(max(HARMONIC_LIMIT, max(config.get("harmonics") or [1])))
+    k = int(np.searchsorted(ratios, ratio))
+    fraction = config["sift_period_fraction"]
+    return any(abs(ratio / ratios[j] - 1) <= fraction for j in (k - 1, k) if 0 <= j < len(ratios))
+
+
 def sift_candidates(candidates, config):
-    """Connected groups, with explicit work limits and edge-based annotations."""
+    """Signals: one period's peaks over neighbouring DM trials, joined. Harmonics are annotated, not joined.
+
+    Each signal's strongest peak is its sifted best (for the strongest max_sifted_signals); the cross-beam veto
+    judges each, and the fold shortlist (periodicity_folding.shortlist) passes over a signal that would fold a
+    source it already holds (same_source).
+
+    Until 27 October 2026 harmonics (up to 16) were joined too, transitively, and a whole group folded only
+    its strongest peak. In beams with red noise or the requantiser's 24.16 s steps those groups grew to
+    thousands of peaks over every period, and a pulsar ended up in one led by a step or red-noise period:
+    J2029+3744 (P 1.2168 s, statistic 82.8 at its period) sat in a group of 1,820 led by 24.336 s = 20 P
+    (88.7), which the cross-beam veto then removed as the step period it is in 57 beams. A slow-pass beam with
+    8,112 peaks became one group. Joining over DM only keeps a signal's run, and an interference line over all
+    trials, as one; nothing joins two periods, so no chain can carry a pulsar away.
+    """
     if len(candidates) > config["max_candidates_per_beam"]:
         raise RuntimeError("Periodicity beam candidate limit exceeded")
     parent = list(range(len(candidates)))
     nearby = [False] * len(candidates)
-    harmonic_flags = [False] * len(candidates)
 
     def find(i):
         while parent[i] != i:
@@ -308,14 +377,15 @@ def sift_candidates(candidates, config):
     indexes = {}
     comparisons = 0
     # Vectorize exact comparisons inside dense buckets. A bright pulsar can
-    # produce thousands of harmonic/DM neighbours without being pathological.
+    # produce thousands of DM neighbours without being pathological.
     periods = np.asarray([r["period_seconds"] for r in candidates])
     dms = np.asarray([r["dm"] for r in candidates])
     steps = np.asarray([r.get("dm_step", 0.) for r in candidates])
     for i, left in enumerate(candidates):
         dm_bucket = int(np.floor(left["dm"] / dm_tol))
         p = left["period_seconds"]
-        targets = [p] + [p*h for h in range(2,17)] + [p/h for h in range(2,17)]
+        # +/-2 covers the asymmetric relative tolerance of a ratio.
+        centre = int(np.floor(np.log(p) / scale))
         possible = set()
         for step, index in indexes.items():
             radius = max(dm_tol, 1.01 * steps[i], 1.01 * step)
@@ -324,11 +394,8 @@ def sift_candidates(candidates, config):
             first_dm = int(np.floor((left["dm"] - radius) / dm_tol))
             last_dm = int(np.floor((left["dm"] + radius) / dm_tol))
             for d in range(first_dm, last_dm + 1):
-                for target in targets:
-                    centre = int(np.floor(np.log(target) / scale))
-                    # +/-2 covers the asymmetric relative tolerance of a ratio.
-                    for b in range(centre - 2, centre + 3):
-                        possible.update(index["buckets"].get((d, b), ()))
+                for b in range(centre - 2, centre + 3):
+                    possible.update(index["buckets"].get((d, b), ()))
         comparisons += len(possible)
         if comparisons > config["max_sift_comparisons"]:
             raise RuntimeError("Periodicity sifting work limit exceeded; raw evidence retained")
@@ -338,10 +405,7 @@ def sift_candidates(candidates, config):
                                       1.01 * np.maximum(steps[i], steps[indices]))
             dm_close = np.abs(dms[i] - dms[indices]) <= local_dm_tol
             same = np.abs(p - periods[indices]) <= period_tol * np.minimum(p, periods[indices])
-            ratios = np.maximum(p, periods[indices]) / np.minimum(p, periods[indices])
-            nearest = np.rint(ratios)
-            harmonic = (nearest >= 2) & (nearest <= 16) & (np.abs(ratios-nearest) <= period_tol*nearest)
-            related = dm_close & (same | harmonic)
+            related = dm_close & same
             for j in indices[related]:
                 parent[find(i)] = find(int(j))
             different_dm = indices[related & (dms[i] != dms[indices])]
@@ -349,28 +413,50 @@ def sift_candidates(candidates, config):
                 nearby[i] = True
                 for j in different_dm:
                     nearby[int(j)] = True
-            harmonic_edges = indices[dm_close & harmonic]
-            if harmonic_edges.size:
-                harmonic_flags[i] = True
-                for j in harmonic_edges:
-                    harmonic_flags[int(j)] = True
         step = steps[i]
         if step not in indexes:
             indexes[step] = {"low_dm": left["dm"], "high_dm": left["dm"], "buckets": defaultdict(list)}
         index = indexes[step]
         index["low_dm"] = min(index["low_dm"], left["dm"])
         index["high_dm"] = max(index["high_dm"], left["dm"])
-        index["buckets"][(dm_bucket, int(np.floor(np.log(p)/scale)))].append(i)
+        index["buckets"][(dm_bucket, centre)].append(i)
     groups = defaultdict(list)
     for i in range(len(candidates)):
         groups[find(i)].append(i)
+    signals = sorted(groups.values(), key=min)
+    bests = [max(indices, key=lambda i: (not candidates[i]["rfi_like"], candidates[i]["statistic"]))
+             for indices in signals]
+    spans = [(float(dms[indices].min()), float(dms[indices].max())) for indices in signals]
+    # Annotation only: whether a signal is a whole harmonic (2-16) of another over overlapping DMs.
+    harmonic = [False] * len(signals)
+    by_period = defaultdict(list)
+    for s, i in enumerate(bests):
+        by_period[int(np.floor(np.log(periods[i]) / scale))].append(s)
+    for s, i in enumerate(bests):
+        for h in range(2, HARMONIC_LIMIT + 1):
+            centre = int(np.floor(np.log(periods[i] * h) / scale))
+            for b in range(centre - 2, centre + 3):
+                for t in by_period.get(b, ()):
+                    comparisons += 1
+                    j = bests[t]
+                    tolerance = max(dm_tol, 1.01 * max(steps[i], steps[j]))
+                    if (spans[s][0] <= spans[t][1] + tolerance and spans[t][0] <= spans[s][1] + tolerance
+                            and _harmonic_relation(candidates[i], candidates[j], period_tol)):
+                        harmonic[s] = harmonic[t] = True
+        if comparisons > config["max_sift_comparisons"]:
+            raise RuntimeError("Periodicity sifting work limit exceeded; raw evidence retained")
+    # The strongest max_sifted_signals keep a sifted best; the rest stay in the products, marked.
+    ranked = sorted(range(len(signals)), key=lambda s: (candidates[bests[s]]["rfi_like"], -candidates[bests[s]]["statistic"]))
+    kept = set(ranked[:config["max_sifted_signals"]])
     output=[]
-    for group, indices in enumerate(sorted(groups.values(),key=min)):
-        best=max(indices,key=lambda i:(not candidates[i]["rfi_like"], candidates[i]["statistic"]))
+    for group, indices in enumerate(signals):
+        best = bests[group] if group in kept else None
         for i in indices:
             row=dict(candidates[i],sift_group=group,sift_group_size=len(indices),is_sifted_best=i==best,
-                     relationships={"nearby_dm":nearby[i],"harmonic":harmonic_flags[i]})
-            row["sift_status"]="rfi_like" if row["rfi_like"] else ("best" if i==best else "related")
+                     signal_dm_min=spans[group][0],signal_dm_max=spans[group][1],
+                     relationships={"nearby_dm":nearby[i],"harmonic":harmonic[group]})
+            row["sift_status"]=("rfi_like" if row["rfi_like"] else "best" if i==best
+                                else "related" if group in kept else "signal_limit")
             output.append(row)
     return output
 
@@ -497,6 +583,8 @@ def search_periodicity(trial_dir, output_dir, metadata, config=None, prefix=""):
         "sift_input_limit":sift_limit,
         "candidates_not_sifted":sum(1 for r in sifted if r["sift_status"]=="not_sifted_beam_limit"),
         "sifted_candidates":len(sifted),"best_candidates":sum(r["is_sifted_best"] for r in sifted),
+        "signals":len({r["sift_group"] for r in sifted if r["sift_group"] is not None}),
+        "signals_over_limit":len({r["sift_group"] for r in sifted if r["sift_status"]=="signal_limit"}),
         "rfi_like_candidates":sum(r["rfi_like"] for r in candidates),
         "elapsed_seconds":time.perf_counter()-started,"cpu_seconds":time.process_time()-cpu_started,
         "stage_seconds":{"search":search_seconds,"sift":sift_seconds},

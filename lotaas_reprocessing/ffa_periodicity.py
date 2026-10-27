@@ -157,6 +157,8 @@ def search_ffa(trial_dir, output_dir, metadata, config=None):
                'configuration': dict(settings, fold=config), 'trials_searched': len(names),
                'raw_candidates': len(candidates), 'sifted_candidates': len(sifted),
                'best_candidates': sum(r['is_sifted_best'] for r in sifted), 'sift_input_limit': sift_limit,
+               'signals': len({r['sift_group'] for r in sifted if r['sift_group'] is not None}),
+               'signals_over_limit': len({r['sift_group'] for r in sifted if r['sift_status'] == 'signal_limit'}),
                'rfi_like_candidates': sum(r['rfi_like'] for r in candidates),
                'elapsed_seconds': time.perf_counter() - started, 'cpu_seconds': time.process_time() - cpu_started,
                'stage_seconds': {'search': search_seconds},

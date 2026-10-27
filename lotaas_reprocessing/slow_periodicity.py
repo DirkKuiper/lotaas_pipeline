@@ -35,6 +35,8 @@ DEFAULTS = {
     'max_folds': 16,
     # The catalogue folds run once, in the main search.
     'catalogue_fold': False,
+    # The point of this pass: no zero-DM filter, so a low DM is no reason to fold later (J0311+1402, DM 1.4).
+    'fold_low_dm_last': 0.0,
 }
 OWN = ('enabled', 'zero_dm', 'dm_plan')
 

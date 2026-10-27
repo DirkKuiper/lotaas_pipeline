@@ -80,10 +80,15 @@ def test_sifting_keeps_dm_mismatch_and_harmonic_relationships():
         row = dict(base, dm=dm, period_seconds=period, frequency_hz=1 / period, statistic=statistic)
         rows.append(row)
     sifted = sift_candidates(rows, config())
-    assert len({row["sift_group"] for row in sifted}) == 1
-    assert all(row["relationships"]["nearby_dm"] for row in sifted)
-    assert any(row["relationships"]["harmonic"] for row in sifted)
-    assert sum(row["is_sifted_best"] for row in sifted) == 1
+    # Two signals: the 2.5 s run over DM 100-100.5, and its harmonic at 5 s, annotated, not joined.
+    assert len({row["sift_group"] for row in sifted}) == 2
+    assert [row["relationships"]["nearby_dm"] for row in sifted] == [True, True, False]
+    assert all(row["relationships"]["harmonic"] for row in sifted)
+    assert sum(row["is_sifted_best"] for row in sifted) == 2
+    assert [(r["signal_dm_min"], r["signal_dm_max"]) for r in sifted] == [(100., 100.5)] * 2 + [(101., 101.)]
+    # The shortlist folds the source once.
+    from lotaas_reprocessing.periodicity_folding import shortlist
+    assert [r["period_seconds"] for r in shortlist(sifted, config(max_folds=16))] == [2.5]
 
 
 def test_periodic_dm_grid_assessment_exposes_coarse_ranges():
@@ -175,7 +180,7 @@ def test_gamma_scores_match_scipy_survival():
 def test_harmonic_sift_checks_adjacent_log_buckets():
     rows=[dict(dm=10.,period_seconds=p,statistic=s,rfi_like=False) for p,s in [(1.,10.),(2.01,9.)]]
     result=sift_candidates(rows,config())
-    assert len({r['sift_group'] for r in result})==1
+    assert len({r['sift_group'] for r in result})==2
     assert all(r['relationships']['harmonic'] for r in result)
 
 

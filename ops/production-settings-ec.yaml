@@ -80,12 +80,18 @@ periodicity:
   sift_dm_tolerance: 2.0
   sift_period_fraction: 0.001
   # Retention, not coverage: every template is searched. A crowded trial keeps
-  # its strongest distinct peaks and a crowded beam sifts its strongest; the
-  # numbers dropped are recorded in the coverage report and summary.
+  # its strongest distinct peaks; the numbers dropped are recorded in the
+  # coverage report and summary. A beam sifts all of its trials' peaks (3,802
+  # trials x 100) since 27 October 2026: at 20,000, 16.6% of beams sifted only
+  # their strongest, and 17 of 42 clearly seen pulsars the search missed lay
+  # below the cut (sifting joins a period over DM only, 69k peaks in 1.6 s).
   max_candidates_per_trial: 100
-  max_candidates_per_beam: 20000
+  max_candidates_per_beam: 400000
   max_sift_comparisons: 200000000
   max_folds: 16
+  # The data are zero-DM filtered: a peak below DM 1 is interference residue, folded after the rest (the slow
+  # pass, without the filter, keeps 0).
+  fold_low_dm_last: 1.0
   fold_bins: 64
   fold_subintegrations: 32
   catalogue_match: true

@@ -165,11 +165,40 @@ def plot_fold(path,fold,candidate,metadata,dm_curve,subbands=None,band_limits=No
     partial=path.with_name(path.stem+'.partial.png');fig.savefig(partial,dpi=140);plt.close(fig);os.replace(partial,path)
 
 
+def shortlist(candidates,config):
+    """The sifted-best peaks to fold, at most max_folds: strongest first; those flagged as interference, and
+    those below fold_low_dm_last, after the rest.
+
+    Peaks the cross-beam veto found in many beams never take a fold slot, and neither does a peak that would
+    show again the source of a stronger peak, chosen or vetoed (periodicity.same_source: within a Fourier bin,
+    or an alias of its period, at an overlapping DM): an alias of interference is interference. Harmonics are
+    judged here, after the veto, not joined in the sift: a step or red-noise period that a pulsar's harmonic
+    sum lifts above the pulsar is vetoed on its own and leaves the pulsar its slot (J2029+3744, 1/20 of 24.336 s).
+
+    With the sift of 27 October 2026 (periodicity.sift_candidates) the cross-beam veto judges every signal: in
+    the replay of 8,043 beams this kept 13 clearly seen pulsars production had not folded and lost 2 (far
+    sidelobes in an interference-heavy SAP); folds per beam went 0.52 -> 0.25 in clean beams and 0.80 -> 8.5
+    in those where the old sift had hit its 20,000-peak limit, which had folded almost nothing.
+    """
+    from .periodicity import same_source
+    low=config.get('fold_low_dm_last',0.0)
+    chosen,seen=[],[]
+    for row in sorted((r for r in candidates if r['is_sifted_best']),
+                      key=lambda r:(r['rfi_like'],r['dm']<low,-r['statistic'])):
+        if len(chosen)>=config['max_folds']:
+            break
+        if row.get('multibeam_rfi'):
+            seen.append(row)
+            continue
+        if not any(same_source(row,other,config) for other in seen):
+            chosen.append(row)
+            seen.append(row)
+    return chosen
+
+
 def fold_candidates(candidates,trial_dir,output_dir,metadata,config,prefix=''):
     from .periodicity import valid_trial
-    # Peaks the cross-beam veto found in many beams never take a fold slot.
-    best=sorted((r for r in candidates if r['is_sifted_best'] and not r.get('multibeam_rfi')),
-                key=lambda r:(r['rfi_like'],-r['statistic']))[:config['max_folds']]
+    best=shortlist(candidates,config)
     if not best:return []
     catalogue,status=catalogue_matches(metadata) if config['catalogue_match'] else ([], 'disabled')
     directory=Path(output_dir)/'periodicity_plots';directory.mkdir(exist_ok=True)
