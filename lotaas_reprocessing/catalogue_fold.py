@@ -27,6 +27,16 @@ the period, related to it by no small harmonic, measures what this beam gives
 a pulsar that is not there. 'seen' needs both: p below DETECTED_P after trials
 and above every control. A pulsar too fast for MIN_BINS bins at the trial's
 sampling is listed as such and not folded.
+
+A catalogue DM can be wrong by more than DM_RANGE: PSR J1848+0647 (ATNF 27.9
++/- 0.2) was found blind at DM 24.6 on 28 October 2026, smeared out at 27.9, and
+its fold here saw nothing. So a timed pulsar (the catalogue gives F1 and PEPOCH,
+'timed') is also folded over WIDE_DM (wide_pass): at its predicted topocentric
+period (fold_catalogue applies Earth's motion, 'doppler', from astropy: for
+J1848+0647 0.50592934 s against 0.50592992 s measured, 0.008 turns an hour), one
+fold per trial, with its own controls and trials. 'seen' keeps its meaning; the
+record gains 'wide', and 'dm_conflict' when the wide fold is seen at a DM
+outside DM_RANGE and WIDE_GAIN orders of magnitude better than the narrow one.
 """
 import json
 import math
@@ -45,7 +55,12 @@ HIGHPASS_TURNS = 10
 CLIP_SIGMA = 6.0
 CONTROL_FACTORS = (1.0371, 1.0713, 0.9417, 0.9613)
 DETECTED_P = 1e-3
-SCHEMA = 'lotaas.catalogue_fold.v1'
+WIDE_DM = (5.0, 0.2)
+WIDE_GAIN = 3.0
+WIDE_PERIOD_RANGE = 2e-5
+# The LOFAR core (CS002, ITRF metres): where the topocentric period is seen.
+LOFAR_CORE = (3826577.1, 461022.9, 5064892.8)
+SCHEMA = 'lotaas.catalogue_fold.v2'
 
 
 def log10_chi2_sf(chi2, dof):
@@ -113,9 +128,66 @@ class Folder:
         return best[0], best[1], n
 
 
-def fold_pulsar(pulsar, trials, load, dt_of):
+def wide_pass(pulsar, trials, load, dt_of, doppler):
+    """The fold of a timed pulsar over WIDE_DM of its catalogue DM at its predicted topocentric period.
+
+    One fold per trial (bins as fold_pulsar), the best by log10 p; the controls are the same folds at
+    CONTROL_FACTORS times the period; the trials are the DM trials folded. At the best trial the period is
+    scanned over WIDE_PERIOD_RANGE (an ephemeris extrapolated over years) and the trials grow by that scan.
+    Returns the 'wide' record, or None for a pulsar without a timing solution or Doppler factor.
+    """
+    if not pulsar.get('timed') or doppler is None:
+        return None
+    if float(pulsar.get('binary_doppler') or 0.0) > WIDE_PERIOD_RANGE:
+        return None   # an orbit moves the period beyond one fold's reach
+    period, dm = pulsar['period_seconds'] * (1.0 + doppler), pulsar['dm']
+    window = max(WIDE_DM[0], WIDE_DM[1] * dm)
+    best, controls, count = None, [0.0] * len(CONTROL_FACTORS), 0
+    for t_dm, name in trials:
+        if abs(t_dm - dm) > window:
+            continue
+        dt = dt_of(name)
+        bins = min(MAX_BINS, int(period / dt))
+        if bins < MIN_BINS:
+            continue
+        folder = Folder(prepared(load(name), dt, period), dt)
+        count += 1
+        value = log10_chi2_sf(folder.chi2(1.0 / period, bins), bins - 1)
+        if best is None or value < best[0]:
+            best = (value, t_dm, name, bins)
+        for i, factor in enumerate(CONTROL_FACTORS):
+            controls[i] = min(controls[i], log10_chi2_sf(folder.chi2(1.0 / (period * factor), bins), bins - 1))
+    if best is None:
+        return None
+    _, best_dm, name, bins = best
+    folder = Folder(prepared(load(name), dt_of(name), period), dt_of(name))
+    chi2, frequency, scanned = folder.scan(1.0 / period, bins, WIDE_PERIOD_RANGE)
+    log10p = log10_chi2_sf(chi2, bins - 1)
+    corrected = min(0.0, log10p + math.log10(count * scanned))
+    return {'dm_window': window, 'dm_trials': count, 'predicted_period': period, 'trial': name, 'dm': best_dm,
+            'bins': bins, 'period_found': 1.0 / frequency, 'log10p': log10p, 'trials': count * scanned,
+            'log10p_corrected': corrected, 'control_log10p': controls,
+            'seen': bool(corrected <= math.log10(DETECTED_P) and log10p < min(controls))}
+
+
+def fold_pulsar(pulsar, trials, load, dt_of, doppler=None):
     """The fold record of one catalogued pulsar. trials: [(dm, name)] of searchable periodic trials;
-    load(name) -> valid samples of that trial; dt_of(name) -> its sampling in seconds."""
+    load(name) -> valid samples of that trial; dt_of(name) -> its sampling in seconds; doppler: the
+    fractional topocentric shift of the period (P seen = P (1 + doppler)), for wide_pass."""
+    record = fold_narrow(pulsar, trials, load, dt_of)
+    if record.get('status') not in ('folded', 'no trial within the DM range'):
+        return record
+    wide = wide_pass(pulsar, trials, load, dt_of, doppler)
+    if wide is None:
+        return record
+    narrow = record.get('log10p', 0.0) if record.get('status') == 'folded' else 0.0
+    conflict = (wide['seen'] and abs(wide['dm'] - pulsar['dm']) > max(DM_RANGE[0], DM_RANGE[1] * pulsar['dm'])
+                and wide['log10p'] <= narrow - WIDE_GAIN)
+    return dict(record, wide=wide, dm_conflict=bool(conflict))
+
+
+def fold_narrow(pulsar, trials, load, dt_of):
+    """fold_pulsar's fold within DM_RANGE of the catalogue DM, the period scanned over PERIOD_RANGE."""
     period, dm = pulsar['period_seconds'], pulsar['dm']
     record = dict(pulsar)
     near = sorted((abs(t_dm - dm), t_dm, name) for t_dm, name in trials
@@ -164,6 +236,25 @@ def fold_pulsar(pulsar, trials, load, dt_of):
                 control_log10p=controls, seen=bool(seen), profile=[round(float(v), 3) for v in profile])
 
 
+def earth_doppler(pulsar, metadata):
+    """The fractional shift of a pulsar's period seen from LOFAR at mid-observation (P seen = P (1 + d)),
+    from astropy's barycentric radial-velocity correction; None without its position, the start or astropy."""
+    ra, dec, mjd = pulsar.get('ra_deg'), pulsar.get('dec_deg'), metadata.get('tstart_mjd')
+    if ra is None or dec is None or not mjd:
+        return None
+    try:
+        from astropy import units as u
+        from astropy.coordinates import EarthLocation, SkyCoord
+        from astropy.time import Time
+        seconds = float(metadata.get('samples_processed') or 0) * float(metadata.get('tsamp') or 0)
+        velocity = SkyCoord(ra, dec, unit=u.deg).radial_velocity_correction(
+            kind='barycentric', obstime=Time(float(mjd) + seconds / 2 / 86400, format='mjd'),
+            location=EarthLocation.from_geocentric(*LOFAR_CORE, unit=u.m))
+        return -float(velocity.to(u.km / u.s).value) / 299792.458
+    except Exception:
+        return None
+
+
 def fold_catalogue(trial_dir, output_dir, metadata, catalogue=None):
     """Fold every catalogued pulsar near the beam; writes catalogue_folds.json and returns its records."""
     from .periodicity import valid_trial
@@ -189,7 +280,7 @@ def fold_catalogue(trial_dir, output_dir, metadata, catalogue=None):
     records = []
     for pulsar in catalogue:
         try:
-            records.append(fold_pulsar(pulsar, trials, load, dt_of))
+            records.append(fold_pulsar(pulsar, trials, load, dt_of, earth_doppler(pulsar, metadata)))
         except Exception as error:   # one pulsar's failure must not lose the others
             records.append(dict(pulsar, status=f'failed: {type(error).__name__}: {error}'))
     result = {'schema': SCHEMA, 'catalogue_status': status, 'pulsars': records}

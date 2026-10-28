@@ -385,10 +385,43 @@ def settled_keys(verdicts):
     return frozenset(key for key, label in verdicts.items() if label in SETTLED)
 
 
+# A source on the web layer's /findings page (reviews.sqlite, table findings) with this latest status: the
+# candidates its record cites as evidence keep their beams' data. J1848+0647's beam (its DM 24.6 against the
+# catalogue's 27.9) was released minutes after its fold was judged 'known', before the DM scan could be
+# repeated on the pipeline's own trials (28 October 2026).
+CITED_STATUSES = ('finding', 'follow_up')
+
+
+def cited_keys(path):
+    """Candidate keys the latest /findings record of each source cites, for sources still a finding or to
+    follow up; empty without the table."""
+    path = Path(path) if path else None
+    if not path or not path.is_file():
+        return frozenset()
+    db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+    try:
+        latest = {}
+        for source, status, evidence in db.execute('SELECT source, status, evidence FROM findings ORDER BY created'):
+            latest[source] = (status, evidence)
+    except sqlite3.Error:
+        return frozenset()
+    finally:
+        db.close()
+    keys = set()
+    for status, evidence in latest.values():
+        if status in CITED_STATUSES:
+            try:
+                keys.update(k for k in json.loads(evidence or '[]') if isinstance(k, str))
+            except ValueError:
+                continue
+    return frozenset(keys)
+
+
 def reviewed_items(path, index, labels=('astro', 'unsure'), verdicts=None):
-    """Beams with a candidate whose latest verdict is among labels: never released."""
+    """Beams with a candidate whose latest verdict is among labels, or that a /findings record cites
+    (cited_keys): never released."""
     latest = latest_verdicts(path) if verdicts is None else verdicts
-    wanted = {key for key, label in latest.items() if label in labels}
+    wanted = {key for key, label in latest.items() if label in labels} | cited_keys(path)
     items = {key.split('|')[1] for key in wanted if not key.startswith('periodicity|') and key.count('|') >= 1}
     for item, beam in index.beams.items():
         if item and any(periodic_key(beam, fold) in wanted for fold in beam['folds']):

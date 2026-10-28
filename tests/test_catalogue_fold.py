@@ -88,3 +88,44 @@ def test_a_binarys_orbit_widens_the_period_it_is_looked_for_at():
     assert not fold_pulsar(psr, *single(series, dm=8.8))['seen']
     record = fold_pulsar(dict(psr, binary_doppler=2.9e-4), *single(series, dm=8.8))
     assert record['seen'] and abs(record['period_offset'] + 3.6e-4) < 3e-5 and record['period_spread'] > 4e-4
+
+
+def wide_trials(true_dm, period, amplitude, doppler, dms, seed=11):
+    """Trials over dms with the pulse sharp at true_dm and smeared away elsewhere (0.11 s a DM unit across the band)."""
+    series = {}
+    for k, dm in enumerate(dms):
+        smear = 0.111 * abs(dm - true_dm)
+        series[dm] = pulsar_series(period, amplitude * (0.02 / (0.02 + smear)), offset=doppler, seed=seed + k)
+    return [(dm, f'DM{dm}') for dm in dms], (lambda name: series[float(name[2:])]), (lambda name: TSAMP)
+
+
+def test_a_timed_pulsar_at_a_wrong_catalogue_dm_is_found_by_the_wide_fold():
+    # J1848+0647: catalogue DM 27.9, seen at 24.6 (28 October 2026).
+    psr = {'name': 'J1848+0647', 'dm': 27.9, 'period_seconds': 0.5059615, 'separation_deg': 0.0, 'timed': True}
+    dms = [round(22.0 + 0.1 * i, 1) for i in range(81)]
+    doppler = -6.3e-5
+    record = fold_pulsar(psr, *wide_trials(24.6, 0.5059615, 0.25, doppler, dms), doppler=doppler)
+    assert record['status'] == 'folded' and not record['seen'], 'smeared away at the catalogue DM'
+    wide = record['wide']
+    assert wide['seen'] and abs(wide['dm'] - 24.6) <= 0.2 and record['dm_conflict']
+    assert abs(wide["period_found"] / (0.5059615 * (1 + doppler)) - 1) < 2e-5   # 0.08 turns in 34 min
+    assert wide['log10p'] < min(wide['control_log10p'])
+
+
+def test_the_wide_fold_needs_a_timing_solution_and_noise_raises_no_conflict():
+    psr = {'name': 'J1848+0647', 'dm': 27.9, 'period_seconds': 0.5059615, 'separation_deg': 0.0, 'timed': True}
+    dms = [round(22.0 + 0.5 * i, 1) for i in range(17)]
+    noise = fold_pulsar(psr, *wide_trials(24.6, 0.5059615, 0.0, 0.0, dms), doppler=0.0)
+    assert not noise['wide']['seen'] and not noise['dm_conflict']
+    untimed = fold_pulsar(dict(psr, timed=False), *wide_trials(24.6, 0.5059615, 0.25, 0.0, dms), doppler=0.0)
+    assert 'wide' not in untimed and 'dm_conflict' not in untimed
+    at_its_dm = fold_pulsar(dict(psr, dm=24.6), *wide_trials(24.6, 0.5059615, 0.25, 0.0, dms), doppler=0.0)
+    assert at_its_dm['seen'] and at_its_dm['wide']['seen'] and not at_its_dm['dm_conflict']
+
+
+def test_earths_doppler_shift_predicts_j1848s_period():
+    pulsar = {'ra_deg': 282.2333750, 'dec_deg': 6.7921389}
+    metadata = {'tstart_mjd': 58169.33, 'samples_processed': 0, 'tsamp': TSAMP}
+    doppler = catalogue_fold.earth_doppler(pulsar, metadata)
+    # Measured blind in L641745 SAP000 B010: 0.5059299 s; the ephemeris gives 0.5059615 s at that epoch.
+    assert abs(0.5059615370 * (1 + doppler) - 0.5059299164) < 2e-6

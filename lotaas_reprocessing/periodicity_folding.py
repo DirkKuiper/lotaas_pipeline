@@ -67,8 +67,11 @@ def catalogue_matches(metadata):
             # A binary's orbit shifts the period it is seen at by up to 2 pi a sin i / (c Pb).
             a1,pb=row.get('A1',np.nan),row.get('PB',np.nan)
             doppler=float(2*np.pi*a1/(pb*86400)) if np.isfinite(a1) and np.isfinite(pb) and pb>0 else 0.
+            # A timing solution (F1, PEPOCH) predicts the period well enough for catalogue_fold.wide_pass.
+            timed=bool(epoch and np.isfinite(row.get('F1',np.nan)) and np.isfinite(row.get('PEPOCH',np.nan)))
             rows.append({'name':str(row.PSRJ),'dm':float(row.DM),'period_seconds':period,
-                         'separation_deg':float(beam.separation(position).deg),'binary_doppler':doppler})
+                         'separation_deg':float(beam.separation(position).deg),'binary_doppler':doppler,
+                         'ra_deg':float(position.ra.deg),'dec_deg':float(position.dec.deg),'timed':timed})
         return rows,'available'
     except Exception as error:
         # No live catalogue is required to search, fold, retain or review data.
