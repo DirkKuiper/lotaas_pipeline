@@ -53,6 +53,10 @@ REPO = Path(__file__).resolve().parents[1]
 CENTRAL = range(13, 74)
 # A SAP searched before its last beams arrived keeps its flatfield here for them.
 MEAN = 'flatfield-mean.npy'
+# Work waiting for a search is counted in beams, a whole SAP being 73 (beams 0-73 but the incoherent 12).
+SAP_BEAMS = 73
+# The most SAPs one cluster run takes when they are SAPs back for a few late beams each.
+MAX_RUN_SAPS = 40
 OUTSTANDING = ('pending', 'requested', 'online', 'working')
 FINAL = {'success', 'failed', 'aborted', 'partial success'}
 # StageIT errors that are not the file's: its own credential towards SURF's Tape REST API ("Stage pooling call
@@ -356,8 +360,7 @@ class Campaign:
         """Start staging further SAPs while every bound allows it."""
         free_tb = shutil.disk_usage(self.root).free / 1e12
         staging = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state='staging' AND source='lta'")[0]['n']
-        waiting = self.state.rows("SELECT COUNT(*) AS n FROM saps WHERE state IN ('prepared','dispatched') "
-                                  "AND source='lta'")[0]['n']
+        waiting = self.waiting_saps()
         limit = self.staging_limit()
         target = getattr(self.o, 'staging_files_target', 0)
         outstanding = self.state.rows("""SELECT COUNT(*) AS n FROM files f JOIN saps s ON s.key=f.sap_key
@@ -376,6 +379,17 @@ class Campaign:
             staging += 1
             outstanding += self.state.rows("SELECT COUNT(*) AS n FROM files WHERE sap_key=? AND state='pending'", key)[0]['n']
         return admitted + self.admit_spider(free_tb)
+
+    def waiting_saps(self):
+        """Prepared and dispatched LTA work in SAPs of 73 beams.
+
+        Counted in beams, not SAP rows: on 28 October 2026 SURF released some 1,800 late beams at once, each of ~250
+        partial SAPs came back as its own prepared SAP of 1-3 beams, and counted as 250 SAPs they stopped admission
+        for seven hours, leaving the GPUs idle for five more while the next SAPs came off tape.
+        """
+        beams = self.state.rows("""SELECT COUNT(*) AS n FROM files f JOIN saps s ON s.key=f.sap_key
+            WHERE s.state IN ('prepared','dispatched') AND s.source='lta' AND f.state='converted'""")[0]['n']
+        return beams / SAP_BEAMS
 
     def admit_spider(self, free_tb):
         """Take SPIDER SAPs while fewer than --spider-saps are being fetched or wait for a search.
@@ -898,14 +912,35 @@ class Campaign:
             if (self.gpu_busy(node) or on_node >= getattr(self.o, 'batches_per_node', 2)
                     or time.time() < self.dispatch_retry_after.get(node, 0)):
                 continue
-            ready = self.state.rows("SELECT * FROM saps WHERE state='prepared' ORDER BY position LIMIT ?",
-                                    self.o.dispatch_saps)
+            ready = self.next_batch()
             if not ready:
                 break
-            # One source per run: SPIDER SAPs are searched with their own settings.
-            ready = [s for s in ready if s.get('source') == ready[0].get('source')]
             started.append(self.start_dispatch(node, ready))
         return started or ('running' if self.dispatches else None)
+
+    def next_batch(self):
+        """Prepared SAPs for one cluster run, in queue order: --dispatch-saps SAPs' worth of beams (73 each).
+
+        A SAP back for its late beams brings only those, so several are packed into one run rather than each taking
+        a run of its own (28 October 2026: 868 runs of 1-3 beams in seven hours). Always at least one SAP; one source
+        per run, since SPIDER SAPs are searched with their own settings.
+        """
+        budget = self.o.dispatch_saps * SAP_BEAMS
+        batch, beams = [], 0
+        for sap in self.state.rows("""SELECT s.*, (SELECT COUNT(*) FROM files f WHERE f.sap_key=s.key
+                AND f.state='converted') AS beams FROM saps s WHERE s.state='prepared' ORDER BY s.position LIMIT ?""",
+                                   MAX_RUN_SAPS):
+            if batch and sap.get('source') != batch[0].get('source'):
+                continue
+            if batch and beams + sap['beams'] > budget:
+                break
+            batch.append(sap)
+            beams += sap['beams']
+            if beams >= budget:
+                break
+        for sap in batch:
+            sap.pop('beams', None)
+        return batch
 
     def start_dispatch(self, node, ready):
         base = time.strftime('campaign-%Y%m%d-%H%M%S-') + node.removeprefix('efc-').replace('-', '')
@@ -1385,7 +1420,8 @@ def parser():
     run.add_argument('--max-staging-saps', type=int, default=8, help='SAP requests in flight at once')
     run.add_argument('--staging-files-target', type=int, default=0,
                      help='Replenish outstanding files up to this target, bounded by max-staging-saps; 0 disables')
-    run.add_argument('--max-prepared-saps', type=int, default=20, help='Prepared SAPs allowed to wait for a search')
+    run.add_argument('--max-prepared-saps', type=int, default=20,
+                     help="Prepared SAPs' worth of beams (73 each) allowed to wait for a search")
     run.add_argument('--min-free-tb', type=float, default=5.0, help='Stop admitting SAPs below this free space')
     run.add_argument('--download-workers', type=int, default=4)
     run.add_argument('--files-per-worker', type=int, default=4, help='Files handed to each download worker at once')
@@ -1427,7 +1463,8 @@ def parser():
     run.add_argument('--staging-schedule', type=Path,
                      help='JSON phases that change --max-staging-saps at set times (the staging experiment)')
     run.add_argument('--dispatch-nodes', nargs='+', help='Search prepared SAPs on these GPU nodes')
-    run.add_argument('--dispatch-saps', type=int, default=2, help='SAPs per cluster run')
+    run.add_argument('--dispatch-saps', type=int, default=2,
+                     help="SAPs' worth of beams (73 each) per cluster run; SAPs back for a few late beams are packed")
     run.add_argument('--batches-per-node', type=int, default=2,
                      help='Runs per GPU node at once: one in its GPU stages, the others finishing on CPU nodes')
     run.add_argument('--cpu-nodes', nargs='+', help='Classify and search for periodicity on these CPU nodes')

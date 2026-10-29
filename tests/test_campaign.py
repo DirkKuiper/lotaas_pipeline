@@ -1374,3 +1374,52 @@ def test_poznan_downloads_trust_the_polish_grid_ca_and_nothing_else_changes():
     assert context_for('https://webdav.grid.surfsara.nl:2882/lt5_004/x.tar') is None
     assert context_for('https://lofar.psnc.pl.example.org/x') is None
     assert POLISH_GRID_CA_2019.startswith('-----BEGIN CERTIFICATE-----')
+
+
+def _prepare(campaign, key, beams, source=None):
+    """Mark a SAP prepared with these beams converted and waiting for a search; the rest searched."""
+    with campaign.state.db() as db:
+        db.execute("UPDATE saps SET state='prepared' WHERE key=?", (key,))
+        if source:
+            db.execute("UPDATE saps SET source=? WHERE key=?", (source, key))
+        db.execute("UPDATE files SET state='searched' WHERE sap_key=?", (key,))
+        for beam in beams:
+            db.execute("UPDATE files SET state='converted' WHERE sap_key=? AND beam=?", (key, beam))
+
+
+def test_admission_counts_waiting_work_in_beams_not_saps(tmp_path, monkeypatch):
+    # 28 October 2026: ~250 partial SAPs came back for 1-3 late beams each and, counted as SAPs, stopped
+    # admission for seven hours.
+    saps = [('1000001', s, FULL) for s in range(3)] + [('1000002', s, FULL) for s in range(3)] + \
+           [('1000003', s, FULL) for s in range(3)]
+    campaign, api, _ = build(tmp_path, monkeypatch, saps, max_staging_saps=2, max_prepared_saps=1)
+    for sap in range(3):
+        _prepare(campaign, f'L1000001_SAP{sap:03d}', [5])
+        _prepare(campaign, f'L1000002_SAP{sap:03d}', [7, 8])
+    assert campaign.waiting_saps() == pytest.approx(9 / 73)
+    assert len(campaign.admit()) == 2, 'nine SAPs back for late beams are a fraction of one SAP of work'
+    _prepare(campaign, 'L1000003_SAP002', [b for b in FULL if b != 12])
+    assert campaign.waiting_saps() == pytest.approx(82 / 73)
+    with campaign.state.db() as db:
+        db.execute("UPDATE saps SET state='pending' WHERE state='staging'")
+    assert campaign.admit() == [], 'a whole SAP of waiting beams still holds admission back'
+
+
+def test_saps_back_for_late_beams_are_packed_into_one_run(tmp_path, monkeypatch):
+    saps = [('1000001', s, FULL) for s in range(3)] + [('1000002', s, FULL) for s in range(3)]
+    campaign, api, _ = build(tmp_path, monkeypatch, saps, dispatch_saps=2)
+    full = [b for b in FULL if b != 12]
+    _prepare(campaign, 'L1000001_SAP000', [5])
+    _prepare(campaign, 'L1000001_SAP001', [7, 8])
+    _prepare(campaign, 'L1000001_SAP002', [20], source='spider')
+    _prepare(campaign, 'L1000002_SAP000', full)
+    _prepare(campaign, 'L1000002_SAP001', full)
+    batch = [s['key'] for s in campaign.next_batch()]
+    assert batch == ['L1000001_SAP000', 'L1000001_SAP001', 'L1000002_SAP000'], \
+        'late beams fill the run up to two SAPs of beams, one source per run'
+    assert all('beams' not in s for s in campaign.next_batch())
+    with campaign.state.db() as db:
+        db.execute("UPDATE saps SET state='dispatched' WHERE key IN ('L1000001_SAP000','L1000001_SAP001','L1000002_SAP000')")
+    assert [s['key'] for s in campaign.next_batch()] == ['L1000001_SAP002'], 'the SPIDER SAP gets a run of its own'
+    campaign.o.dispatch_saps = 0
+    assert len(campaign.next_batch()) == 1, 'a run always takes at least one SAP'
