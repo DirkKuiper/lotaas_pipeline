@@ -63,6 +63,11 @@ FINAL = {'success', 'failed', 'aborted', 'partial success'}
 # failed: HTTP 401 : Authentication Error") failed 42 of 98 requests whole on 16-18 October 2026, and four such
 # bounces in a row marked the 20 beams of L1235632_SAP001 failed. They are retried without counting a submission.
 NOT_THE_FILE = ('HTTP 401',)
+# A request StageIT fails whole without naming one error or online file is not the files' fault either: from about
+# 10:00 UTC on 2 November 2026 every SURF request, for any file of any project, failed so within a minute (a file SURF
+# lacks is named, "CacheException ... No such file"). Counted, it put ~125 SAPs to 'attention' in three hours. Its
+# files are retried uncounted, and no new request is submitted for this long, so StageIT is not asked ~400 times an hour.
+BLANK_FAILURE_PAUSE = 15 * 60
 NAME =re.compile(r'^L(\d+)_SAP(\d+)_B(\d+)_')
 # SPIDER SAPs are positioned after every LTA SAP: LT5_004 keeps first claim on the GPUs.
 SPIDER_POSITION = 10**6
@@ -305,6 +310,7 @@ class Campaign:
         self.runner = runner or self._runner()
         self.manifests = {}
         self.manifest_lock = threading.Lock()
+        self.requests_paused_until = 0.0     # after a request StageIT failed without a reason (BLANK_FAILURE_PAUSE)
         self.flatfield_pool = ThreadPoolExecutor(max_workers=max(1, getattr(options, 'flatfield_workers', 2)))
         self.flatfield_jobs = {}
         # Files being retrieved, {surl: (source, future)}, in a pool per source that outlives the pass.
@@ -420,6 +426,8 @@ class Campaign:
     def request(self):
         """Submit one StageIT request per staging SAP for its unrequested files."""
         submitted = []
+        if time.time() < self.requests_paused_until:
+            return submitted
         for sap in self.state.rows("SELECT key FROM saps WHERE state IN ('staging','partial') AND source='lta' "
                                    "ORDER BY position"):
             files = self.state.rows("SELECT surl,submissions FROM files WHERE sap_key=? AND state='pending'", sap['key'])
@@ -481,6 +489,11 @@ class Campaign:
                 db.execute('UPDATE requests SET status=?,checked=?,final_seen=? WHERE id=?',
                            (current, now, final_seen, request['id']))
             files = self.state.rows("SELECT * FROM files WHERE request_id=? AND state='requested'", request['id'])
+            if current == 'failed' and not online and not errors:
+                for f in files:
+                    self.retry(f, f'StageIT failed request {request["id"]} without naming an error', counted=False)
+                self.requests_paused_until = now + BLANK_FAILURE_PAUSE
+                continue
             for f in files:
                 if f['name'] in error_names:
                     message = messages.get(f['name'], '')

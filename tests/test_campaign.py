@@ -28,6 +28,7 @@ class FakeStageIT:
         self.requests, self.online, self.next = {}, set(), 5000
         self.final = False
         self.errors = {}                    # file name -> StageIT's error message for it
+        self.blank = False                  # every request fails whole, with an empty response (2 Nov 2026)
 
     def submit(self, surls):
         self.next += 1
@@ -35,6 +36,8 @@ class FakeStageIT:
         return self.next
 
     def status(self, request_id):
+        if self.blank:
+            return {'id': str(request_id), 'currentStatus': 'failed', 'response': '{}'}
         files = self.requests[request_id]
         online = [s for s in files if C.basename(s) in self.online]
         done = self.final or len(online) == len(files)
@@ -43,6 +46,8 @@ class FakeStageIT:
                 'response': json.dumps({'online': online, 'errors': errors})}
 
     def downloads(self, request_id):
+        if self.blank:
+            return {'request_id': request_id, 'urls': [''] * len(self.requests[request_id]), 'macaroons': []}
         return {'request_id': request_id,
                 'urls': [WEBDAV + s.split('/lt5_004/')[1] for s in self.requests[request_id]],
                 'macaroons': [{'content': 'token', 'validUntil': '2099-01-01', 'ltaSite': {'name': 'SURF'}}]}
@@ -1304,6 +1309,35 @@ def test_a_stageit_credential_failure_does_not_count_against_the_file(tmp_path, 
     put_online(api, where, '1000001', 0, [20])
     campaign.tick()
     assert campaign.state.rows('SELECT state FROM files WHERE name=?', bounced)[0]['state'] == 'converted'
+
+
+
+def test_a_request_stageit_fails_without_a_reason_is_retried_uncounted_after_a_pause(tmp_path, monkeypatch):
+    campaign, api, where = build(tmp_path, monkeypatch, [('1000001', 0, FULL)], max_submissions=2)
+    campaign.tick()
+    # As on 2 November 2026: every request 'failed' within a minute, response '{}', blank download URLs.
+    api.blank = True
+    campaign.tick()
+    files = campaign.state.rows("SELECT * FROM files WHERE state!='excluded'")
+    assert {f['state'] for f in files} == {'pending'} and {f['submissions'] for f in files} == {0}
+    assert campaign.requests_paused_until > time.time()
+    requests = len(api.requests)
+    for _ in range(3):                      # paused: StageIT is not asked again
+        campaign.tick()
+    assert len(api.requests) == requests
+    for _ in range(4):                      # each pause over, the next request fails the same way
+        campaign.requests_paused_until = 0
+        campaign.tick()
+    assert campaign.state.rows('SELECT state FROM saps')[0]['state'] == 'staging'
+    assert {f['submissions'] for f in campaign.state.rows("SELECT * FROM files WHERE state!='excluded'")} == {0}
+    # Once StageIT recovers, the files are staged as any other.
+    api.blank = False
+    campaign.requests_paused_until = 0
+    campaign.tick()
+    put_online(api, where, '1000001', 0, [20])
+    campaign.tick()
+    assert campaign.state.rows('SELECT state FROM files WHERE name=?',
+                               C.basename(surl('1000001', 0, 20)))[0]['state'] == 'converted'
 
 
 @pytest.mark.parametrize('stalled_missing, state', [(None, 'staging'), (15, 'prepared')])
